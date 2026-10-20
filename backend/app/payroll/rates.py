@@ -1,8 +1,8 @@
-"""DriverRate authoring, lifecycle, batch operations, and compatibility endpoint.
+"""Assignment-owned Status DriverRate authoring, lifecycle, and batch operations.
 
 Read-only catalog, matrix, and resolution queries live in rate_reads.
 Ordinary PayDefinition rates are authored through app.compensation schedules.
-The legacy rate-copy endpoint remains mounted but refuses copying.
+DD2 removed the legacy rate-copy route, service, and request/result contracts.
 """
 import json
 from datetime import date

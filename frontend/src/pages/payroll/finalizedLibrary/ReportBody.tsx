@@ -126,7 +126,7 @@ function DriverReport({
     <article className={styles.driverCard}>
       <div className={styles.driverHeading}>
         <div><strong>{driver.driver_name ?? 'Unnamed driver'}</strong><span>{driver.driver_number ?? '—'}</span></div>
-        <span className={styles.driverAssignmentId}>Driver ID {driver.driver_assignment_id}</span>
+        <span className={styles.driverAssignmentId}>Assignment ID {driver.driver_assignment_id}</span>
       </div>
       {showWork && (
         <section className={styles.subsection}>

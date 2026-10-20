@@ -1,6 +1,6 @@
 ## Plan: Durable Driver identity, Driver-owned compensation, payable rules
 
-**Order: Stage 1 → Stage 2 → Stage 3 → P4c.** All three stages must land before P4c, because P4c freezes driver identity, rate identity and payable amounts into evidence and the hash. Stage 1 (PR #57, migration `0087`) and Stage 2 (PR #58, migration `0088`) are merged; Stage 3 is implemented (no migration) and closes on merge.
+**Order: Stage 1 → Stage 2 → Stage 3 → P4c.** All three stages must land before P4c, because P4c freezes driver identity, rate identity and payable amounts into evidence and the hash. Stages 1–3 are CLOSED/merged: Stage 1 (PR #57, migration `0087`), Stage 2 (PR #58, migration `0088`), and Stage 3 (PR #59, no migration). Current baseline is `main @ 79ef2ab08864f37ea9fbb556256b3e90370b28c1`, Alembic head `0088`. P4c is next and has not started.
 
 ### The model (target)
 
@@ -157,7 +157,7 @@ Cancel and reschedule may re-capture the named assignment's eligibility row, wit
 
 - A permanently transferred Driver’s rates and Min/Max continue with zero manual steps when the new home pay calendar matches.
 - Temporary cross-branch work leaves the Driver’s home Min/Max calendar unchanged.
-- Nothing compensation-related is keyed by assignment.
+- Ordinary rate schedules and Min/Max are Driver-owned; legacy Status rates remain assignment-owned until P5.
 - One finalized guard protects every branch.
 - The copy route is gone.
 - A Min/Max rule whose recorded home pay calendar is incompatible with a payroll period blocks that period instead of being rescaled, dropped or duplicated (moved here from Stage 3, decision D6).
@@ -168,7 +168,7 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
 
 **Ownership**
 
-- Ordinary rate schedules, their values and `DriverPayRule`s are owned by the permanent Driver (`DriverID`). `DriverAssignmentID` and `BranchID` are removed from those tables. No compensation table has a foreign key to any `DriverAssignment`, and nothing is copied at transfer time.
+- Ordinary rate schedules, their values and `DriverPayRule`s are owned by the permanent Driver (`DriverID`). `DriverAssignmentID` and `BranchID` are removed from those tables. These ordinary schedule/value and pay-rule tables have no foreign key to a `DriverAssignment`; legacy Status rates remain assignment-owned, and nothing is copied at transfer time.
 - PayDefinitions stay company-owned. Branch applicability stays Branch-owned and is decided at calculation, where a missing value still blocks and zero is still legitimate.
 - Status rates (legacy `payroll.DriverRates` / `DriverRateTiers`, the status `RateType` runtime) stay assignment-owned. They keep the Stage 1 ended-assignment guard and its trigger. Status-owned target RateDefinitions are not authorable in Stage 2.
 - Temporary cross-branch work changes nothing here and is not built.
@@ -197,7 +197,7 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
 - **D7 Calendar identity.** The period grid only: frequency, anchor start date and custom interval days. The normal-days-off mask is not part of it.
 - **D8 Transfer into an incompatible calendar** is allowed. Payroll blocks later, and Pay Rates (and the transfer UI if cheap) warn "Min/Max needs reconciliation from <date>". Nothing is auto-ended and scheduling is not blocked.
 - **F5 Historical compensation is readable; ordinary historical mutation is refused** for everyone, including company-wide roles, judged at the mutation instant (wall clock after lock waits), in the same spirit as the approved Stage 1 rule.
-- **F6 / F7 Min/Max.** The rule records the Driver's home pay calendar as a compatibility key, never a rescaling basis, and there is no frequency conversion. A permanent home change, or a home Payroll Setup version change, to an incompatible calendar is a payroll blocker until an explicit rule edit. v1 semantics are unchanged (the rule effective at period start, full amount); no proration and no rounding.
+- **F6 / F7 Min/Max.** The rule records the Driver's home pay calendar as a compatibility key, never a rescaling basis, and there is no frequency conversion. A permanent home change, or a home Payroll Setup version change, to an incompatible calendar is a payroll blocker until an explicit rule edit. Stage 2 retained the v1 selection at period start and full amount without proration or rounding; Stage 3 now applies the recorded whole-day proration and official-component rounding below.
 
 **Calendar capture and compatibility**
 
@@ -206,29 +206,29 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
 
 **Authority context and mutation-instant enforcement**
 
-- A change's **start date** is the first date whose resolved compensation changes: schedule approve and void use the schedule's `EffectiveFrom` (a supersession tail starts there too); pay-rule create uses `EffectiveFrom`; pay-rule end uses the new `EffectiveTo` plus one day; pay-rule void uses `EffectiveFrom`; pending create and update use the pending `EffectiveFrom` (validated early for usability; approval is authoritative).
+- A change's **start date** is the first date whose resolved compensation changes: schedule approve and void use the schedule's `EffectiveFrom` (a supersession tail starts there too); pay-rule create uses `EffectiveFrom`; pay-rule end uses the day after the earlier of the old and new `EffectiveTo` (an open old end is unbounded), covering shortening and extension; pay-rule void uses `EffectiveFrom`; pending create and update use the pending `EffectiveFrom` (validated early for usability; approval is authoritative).
 - The **context assignment** is the latest-starting assignment of the Driver whose instant window overlaps that date's Branch-local day in the assignment's own Branch timezone, resolved by one SQL function, `core.fn_DriverAssignmentForBusinessDate`, never by a company or host clock. Authority is the existing rate-edit permission set on that assignment's Branch, or company-wide. The context assignment must exist and not be ended at the decision instant. A Scheduled transfer's materialized destination grants authority for dates from its `EffectiveAt` day; a transfer that is not yet Scheduled grants nothing. DRIVER/Self is denied everywhere, and permission is checked before any state is revealed.
 - One Driver-owned database trigger on `DriverRateSchedules` and `DriverPayRules` re-checks the context at `clock_timestamp()` for every row change that alters authoritative compensation (Pending to Approved, effective-end changes, voiding; pay-rule insert as Active, end changes, voiding) and raises the existing conflict `SQLSTATE FL001`. Pending-only value edits and Pending discard are exempt. The Stage 1 trigger stays on `DriverRates` and `DriverRateTiers` only.
 
 **Canonical finalized guard**
 
-- One helper, `payroll.fn_DriverFinalizedPayrollTouched(company, driver, footprint, mode)`, plus its Python wrapper, replaces the branch-only versions in `assignments.py`, `driver_pay_rules.py` and `payroll/guards.py`. A period counts as finalized when it is Locked or Archived and any DriverAssignment of the Driver has an eligibility row in it, in any Branch. Mode `WorkDate` (schedules) tests overlap of the period with the footprint; mode `PeriodStart` (pay rules) tests whether the period's start date is in the footprint. Footprints: schedule approve is `[from, max(to, prior.to)]` (unbounded when open); schedule void is its window; pay-rule create is `[from, to]`; pay-rule end is `[newTo + 1, oldTo]`; pay-rule void is its window. Refusal is a 422 with a stable code. Legacy status-rate writers keep their existing guard.
+- One helper, `payroll.fn_DriverFinalizedPayrollTouched(company, driver, footprint, mode)`, plus its Python wrapper `app.payroll.guards.require_no_finalized_payroll`, protects Driver-owned schedule approval/void in `compensation/schedules.py` and pay-rule create/end/void in `payroll/driver_pay_rules.py`. A period counts as finalized when it is Locked or Archived and any DriverAssignment of the Driver has an eligibility row in it, in any Branch. Mode `WorkDate` (schedules) tests overlap of the period with the footprint; mode `PeriodStart` (pay rules) tests whether the period's start date is in the footprint. Footprints: schedule approve is `[from, max(to, prior.to)]` (unbounded when open); schedule void is its window; pay-rule create is `[from, to]`; pay-rule end is `[min(oldTo, newTo) + 1, max(oldTo, newTo)]` (an open old end yields `[newTo + 1, infinity)`; equal ends give an empty footprint); pay-rule void is its window. Refusal is a 422 with `DRIVER_COMPENSATION_IN_FINALIZED_PERIOD`. Guard and workflow-lock discovery share `payroll.fn_DriverPayrollPeriodsForFootprint` over captured eligibility; current Branch timezone edits cannot remove a historical period from that predicate. Legacy status-rate writers keep their existing branch/date guard.
 
 **Lock order**
 
-- Every Driver-owned writer: authorize from an unlocked read, then the company currency row `FOR SHARE`, then the Driver's `core.DriverAssignments` rows `FOR SHARE` in ascending id, then Branch workflow advisory locks in ascending `BranchID` for every Branch whose tenure overlaps the footprint, then the RateDefinition structure lock, then schedule or rule rows `FOR UPDATE`, then the decision instant, then the finalized guard and context check, then the DML. This replaces the RateDefinition-first order, which would invert against period creation (workflow, then compensation configuration, then RateDefinition). It is checked against transfer and termination (Employee, request, assignments, workflow, periods), period creation, submit/finalize (currency, workflow) and payroll writers (currency, period row), and the lock-order documentation in `branch_compensation_config_concurrency.py` and `rate_definition_concurrency.py` is updated with it.
+- Every Driver-owned writer: authorize from an unlocked read, then the company currency row `FOR SHARE` for monetary writers, then the Driver's `core.DriverAssignments` rows `FOR SHARE` in ascending id, then (for writers with payroll effect) Branch workflow advisory locks in ascending `BranchID` for the union of live tenure Branches overlapping `[change start, infinity)` and Branches returned by `driver_payroll_period_branches` for the Driver's captured payroll periods of any status reaching that range, then the RateDefinition structure lock (skipped for pay rules), then schedule or rule rows `FOR UPDATE`, then the decision instant, then the finalized guard and context check, then the DML. This replaces the RateDefinition-first order, which would invert against period creation (workflow, then compensation configuration, then RateDefinition). It is checked against transfer and termination (Employee, request, assignments, workflow, periods), period creation, submit/finalize (currency, workflow) and payroll writers (currency, period row), and the lock-order documentation in `branch_compensation_config_concurrency.py` and `rate_definition_concurrency.py` is updated with it.
 
 **Resolver, runtime and retirement**
 
 - The resolver key is `(DriverID, RateDefinitionID, WorkDate)`; the result carries the Driver and the schedule id, not Branch or assignment. The live calculation maps each line's `DriverAssignmentID` to its `DriverID` and keeps `DriverAssignmentID` and `BranchID` on the line as provenance. Applicability remains the period's frozen definitions.
-- Min/Max selection is by `DriverID` at the period start (v1) plus the calendar blocker. The dashboard "drivers with no approved rate" count is re-keyed to the Driver, and the payroll-fact check for assignments no longer looks at schedule or pay-rule tables.
+- Min/Max selection remains by `DriverID` at the period start (v1), with the calendar blocker from Stage 2 and proration/rounding from Stage 3. The dashboard "drivers with no approved rate" count is re-keyed to the Driver, and the payroll-fact check for assignments no longer looks at schedule or pay-rule tables.
 - The legacy copy route `POST /payroll/driver-assignments/{target}/rates/copy-from/{source}`, `copy_driver_rates` and their request/result models are deleted. A test asserts that the route no longer exists.
 
 ---
 
 ### Stage 3: Payable rules in the live calculation
 
-**Status: IMPLEMENTED** (no migration). Decisions recorded below, after "Done when".
+**Status: CLOSED/merged — PR #59** (no migration). Decisions recorded below, after "Done when".
 
 **The leader leads to:**
 

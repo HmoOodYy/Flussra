@@ -101,7 +101,7 @@ If an issue is officially moved to a different work unit:
 * `FLUSSRA\_UNIFIED\_REFOUNDATION\_EXECUTION\_PLAN.md`
 * `PEOPLE\_WORKFORCE\_ACCESS\_ARCHITECTURE\_CONTRACT.md`
 * `PEOPLE\_AND\_ACCESS\_REFOUNDATION\_MASTER\_PLAN.md`
-* `DURABLE\_DRIVER\_IDENTITY\_DRIVER\_OWNED\_COMPENSATION\_PLAN.md` (active execution document for Durable Driver Stages 1–3)
+* `DURABLE\_DRIVER\_IDENTITY\_DRIVER\_OWNED\_COMPENSATION\_PLAN.md` (completed Durable Driver Stages 1–3 and their implemented contracts)
 
 **P1a:** CLOSED / merged.
 
@@ -131,13 +131,21 @@ If an issue is officially moved to a different work unit:
 
 **Branch timezone authority:** CLOSED / merged (PR #56; `main` at `8da533a5310485a790eac3da6a5ec040a60381ae`; migration `0086`).
 
-**Durable Driver Stage 1:** Current implementation work unit (permanent Driver + DriverAssignments; Stages 1–3 precede P4c; P6a is retired).
+**Durable Driver Stage 1:** CLOSED / merged (DD1, PR #57, migration `0087`; permanent Driver + DriverAssignments).
+
+**Durable Driver Stage 2:** CLOSED / merged (DD2, PR #58, migration `0088`; Driver-owned compensation; P6a is retired).
+
+**Durable Driver Stage 3:** CLOSED / merged (DD3, PR #59, no migration; payable rounding and proration).
+
+**Current baseline:** `main @ 79ef2ab08864f37ea9fbb556256b3e90370b28c1` (PR #59), Alembic head `0088`.
+
+**Next work unit:** P4c — NOT STARTED. P5, P7 and P8 also remain not started.
 
 **Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`. P3b merge baseline: `main` at the PR #46 merge, `edcf871f59d0616e194a8e752d9b6ba23f42b8a2`. P3c merge baseline: `main` at the PR #47 merge, `3f389499bbb1a0a70935360f32230f8e0aae4a7c`.
 
 **Test Hygiene:** PR #29 merged after P2c.
 
-**Migration heads:** pre-P3b `0081`; P3b `0082`; P3c `0083`; P4a advanced it to `0084`; P4b to `0085`; the Branch timezone authority to `0086`; Durable Driver Stage 1 advances it next.
+**Migration heads:** pre-P3b `0081`; P3b `0082`; P3c `0083`; P4a advanced it to `0084`; P4b to `0085`; the Branch timezone authority to `0086`; DD1 to `0087`; DD2 to `0088`; DD3 adds no migration.
 
 **Important rule:** Anything below marked `NOT YET` remains intentional architectural/product debt until the entry itself is updated to `YES`.
 
@@ -618,7 +626,7 @@ P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, en
 ## DWR-016 — Transfer Compensation Copy Is Deferred Until Target Compensation Exists
 
 **Issue:**  
-When a Driver moves to a new Branch, the product will eventually need an explicit option to copy compensation from the source Driver profile to the destination profile.
+Original proposal (superseded): when a Driver moves to a new Branch, offer an explicit option to copy compensation from the source Driver profile to the destination profile.
 
 **Discovered In:**  
 Transfer architecture planning.
@@ -630,17 +638,21 @@ Transfer architecture planning.
 Copying legacy DriverRates now and replacing them soon afterward would duplicate work and create another dependency on architecture that is already scheduled for retirement.
 
 **Current State:**  
-Transfers before P6a must not silently introduce new compensation-copy semantics.
+Resolved by DD2 / Driver-owned compensation (PR #58, migration `0088`). Ordinary rate schedules and Min/Max belong to the permanent Driver and continue across a permanent transfer without a copy. The transfer-copy design and P6a are retired; the legacy copy route, service and contracts are removed. Assignment-owned Status rates remain intentional until P5, whose transfer-binding criterion is tracked separately.
+
+Historical updates (preserved): transfers before the supersession must not silently introduce new compensation-copy semantics.
 
 Update 2026-10-18: The copy design is superseded and P6a is retired. Compensation will be owned by the permanent Driver (Durable Driver Stage 2), so a permanent transfer carries rates and Min/Max automatically; the transfer copy, its Yes/No choice and the legacy copy route are retired. Durable Driver Stage 1 introduces the permanent Driver and DriverAssignments and adds no compensation-copy semantics. The underlying need (a transferred Driver keeps its compensation) is delivered by Stage 2, so this entry stays NOT YET until Stage 2 is accepted.
 
 Update 2026-10-19: Durable Driver Stage 1 is merged (PR #57, migration `0087`) and Stage 2 (DD2) is the current work unit, with its decisions recorded in the Durable Driver plan (Stage 2 implementation decisions). Stage 2 moves ordinary rate schedules and Min/Max rules to the permanent Driver (`DriverRateSchedules`, `DriverRateScheduleValues`, `DriverPayRules`, migration `0088`), so no transfer-time copy exists, and deletes the legacy copy route. The Stage 2 implementation is not yet reviewed or accepted by the Lead, so this entry stays NOT YET; it becomes YES only when Stage 2 is accepted under the rules above.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-10-19
+**Resolved In:** DD2 — Driver-owned compensation (supersedes P6a)
+
+**Resolution Evidence:** PR #58, merge `95d5833737caa48cc00dc4b2c41637c2f1d7afc5`, migration `0088`; `backend/app/compensation/schedules.py`, `backend/app/payroll/driver_pay_rules.py`; `backend/tests/test_driver_owned_rate_schedules.py`, `backend/tests/test_driver_owned_pay_rules.py`, and the copy-route absence assertion in `backend/tests/test_payroll_route_contracts.py`
+
+**Last Updated:** 2026-10-20
 
 \---
 

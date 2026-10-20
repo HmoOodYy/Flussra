@@ -17,7 +17,6 @@ import {
 } from '../src/pages/people/pay-rates/payRatesDrivers.ts';
 import { buildHistoryRows } from '../src/pages/people/pay-rates/payRatesHistory.ts';
 import {
-  authoringRateDefinitionIds,
   buildPendingScheduleRows,
   canApprovePendingRow,
   canDiscardPendingRow,
@@ -104,10 +103,8 @@ test('the exact case: a retired definition\'s Pending schedule is discovered, di
   assert.equal(canApprovePendingRow(row, canEdit), false);
   // Even if the edit gate allowed, a retired definition is never approved.
   assert.equal(canApprovePendingRow(row, true), false);
-  // The Pending tab is offered and the retired definition is not an authoring choice.
+  // The Pending tab is offered even though the retired definition is absent from the matrix.
   assert.ok(visibleTabs(access).includes('pending'));
-  assert.deepEqual(authoringRateDefinitionIds(matrix), [ACTIVE]);
-  assert.ok(!authoringRateDefinitionIds(matrix).includes(RETIRED));
 });
 
 test('an Active Pending orphan (no tenure) can be discarded but not approved or edited', () => {

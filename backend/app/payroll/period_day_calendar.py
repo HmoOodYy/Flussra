@@ -43,7 +43,7 @@ async def _validate_period_work_date(
     3. Configured-off days (IsConfiguredOffDay=TRUE) are NOT rejected in CP-2B
        — IsScheduledWorkDay is metadata-only in this version.
 
-    Legacy periods (created before 0052, no day rows) fall back to step 1 only.
+    When no day rows exist, the retained fallback applies step 1 only.
     """
     if not (start_date <= work_date <= end_date):
         raise HTTPException(

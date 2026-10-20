@@ -85,9 +85,8 @@ async def _scheduled_work_days(period, db: AsyncConnection) -> set[date]:
             if row["isdefaultworkday"] or row["isaddedworkday"]
         }
 
-    # No PeriodDay snapshot exists for this period (predates canonical PeriodDay
-    # tracking, and predates the retired legacy schedule model too). With no
-    # calendar authority of any kind, every day in the period is scheduled.
+    # Retained fallback when no PeriodDay snapshot exists: treat every day
+    # within the period bounds as scheduled.
     days: set[date] = set()
     current = period.start_date
     while current <= period.end_date:

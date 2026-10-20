@@ -76,8 +76,3 @@ export function canApprovePendingRow(row: PendingScheduleRow, canEditDriver: boo
 export function canDiscardPendingRow(canDiscardDriver: boolean): boolean {
   return canDiscardDriver;
 }
-
-/** Authoring choices come from the matrix only, so a retired definition is never among them. */
-export function authoringRateDefinitionIds(matrixRows: DriverPayRateRow[]): number[] {
-  return matrixRows.map((row) => row.rate_definition_id);
-}
