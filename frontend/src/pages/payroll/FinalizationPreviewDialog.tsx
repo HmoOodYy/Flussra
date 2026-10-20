@@ -40,12 +40,6 @@ function fmtAdj(v: string, code: string, digits: number): string {
   return n >= 0 ? `+${abs}` : `-${abs}`;
 }
 
-function fmtQty(v: string | null | undefined): string {
-  if (v == null) return '-';
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 4 }) : String(v);
-}
-
 function hasNonZero(value: string): boolean {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric !== 0;
@@ -60,7 +54,11 @@ function previewError(error: unknown, fallback: string): string {
     if (detail.includes('APPROVED_SNAPSHOT_NOT_FOUND_FOR_FINALIZATION')) {
       return 'This approved payroll does not have a usable approved snapshot and cannot be finalized.';
     }
-    if (detail.includes('APPROVED_SNAPSHOT_INTEGRITY_ERROR')) {
+    if (
+      detail.includes('APPROVED_SNAPSHOT_INTEGRITY_ERROR')
+      || detail.includes('SNAPSHOT_HASH_MISMATCH')
+      || detail.includes('SNAPSHOT_INTEGRITY_ERROR')
+    ) {
       return 'The approved payroll packet could not be verified and cannot be finalized.';
     }
     return detail;
@@ -69,9 +67,14 @@ function previewError(error: unknown, fallback: string): string {
 }
 
 function lineLabel(line: FinalizationPreviewLine): string {
-  if (line.line_type === 'SYS_MIN_TOPUP') return 'Minimum top-up';
-  if (line.line_type === 'SYS_MAX_CAP') return 'Maximum cap';
-  return line.line_type;
+  switch (line.component_kind) {
+    case 'MINIMUM_ADJUSTMENT': return 'Minimum top-up';
+    case 'MAXIMUM_ADJUSTMENT': return 'Maximum cap';
+    case 'STATUS': return line.label ?? 'Status payment';
+    case 'BONUS': return 'Bonus';
+    case 'ORDINARY': return line.label ?? 'Ordinary pay';
+    default: return line.line_type;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -190,12 +193,8 @@ function LineDetailsTable({ rows, code, digits }: { rows: FinalizationPreviewLin
       <thead>
         <tr>
           <th>Driver</th>
-          <th>Date</th>
           <th>Type</th>
-          <th>Scope</th>
-          <th className={styles.numCol}>Qty</th>
-          <th className={styles.numCol}>Rate</th>
-          <th className={styles.numCol}>Calculated</th>
+          <th className={styles.numCol}>Before rounding</th>
           <th className={styles.numCol}>Final</th>
         </tr>
       </thead>
@@ -203,12 +202,8 @@ function LineDetailsTable({ rows, code, digits }: { rows: FinalizationPreviewLin
         {rows.map((r) => (
           <tr key={r.source_key}>
             <td className={styles.nameCell}>{r.driver_name ?? 'Unnamed driver'}</td>
-            <td className={styles.dateCell}>{r.work_date ?? '-'}</td>
             <td>{lineLabel(r)}</td>
-            <td>{r.line_scope}</td>
-            <td className={styles.numCol}>{fmtQty(r.quantity)}</td>
-            <td className={styles.numCol}>{fmt(r.rate_amount, code, digits)}</td>
-            <td className={styles.numCol}>{fmt(r.calculated_amount, code, digits)}</td>
+            <td className={styles.numCol}>{r.pre_rounding_amount ?? '-'}</td>
             <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(r.final_amount, code, digits)}</td>
           </tr>
         ))}

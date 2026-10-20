@@ -12,6 +12,7 @@ import type {
   ReviewItemDetail,
   ReviewItemSummary,
   ReviewPayrollSnapshot,
+  ReviewPayrollSnapshotComponent,
   ReviewPayrollSnapshotLine,
 } from '../types/review';
 import styles from './ReviewDetailDialog.module.css';
@@ -56,11 +57,19 @@ function statusLabel(status: string): string {
 }
 
 function lineLabel(line: ReviewPayrollSnapshotLine): string {
-  if (line.line_type === 'SYS_MIN_TOPUP') return 'Minimum top-up';
-  if (line.line_type === 'SYS_MAX_CAP') return 'Maximum cap';
-  if (line.source_type === 'StatusEntryState') return 'Status payment';
-  if (line.source_type === 'BonusEvent') return 'Bonus event';
-  return line.line_type;
+  if (line.line_type === 'STATUS') return 'Status payment';
+  if (line.line_type === 'BONUS') return 'Bonus event';
+  return 'Ordinary pay';
+}
+
+function componentLabel(component: ReviewPayrollSnapshotComponent): string {
+  switch (component.component_kind) {
+    case 'ORDINARY': return component.label ?? 'Ordinary pay';
+    case 'STATUS': return component.label ?? 'Status payment';
+    case 'BONUS': return 'Bonus';
+    case 'MINIMUM_ADJUSTMENT': return 'Minimum top-up';
+    case 'MAXIMUM_ADJUSTMENT': return 'Maximum cap';
+  }
 }
 
 function errorDetail(error: unknown, fallback: string): string {
@@ -68,6 +77,9 @@ function errorDetail(error: unknown, fallback: string): string {
   if (typeof detail === 'string') {
     if (detail.includes('SNAPSHOT_REQUIRED_FOR_APPROVAL')) {
       return 'A submitted payroll snapshot is required before this legacy review item can be approved. Return it for correction and resubmit the payroll.';
+    }
+    if (detail.includes('SNAPSHOT_HASH_MISMATCH') || detail.includes('SNAPSHOT_INTEGRITY_ERROR')) {
+      return 'The submitted payroll snapshot could not be verified and cannot be approved.';
     }
     return detail;
   }
@@ -254,6 +266,73 @@ export function ReviewDetailDialog({ item, onClose, onDecided }: Props) {
                     </table>
                   </div>
                 )}
+              </section>
+
+              <section className={styles.section}>
+                <h3 className={styles.sectionTitle}>Official Components</h3>
+                <p className={styles.emptyMsg}>
+                  Each official amount is rounded once from the sum of its lines; the Driver total is the
+                  sum of these amounts.
+                </p>
+                <div className={styles.tableWrap}>
+                  <table className={styles.table}>
+                    <thead>
+                      <tr>
+                        <th>Driver</th>
+                        <th>Component</th>
+                        <th className={styles.right}>Lines</th>
+                        <th className={styles.right}>Before rounding</th>
+                        <th className={styles.right}>Official amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {snapshot.driver_totals.flatMap((driver) => driver.components.map((component, index) => (
+                        <tr key={`${driver.driver_assignment_id}-${component.component_kind}-${index}`}>
+                          <td>{driver.driver_name_snapshot ?? driver.driver_number_snapshot ?? 'Unnamed driver'}</td>
+                          <td>{componentLabel(component)}</td>
+                          <td className={styles.right}>{component.source_count}</td>
+                          <td className={styles.right}>{component.pre_rounding_amount}</td>
+                          <td className={styles.right}>{formatMoney(component.official_amount, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                        </tr>
+                      )))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              <section className={styles.section}>
+                <h3 className={styles.sectionTitle}>Minimum / Maximum Evaluation</h3>
+                <div className={styles.tableWrap}>
+                  <table className={styles.table}>
+                    <thead>
+                      <tr>
+                        <th>Driver</th>
+                        <th>Outcome</th>
+                        <th className={styles.right}>Eligible / scheduled days</th>
+                        <th className={styles.right}>Base (Bonus excluded)</th>
+                        <th>Rules</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {snapshot.driver_totals.map((driver) => driver.min_max && (
+                        <tr key={driver.driver_assignment_id}>
+                          <td>{driver.driver_name_snapshot ?? driver.driver_number_snapshot ?? 'Unnamed driver'}</td>
+                          <td>{driver.min_max.status}</td>
+                          <td className={styles.right}>{driver.min_max.numerator ?? '-'} / {driver.min_max.denominator ?? '-'}</td>
+                          <td className={styles.right}>{formatMoney(driver.min_max.base_amount, snapshot.currency_code, snapshot.currency_minor_unit_digits)}</td>
+                          <td>
+                            {driver.min_max.rules.length === 0 ? '-' : driver.min_max.rules.map((rule) => (
+                              <div key={rule.driver_pay_rule_id}>
+                                {rule.rule_type} {formatMoney(rule.amount, snapshot.currency_code, snapshot.currency_minor_unit_digits)}
+                                {rule.prorated_amount != null && ` (prorated ${formatMoney(rule.prorated_amount, snapshot.currency_code, snapshot.currency_minor_unit_digits)})`}
+                              </div>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </section>
 
               <section className={styles.section}>

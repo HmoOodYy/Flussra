@@ -12,28 +12,35 @@ export interface FinalLineSummary {
   branch_id: number;
   driver_assignment_id: number;
   driver_id: number;
+  employee_id: number;
   driver_number: string | null;
   driver_name: string;
-  draft_line_id: number | null;
-  work_date: string | null;
+  /** Ledger display vocabulary only; `component_kind` is the classification. */
   line_type: string;
   line_scope: string;
-  quantity: string;
-  rate_amount: string | null;
+  component_kind: FinalLineComponentKind;
+  component_label: string | null;
+  payroll_calculation_snapshot_id: number;
+  payroll_calculation_snapshot_component_id: number;
+  payroll_period_definition_id: number | null;
+  pay_definition_id: number | null;
   final_amount: string;
   source_type: string;
   approved_by_user_id: number | null;
   approved_at_utc: string;
   locked_at_utc: string | null;
   notes: string | null;
-  // CP-4 CDPI audit fields (present when backend returns them)
-  pay_item_id: number | null;
-  rate_type_id: number | null;
-  driver_rate_id: number | null;
-  resolved_rate_amount: string | null;
-  rate_behavior: string | null;
+  /** Frozen provenance: snapshot id, revision, hash, component identity and source ids. */
   source_snapshot: Record<string, unknown> | null;
 }
+
+/** One FinalLine projects one official component of the approved snapshot. */
+export type FinalLineComponentKind =
+  | 'ORDINARY'
+  | 'STATUS'
+  | 'BONUS'
+  | 'MINIMUM_ADJUSTMENT'
+  | 'MAXIMUM_ADJUSTMENT';
 
 // ---------------------------------------------------------------------------
 // CP-3A/CP-3B — Finalization Preview types
@@ -42,6 +49,9 @@ export interface FinalLineSummary {
 export interface FinalizationPreviewLine {
   draft_line_id: number | null;
   source_key: string;
+  component_kind: FinalLineComponentKind | null;
+  label: string | null;
+  pre_rounding_amount: string | null;
   driver_assignment_id: number;
   driver_name: string | null;
   work_date: string | null;
