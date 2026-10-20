@@ -64,6 +64,8 @@ export interface DayGridSummary {
   gross_total: string | null;
   needs_attention: number;
   financials_available: boolean;
+  financial_authority?: string | null;
+  financial_authority_reason?: string | null;
 }
 
 export interface DayGridPeriod {

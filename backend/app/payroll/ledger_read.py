@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
+from app.payroll.financial_authority import require_financial_authority
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import FinalLineSummary
 
@@ -57,7 +58,7 @@ async def get_final_lines(
     *,
     driver_assignment_id: int | None = None,
 ) -> list[FinalLineSummary]:
-    """Return locked final lines for a period (access-checked via period lookup).
+    """Return the locked final lines of a period (access-checked via period lookup), once their snapshot verifies.
 
     Ledger is operational/admin only — DRIVER/Self users are blocked.
     Period must be Locked or Archived; draft data is never exposed via this path.
@@ -84,6 +85,11 @@ async def get_final_lines(
         ["payroll.view", "payroll.entry", "payroll.finalize"],
         db,
     )
+
+    # The ledger is a projection of the frozen snapshot: it is served only when the snapshot
+    # the FinalLines name verifies and the FinalLines are exactly its component projection.
+    await require_financial_authority(
+        db, period_id=period_id, company_id=company_id, branch_id=period.branch_id)
 
     conditions = [
         "fl.payrollperiodid = :period_id",

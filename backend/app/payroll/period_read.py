@@ -14,6 +14,7 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_any_permission, has_any_permission
 from app.access.policy import require_non_driver_subject
 from app.db.sql import build_in_clause
+from app.payroll.financial_authority import resolve_financial_authority
 from app.payroll.schemas import PeriodEntryCount, PeriodSummary
 
 
@@ -41,6 +42,36 @@ def _row_to_summary(r: Any) -> PeriodSummary:
         final_gross=Decimal(str(r["finalgross"])) if r["finalgross"] is not None else Decimal("0"),
         final_driver_count=r["finaldrivercount"] or 0,
     )
+
+
+async def _with_verified_final_totals(
+    summary: PeriodSummary, company_id: int, db: AsyncConnection,
+) -> PeriodSummary:
+    """The ledger aggregates of a finalized period, from its verified snapshot.
+
+    The view counts FinalLines, which are a projection and not an authority. A Locked or Archived
+    period reports its totals only through the shared financial authority (the snapshot its
+    FinalLines name, verified together with the FinalLines); when that authority is unavailable
+    the totals are withheld with the reason, never read from FinalLines that did not verify.
+    """
+    if summary.status not in ("Locked", "Archived"):
+        return summary
+    authority = await resolve_financial_authority(
+        db, period_id=summary.payroll_period_id, company_id=company_id,
+        branch_id=summary.branch_id, withhold=True)
+    if authority.is_frozen:
+        content = authority.content
+        return summary.model_copy(update={
+            "final_lines": sum(len(total["Components"]) for total in content["DriverTotals"]),
+            "final_gross": Decimal(str(content["TotalExpectedPay"])),
+            "final_driver_count": len(content["DriverTotals"]),
+            "financial_authority": authority.financial_authority,
+        })
+    return summary.model_copy(update={
+        "final_lines": 0, "final_gross": None, "final_driver_count": 0,
+        "financial_authority": authority.financial_authority,
+        "financial_authority_reason": authority.financial_authority_reason,
+    })
 
 
 # Base SELECT that joins the view with the base table for the extra fields
@@ -159,7 +190,10 @@ async def get_periods(
         ),
         params,
     )
-    return [_row_to_summary(r) for r in result.mappings().all()]
+    return [
+        await _with_verified_final_totals(_row_to_summary(r), company_id, db)
+        for r in result.mappings().all()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +240,7 @@ async def get_period_by_id(
         db,
     )
 
-    return _row_to_summary(row)
+    return await _with_verified_final_totals(_row_to_summary(row), company_id, db)
 
 
 # ---------------------------------------------------------------------------

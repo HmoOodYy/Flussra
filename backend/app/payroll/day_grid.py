@@ -60,6 +60,7 @@ from app.payroll.eligibility import (
     _lifecycle_eligible_assignment_ids,
     require_period_eligibility_snapshot,
 )
+from app.payroll.financial_authority import frozen_source_lines, resolve_financial_authority
 from app.payroll.line_audit import _write_line_audit
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.mutation_lock import _lock_period_for_mutation
@@ -342,14 +343,21 @@ async def get_day_grid(
         for row in dk_result.mappings().all():
             deactivated_key_map[row["statuskeyid"]] = dict(row)
 
-    # ── Stage B3 Unit 8C-3: immutable Status evidence for Locked/Archived ──── #
-    # After Submit, immutable calculation-snapshot Status evidence is the
-    # historical authority for finalized periods. Locked/Archived rows below
-    # must not use the EntryState freeze columns (StatusCodeSnapshot/
-    # StatusLabelSnapshot/StatusIsOffReasonSnapshot/FinalizedAtUtc), current
-    # mutable PayrollStatusKeys, or legacy DraftLine Status codes to determine
-    # historical Status meaning. Draft/Open/InReview/Returned/Approved periods
-    # are unaffected -- this block only runs for Locked/Archived.
+    # ── Financial authority of the period ────────────────────────────────── #
+    # Open/Returned money is live; InReview/Approved/Locked/Archived money comes only from the
+    # verified frozen snapshot of the period; a frozen authority that cannot be resolved or does
+    # not verify withholds the money (never a live fallback) and keeps the entry data.
+    authority = await resolve_financial_authority(
+        db, period_id=period.payroll_period_id, company_id=company_id, branch_id=branch_id,
+        withhold=True,
+    )
+
+    # ── Immutable Status evidence for Locked/Archived ─────────────────────── #
+    # After Submit, the verified snapshot's Status evidence is the historical authority for
+    # finalized periods. Locked/Archived rows below must not use the EntryState freeze columns
+    # (StatusCodeSnapshot/StatusLabelSnapshot/StatusIsOffReasonSnapshot/FinalizedAtUtc),
+    # current mutable PayrollStatusKeys, or legacy DraftLine Status codes to determine
+    # historical Status meaning. Other period statuses are unaffected.
     _is_finalized_period = period.status in ("Locked", "Archived")
     _status_evidence_by_driver: dict[int, dict[str, Any]] = {}
     _status_evidence_state: dict[str, str | None] | None = None
@@ -359,24 +367,8 @@ async def get_day_grid(
     # does not need the same guard).
     _status_evidence_unavailable = False
     if _is_finalized_period:
-        _fin_snapshot, _fin_snapshot_avail = await status_evidence.resolve_finalized_snapshot(
-            db, period_id=period.payroll_period_id, company_id=company_id, branch_id=branch_id,
-        )
-        if _fin_snapshot is None:
-            # No usable snapshot provenance -- never fall back to another
-            # snapshot or to mutable current state; evidence is unavailable.
-            _status_evidence_state = _fin_snapshot_avail
-        else:
-            _fin_status_entries = await status_evidence.read_status_entries(
-                db,
-                snapshot_id=_fin_snapshot["payrollcalculationsnapshotid"],
-                company_id=company_id,
-                branch_id=branch_id,
-                period_id=period.payroll_period_id,
-            )
-            _status_evidence_state = status_evidence.status_evidence_availability(
-                _fin_snapshot, _fin_status_entries,
-            )
+        _fin_status_entries, _status_evidence_state = status_evidence.status_evidence_of(authority)
+        if _fin_status_entries is not None:
             _status_evidence_by_driver = {
                 entry["driver_assignment_id"]: entry
                 for entry in _fin_status_entries
@@ -384,17 +376,19 @@ async def get_day_grid(
             }
         _status_evidence_unavailable = _status_evidence_state["state"] == "UNAVAILABLE"
 
-    # ── Live money for the ordinary lines of this date ────────────────────── #
-    # Draft (Prepared) periods are source-only: no money is derived or shown.
+    # ── Money for the ordinary lines of this date, from the period's authority ─── #
     column_ids = {c.payroll_period_definition_id for c in columns}
     live_by_line: dict[int, Any] = {}
-    if period.status != "Draft" and driver_assignment_ids:
+    frozen_by_line: dict[int, dict[str, Any]] = {}
+    if authority.is_live and driver_assignment_ids:
         live_by_line = {
             line.draft_line_id: line
             for line in await load_live_source_lines(
                 period_id, company_id, db, driver_assignment_ids=driver_assignment_ids, work_date=work_date,
             )
         }
+    elif authority.is_frozen:
+        frozen_by_line = frozen_source_lines(authority.content)
 
     # ── Build rows ────────────────────────────────────────────────────────── #
     rows: list[DayGridRow] = []
@@ -468,15 +462,23 @@ async def get_day_grid(
                 qty = line["quantity"]
                 live = live_by_line.get(line["draftlineid"])
                 calc = live.calculation if live is not None else None
+                frozen_line = frozen_by_line.get(line["draftlineid"])
                 attention = calc.needs_attention if calc is not None else False
+                if frozen_line is not None:
+                    # A frozen source: its exact snapshot line is the only source of money.
+                    line_amount: Decimal | None = frozen_line["CalculatedAmount"]
+                    line_status: str | None = frozen_line["CalculationStatus"]
+                elif calc is not None:
+                    line_amount = calc.amount
+                    line_status = calc.status.value
+                else:
+                    line_amount, line_status = None, None
                 values[str(ppd_id)] = DayGridLineValue(
                     line_id=line["draftlineid"],
                     quantity=str(qty) if qty is not None else None,
-                    calculated_amount=(
-                        str(calc.amount) if calc is not None and calc.amount is not None else None
-                    ),
+                    calculated_amount=str(line_amount) if line_amount is not None else None,
                     needs_manager_review=attention,
-                    calculation_status=calc.status.value if calc is not None else None,
+                    calculation_status=line_status,
                 )
                 if attention:
                     needs_attention += 1
@@ -484,8 +486,8 @@ async def get_day_grid(
                     quantity_totals[ppd_id] = (
                         quantity_totals.get(ppd_id, Decimal("0")) + Decimal(str(qty))
                     )
-                if calc is not None and calc.amount is not None:
-                    gross_total += calc.amount
+                if line_amount is not None:
+                    gross_total += line_amount
 
         # Legacy path: resolve label/is_off from status_key_map when no canonical row.
         if not _is_finalized_period and ces_row is None and status_key_code:
@@ -542,8 +544,8 @@ async def get_day_grid(
             values=values,
         ))
 
-    # CP-2F: suppress gross_total for Draft (Prepared) periods — financials not available.
-    _is_draft = period.status == "Draft"
+    # No money is shown without an authority: a Draft (Prepared) period has none, and a frozen
+    # authority that is unavailable withholds it.
     summary = DayGridSummary(
         total_drivers=len(drivers),
         worked=worked_count,
@@ -557,9 +559,11 @@ async def get_day_grid(
             )
             for column in columns
         ],
-        gross_total=None if _is_draft else str(gross_total),
+        gross_total=str(gross_total) if authority.financials_available else None,
         needs_attention=needs_attention,
-        financials_available=not _is_draft,
+        financials_available=authority.financials_available,
+        financial_authority=authority.financial_authority,
+        financial_authority_reason=authority.financial_authority_reason,
     )
 
     grid_period = DayGridPeriod(

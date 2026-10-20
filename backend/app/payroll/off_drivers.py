@@ -159,11 +159,11 @@ async def _finalized_status_entries(
     """
     period_id = _period_id(period)
     branch_id = period.branch_id
-    snapshot, availability = await status_evidence.resolve_finalized_snapshot(
+    evidence_rows, evidence_state = await status_evidence.finalized_status_evidence(
         db, period_id=period_id, company_id=company_id, branch_id=branch_id,
     )
     # NoteText is not part of the immutable Status-evidence table's contract
-    # (see status_evidence.read_status_entries) -- read it separately from
+    # (see status_evidence.status_entries_from_content) -- read it separately from
     # canonical EntryState, which no write path can change once a period is
     # Locked (Locked/Archived are in schemas._WRITE_BLOCKED_STATUSES).
     note_rows = (await db.execute(
@@ -180,19 +180,11 @@ async def _finalized_status_entries(
         (int(row["driverassignmentid"]), row["workdate"]): row["notetext"] for row in note_rows
     }
 
-    if snapshot is None:
-        # No usable snapshot provenance -- never fall back to another
+    if evidence_rows is None:
+        # No usable, verified snapshot -- never fall back to another
         # snapshot or to mutable current state; evidence is unavailable.
-        return {}, availability
+        return {}, evidence_state
 
-    evidence_rows = await status_evidence.read_status_entries(
-        db,
-        snapshot_id=snapshot["payrollcalculationsnapshotid"],
-        company_id=company_id,
-        branch_id=branch_id,
-        period_id=period_id,
-    )
-    evidence_state = status_evidence.status_evidence_availability(snapshot, evidence_rows)
     entries: dict[tuple[int, date], _StatusEntry] = {}
     for row in evidence_rows:
         key = (row["driver_assignment_id"], row["work_date"])
@@ -436,7 +428,7 @@ async def get_selected_day_off_drivers(
 # for Locked/Archived periods — never live PayrollStatusKeys, never the
 # EntryState freeze columns. NoteText is read separately from canonical
 # EntryState in the finalized path because it is not part of the immutable
-# Status-evidence table's contract (see status_evidence.read_status_entries).
+# Status-evidence table's contract (see status_evidence.status_entries_from_content).
 
 async def _finalized_drivers_off_entries(
     period: PeriodSummary,
@@ -454,22 +446,14 @@ async def _finalized_drivers_off_entries(
     DraftLines. Returns (entries, {state, reason_code}); entries is always
     [] unless state is AVAILABLE with at least one captured off-reason row.
     """
-    snapshot, availability = await status_evidence.resolve_finalized_snapshot(
+    status_rows, evidence_state = await status_evidence.finalized_status_evidence(
         db, period_id=period.payroll_period_id, company_id=company_id, branch_id=period.branch_id,
     )
-    if snapshot is None:
-        # No usable snapshot provenance -- never fall back to another
+    if status_rows is None:
+        # No usable, verified snapshot -- never fall back to another
         # snapshot or to mutable current state; evidence is unavailable.
-        return [], availability
+        return [], evidence_state
 
-    status_rows = await status_evidence.read_status_entries(
-        db,
-        snapshot_id=snapshot["payrollcalculationsnapshotid"],
-        company_id=company_id,
-        branch_id=period.branch_id,
-        period_id=period.payroll_period_id,
-    )
-    evidence_state = status_evidence.status_evidence_availability(snapshot, status_rows)
     off_rows = [row for row in status_rows if row["is_off_reason"]]
     if not off_rows:
         return [], evidence_state
@@ -489,7 +473,7 @@ async def _finalized_drivers_off_entries(
     identities = {int(r["driverassignmentid"]): r for r in identity_rows}
 
     # NoteText is not part of the immutable Status-evidence table's contract
-    # (see status_evidence.read_status_entries) -- read it separately from
+    # (see status_evidence.status_entries_from_content) -- read it separately from
     # canonical EntryState, which no write path can change once a period is
     # Locked (Locked/Archived are in _WRITE_BLOCKED_STATUSES).
     note_rows = (await db.execute(

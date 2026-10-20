@@ -6,72 +6,34 @@ Readers do not reconstruct historical labels or off-reason meaning from mutable 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.payroll.snapshot_hash import (
-    UnsupportedCalculationVersionError,
-    require_supported_calculation_version,
-)
+from app.payroll.financial_authority import FinancialAuthority, resolve_financial_authority
 
 
-async def read_status_entries(
-    db: AsyncConnection,
-    *,
-    snapshot_id: int,
-    company_id: int,
-    branch_id: int,
-    period_id: int,
-) -> list[dict[str, Any]]:
-    """
-    Read immutable captured Status evidence rows for one calculation snapshot.
+def status_entries_from_content(content: dict[str, Any]) -> list[dict[str, Any]]:
+    """The Status report evidence of a verified snapshot.
 
-    Scoped by company/branch/period in addition to snapshot_id. This is
-    provably a no-op filter today -- PayrollCalculationSnapshotStatusEntries
-    has a composite FK to PayrollCalculationSnapshots(ID, CompanyID, BranchID,
-    PayrollPeriodID), so a row for this snapshot_id can never carry a
-    mismatched company/branch/period -- but keeping the scope explicit here
-    matches the stricter of the two call sites this replaces and costs
-    nothing.
-
-    Returns one dict per captured entry, using exactly the fields this table
-    captures (no note text, no hours value, no void state -- not part of
-    this table's contract):
+    One dict per captured entry, using exactly the fields the evidence captures (no note text,
+    no hours value, no void state):
         {driver_assignment_id, driver_id, work_date, status_key_id, status_code, status_label,
          is_off_reason}
 
-    Does not raise, does not interpret ReportEvidenceVersion, does not decide
-    availability -- callers that need those already have their own snapshot
-    lookup and validation; use status_evidence_availability() below only if
-    it fits.
+    The content comes from ``verify_snapshot``: the report evidence is verified there (version,
+    its own hash and its overlaps with the financial evidence), so a reader never queries the
+    evidence tables itself and never exposes it unverified.
     """
-    rows = (await db.execute(text("""
-        SELECT driverassignmentid, driverid, workdate, statuskeyid, statuscodesnapshot,
-               statuslabelsnapshot, statusisoffreasonsnapshot
-        FROM payroll.payrollcalculationsnapshotstatusentries
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id
-          AND branchid = :branch_id
-          AND payrollperiodid = :period_id
-        ORDER BY driverassignmentid, workdate
-    """), {
-        "snapshot_id": snapshot_id,
-        "company_id": company_id,
-        "branch_id": branch_id,
-        "period_id": period_id,
-    })).mappings().all()
     return [{
-        "driver_assignment_id": int(row["driverassignmentid"]),
-        "driver_id": int(row["driverid"]),
-        "work_date": row["workdate"],
-        "status_key_id": int(row["statuskeyid"]),
-        "status_code": row["statuscodesnapshot"],
-        "status_label": row["statuslabelsnapshot"],
-        "is_off_reason": bool(row["statusisoffreasonsnapshot"]),
-    } for row in rows]
+        "driver_assignment_id": entry["DriverAssignmentID"],
+        "driver_id": entry["DriverID"],
+        "work_date": entry["WorkDate"],
+        "status_key_id": entry["StatusKeyID"],
+        "status_code": entry["StatusCodeSnapshot"],
+        "status_label": entry["StatusLabelSnapshot"],
+        "is_off_reason": entry["StatusIsOffReasonSnapshot"],
+    } for entry in content["ReportEvidence"]["StatusEntries"]]
 
 
 def status_evidence_availability(
@@ -101,101 +63,60 @@ def status_evidence_availability(
     return {"state": "EMPTY" if not entries else "AVAILABLE", "reason_code": None}
 
 
-async def resolve_finalized_snapshot(
+def status_evidence_of(
+    authority: FinancialAuthority,
+) -> tuple[list[dict[str, Any]] | None, dict[str, str | None]]:
+    """The verified Status evidence of a finalized period's authority and its availability.
+
+    The snapshot is the one the period's FinalLines name, resolved and verified by the shared
+    financial authority (never "latest"). When it could not be resolved or did not verify, the
+    evidence is UNAVAILABLE with the stable reason code, ``entries`` is ``None``, and nothing is
+    taken from another snapshot or from mutable current state.
+    """
+    if not authority.is_frozen:
+        reason = authority.financial_authority_reason
+        if reason == "FINAL_LINES_EMPTY":
+            reason = "PROVENANCE_UNAVAILABLE"
+        return None, {"state": "UNAVAILABLE", "reason_code": reason}
+    entries = status_entries_from_content(authority.content)
+    return entries, status_evidence_availability(
+        {"reportevidenceversion": authority.content["ReportEvidenceVersion"]}, entries)
+
+
+async def finalized_status_evidence(
     db: AsyncConnection,
     *,
     period_id: int,
     company_id: int,
     branch_id: int,
-) -> tuple[dict[str, Any] | None, dict[str, str | None]]:
-    """
-    Resolve the one authoritative calculation snapshot for a Locked/Archived
-    period -- never MAX(revision), never latest snapshot by timestamp, never
-    an arbitrary snapshot lookup by period.
-
-    Selector: ``PayrollFinalLines.PayrollCalculationSnapshotID``, the snapshot the finalized
-    lines project. Every finalized period has FinalLines (one per official component), so the
-    selection is exact. The snapshot must be exactly one, belong to this period/company/branch
-    and carry the supported calculation version; otherwise the evidence is unavailable rather
-    than taken from another snapshot. This light resolution serves per-day Status reads; the
-    finalized library readers additionally verify the snapshot hash and the FinalLines
-    projection (``finalized_context.resolve_originating_snapshot``).
-
-    Returns (None, UNAVAILABLE/PROVENANCE_UNAVAILABLE) when the finalized lines do not name
-    exactly one usable snapshot. Returns (snapshot, AVAILABLE) otherwise.
-    """
-    ids = (await db.execute(text("""
-        SELECT DISTINCT payrollcalculationsnapshotid
-        FROM payroll.payrollfinallines
-        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-    """), {"period_id": period_id, "company_id": company_id, "branch_id": branch_id})).all()
-    if len(ids) != 1:
-        return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
-    snapshot = (await db.execute(text("""
-        SELECT payrollcalculationsnapshotid, revisionnumber, calculationversion, snapshothash,
-               sourceconfighash, reportevidenceversion, reportevidencehash
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
-    """), {
-        "snapshot_id": int(ids[0][0]), "period_id": period_id,
-        "company_id": company_id, "branch_id": branch_id,
-    })).mappings().first()
-    if snapshot is None:
-        return None, {"state": "UNAVAILABLE", "reason_code": "PROVENANCE_UNAVAILABLE"}
-    try:
-        require_supported_calculation_version(snapshot["calculationversion"])
-    except UnsupportedCalculationVersionError:
-        return None, {"state": "UNAVAILABLE", "reason_code": "UNSUPPORTED_CALCULATION_VERSION"}
-    return dict(snapshot), {"state": "AVAILABLE", "reason_code": None}
+) -> tuple[list[dict[str, Any]] | None, dict[str, str | None]]:
+    """``status_evidence_of`` for a period, resolving its authority first."""
+    return status_evidence_of(await resolve_financial_authority(
+        db, period_id=period_id, company_id=company_id, branch_id=branch_id, withhold=True))
 
 
-async def read_report_evidence(
-    db: AsyncConnection,
-    *,
-    snapshot_id: int,
-    company_id: int,
-    branch_id: int,
-    period_id: int,
+def report_evidence_from_content(
+    content: dict[str, Any],
 ) -> tuple[bool, int | None, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
-    """The report-only Status and Bonus evidence frozen with one snapshot.
+    """The report-only Status and Bonus evidence frozen with a verified snapshot.
 
-    Returns (captured, version, hash, statuses, bonuses). A snapshot that carries no report
-    evidence version reports ``captured`` False and no rows. Rows are exactly what was frozen;
-    nothing is reconstructed from mutable Status configuration or live Bonus rows.
+    Returns (captured, version, hash, statuses, bonuses). Rows are exactly what was frozen and
+    verified; nothing is reconstructed from mutable Status configuration or live Bonus rows.
     """
-    header = (await db.execute(text("""
-        SELECT reportevidenceversion, reportevidencehash
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
-    """), {
-        "snapshot_id": snapshot_id, "company_id": company_id, "branch_id": branch_id,
-        "period_id": period_id,
-    })).mappings().first()
-    if header is None or header["reportevidenceversion"] is None:
+    if content["ReportEvidenceVersion"] is None:
         return False, None, None, [], []
-    status_rows = await read_status_entries(
-        db, snapshot_id=snapshot_id, company_id=company_id, branch_id=branch_id,
-        period_id=period_id)
     statuses = [{
         "driver_assignment_id": row["driver_assignment_id"], "driver_id": row["driver_id"],
         "work_date": row["work_date"], "status_key_id": row["status_key_id"],
         "code": row["status_code"], "label": row["status_label"], "is_off": row["is_off_reason"],
-    } for row in status_rows]
-    bonus_rows = (await db.execute(text("""
-        SELECT payrollbonuseventid, driverassignmentid, driverid, amount, reason, notes,
-               datarevision, createdbyuserid, creatordisplaynamesnapshot, createdatutc
-        FROM payroll.payrollcalculationsnapshotbonusevents
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-        ORDER BY driverassignmentid, payrollbonuseventid
-    """), {"snapshot_id": snapshot_id})).mappings().all()
+    } for row in status_entries_from_content(content)]
     bonuses = [{
-        "bonus_event_id": int(r["payrollbonuseventid"]),
-        "driver_assignment_id": int(r["driverassignmentid"]), "driver_id": int(r["driverid"]),
-        "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
-        "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
-        "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"],
-    } for r in bonus_rows]
-    return (True, int(header["reportevidenceversion"]), str(header["reportevidencehash"]),
+        "bonus_event_id": event["PayrollBonusEventID"],
+        "driver_assignment_id": event["DriverAssignmentID"], "driver_id": event["DriverID"],
+        "amount": event["Amount"], "reason": event["Reason"], "notes": event["Notes"],
+        "data_revision": event["DataRevision"], "creator_user_id": event["CreatedByUserID"],
+        "creator_display_name": event["CreatorDisplayNameSnapshot"],
+        "created_at_utc": event["CreatedAtUtc"],
+    } for event in content["ReportEvidence"]["BonusEvents"]]
+    return (True, int(content["ReportEvidenceVersion"]), str(content["ReportEvidenceHash"]),
             statuses, bonuses)

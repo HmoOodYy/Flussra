@@ -9,7 +9,7 @@ import type {
 import type { FinalizedSectionAvailability } from './finalizedEvidence';
 
 export interface FinalizedFinancialSummary {
-  total_pay: string;
+  total_pay: string | null;
   final_line_count: number;
   driver_count: number;
 }

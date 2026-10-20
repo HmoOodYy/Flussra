@@ -8,6 +8,7 @@ against it. Pure functions plus one read-only check; no transaction is opened.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import text
@@ -29,7 +30,6 @@ _KIND_ORDER = {kind: index for index, kind in enumerate(LEDGER_LINE_TYPES)}
 _SOURCE_TYPE_BY_KIND = {
     "ORDINARY": "DraftLine", "STATUS": "StatusEntryState", "BONUS": "BonusEvent",
 }
-
 
 
 def _component_label(component: dict[str, Any]) -> str | None:
@@ -102,40 +102,80 @@ def project_final_lines(content: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _expected_columns(content: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+    """Every persisted field of the FinalLine that projects one component."""
+    return {
+        "companyid": content["CompanyID"],
+        "branchid": content["BranchID"],
+        "payrollperiodid": content["PayrollPeriodID"],
+        "payrollcalculationsnapshotid": content["PayrollCalculationSnapshotID"],
+        "payrollcalculationsnapshotcomponentid": row["component_id"],
+        "driverassignmentid": row["driver_assignment_id"],
+        "driverid": row["driver_id"],
+        "employeeid": row["employee_id"],
+        "componentkind": row["component_kind"],
+        "linetype": row["line_type"],
+        "linescope": "Period",
+        "sourcetype": "SnapshotComponent",
+        "sourceid": str(row["component_id"]),
+        "payrollperioddefinitionid": row["payroll_period_definition_id"],
+        "paydefinitionid": row["pay_definition_id"],
+        "finalamount": row["amount"],
+        "quantity": 0,
+        "rateamount": None,
+        "currencycode": content["CurrencyCode"],
+        "currencyminorunitdigits": content["CurrencyMinorUnitDigits"],
+        # The legacy per-source provenance is never used by a component line.
+        "workdate": None,
+        "draftlineid": None,
+        "bonuseventid": None,
+        "payitemid": None,
+        "resolvedrateamount": None,
+        "ratetypeid": None,
+        "driverrateid": None,
+        "ratebehavior": None,
+        "notes": None,
+        "sourcesnapshot": row["source_snapshot"],
+    }
+
+
 async def verify_final_lines(
     db: AsyncConnection, content: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """The persisted FinalLines of a snapshot, proved to be exactly its component projection.
+    """The persisted FinalLines of a period, proved to be exactly the projection of its snapshot.
 
-    Every official component has exactly one FinalLine with the same DriverAssignment, kind
-    and official amount, and nothing else is stored for the snapshot. Raises
+    Every official component has exactly one FinalLine, and every field of that line equals the
+    projection: scope (Company, Branch, period, snapshot, component), identity (DriverAssignment,
+    Driver, Employee), classification (kind, line type, scope, source type and id), definition,
+    money (amount, quantity, rate, currency), the frozen provenance JSON and the legacy columns
+    that component lines never use. No other FinalLine may exist for the period. Raises
     ``SnapshotEvidenceError`` (FINAL_LINES_INTEGRITY_ERROR) otherwise; returns the rows.
     """
     rows = (await db.execute(text("""
-        SELECT finallineid, driverassignmentid, driverid, employeeid, componentkind, linetype,
-               finalamount, payrollcalculationsnapshotcomponentid, payrollperioddefinitionid,
-               paydefinitionid, currencycode, currencyminorunitdigits
+        SELECT finallineid, companyid, branchid, payrollperiodid, driverassignmentid, driverid,
+               employeeid, componentkind, linetype, linescope, sourcetype, sourceid,
+               payrollcalculationsnapshotid, payrollcalculationsnapshotcomponentid,
+               payrollperioddefinitionid, paydefinitionid, finalamount, quantity, rateamount,
+               currencycode, currencyminorunitdigits, workdate, draftlineid, bonuseventid,
+               payitemid, ratetypeid, driverrateid, resolvedrateamount, ratebehavior, notes,
+               CAST(sourcesnapshot AS text) AS sourcesnapshot
         FROM payroll.payrollfinallines
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
+        WHERE payrollperiodid = :period_id AND companyid = :company_id
         ORDER BY finallineid
     """), {
-        "snapshot_id": content["PayrollCalculationSnapshotID"], "company_id": content["CompanyID"],
-        "branch_id": content["BranchID"], "period_id": content["PayrollPeriodID"],
+        "company_id": content["CompanyID"], "period_id": content["PayrollPeriodID"],
     })).mappings().all()
     expected = {row["component_id"]: row for row in project_final_lines(content)}
     persisted = {int(row["payrollcalculationsnapshotcomponentid"]): row for row in rows}
-    if set(persisted) != set(expected) or len(persisted) != len(rows) or any(
-        persisted[component_id]["finalamount"] != row["amount"]
-        or persisted[component_id]["componentkind"] != row["component_kind"]
-        or persisted[component_id]["linetype"] != row["line_type"]
-        or int(persisted[component_id]["driverassignmentid"]) != row["driver_assignment_id"]
-        or persisted[component_id]["currencycode"] != content["CurrencyCode"]
-        or int(persisted[component_id]["currencyminorunitdigits"])
-        != content["CurrencyMinorUnitDigits"]
-        for component_id, row in expected.items() if component_id in persisted
-    ):
-        raise SnapshotEvidenceError(
-            "FINAL_LINES_INTEGRITY_ERROR",
-            "the finalized lines are not the projection of their calculation snapshot.")
+    failure = SnapshotEvidenceError(
+        "FINAL_LINES_INTEGRITY_ERROR",
+        "the finalized lines are not the projection of their calculation snapshot.")
+    if set(persisted) != set(expected) or len(persisted) != len(rows):
+        raise failure
+    for component_id, row in expected.items():
+        line = persisted[component_id]
+        for column, value in _expected_columns(content, row).items():
+            actual = json.loads(line[column]) if column == "sourcesnapshot" else line[column]
+            if actual != value:
+                raise failure
     return [dict(row) for row in rows]

@@ -1,10 +1,10 @@
 """CP-5C read-only calculation-report model.
 
 This module owns the report read flow and delegates shared report projections to
-report_components. It delegates lifecycle financial authority to ``reporting`` and never
+report_components. It delegates lifecycle financial authority to ``financial_authority`` and never
 recalculates financial values or mutates payroll state. Open and Returned periods read the live
-packet; InReview, Approved, Locked and Archived periods read only the frozen snapshot their
-authority names (verified against its hash), with its frozen labels and money.
+packet; InReview, Approved, Locked and Archived periods read only the verified frozen snapshot
+their authority names, with its frozen labels, money and report evidence.
 """
 from __future__ import annotations
 
@@ -22,7 +22,11 @@ from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency, get_company_currency
 from app.payroll import bonus, period_calculation, status_evidence
-from app.payroll.final_line_projection import verify_final_lines
+from app.payroll.financial_authority import (
+    FROZEN_KINDS,
+    AuthorityKind,
+    require_financial_authority,
+)
 from app.payroll.report_components import (
     aggregate_definition_amounts as _definition_amounts,
 )
@@ -42,9 +46,7 @@ from app.payroll.report_components import (
 from app.payroll.report_components import (
     summarize_status_entries as _status_summaries,
 )
-from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
 from app.payroll.schemas import PeriodSummary
-from app.payroll.snapshot_verification import SnapshotEvidenceError, verify_snapshot
 
 
 async def _final_lines_currency(company_id: int, period_id: int, db: AsyncConnection):
@@ -132,34 +134,14 @@ async def _live_statuses(period: dict[str, Any], db: AsyncConnection) -> list[di
              "label": r["keyname"], "is_off": bool(r["isoffreason"])} for r in rows]
 
 
-_FROZEN_AUTHORITIES = (
-    ReportAuthorityKind.SUBMITTED_SNAPSHOT,
-    ReportAuthorityKind.APPROVED_SNAPSHOT,
-    ReportAuthorityKind.FINAL_LINES,
-)
-
-
-async def _frozen_content(authority, period: dict[str, Any], db: AsyncConnection) -> dict[str, Any]:
-    """The verified snapshot a frozen authority names; its FinalLines too once finalized."""
-    try:
-        content = await verify_snapshot(
-            db, snapshot_id=int(authority.snapshot_id), company_id=int(period["companyid"]),
-            branch_id=int(period["branchid"]), period_id=int(period["payrollperiodid"]))
-        if authority.authority_kind is ReportAuthorityKind.FINAL_LINES:
-            await verify_final_lines(db, content)
-    except SnapshotEvidenceError as exc:
-        raise exc.http() from exc
-    return content
-
-
 async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnection, frozen: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], list[str], list[str], bool, int | None, str | None]:
     """Return authoritative financial lines and driver totals; never calculate them here."""
     kind = authority.authority_kind
-    if kind is ReportAuthorityKind.SOURCE_ONLY:
+    if kind is AuthorityKind.SOURCE_ONLY:
         return [], {}, [], [], False, None, None
-    if kind is ReportAuthorityKind.UNAVAILABLE:
+    if kind is AuthorityKind.UNAVAILABLE:
         raise _unavailable("REPORT_UNAVAILABLE", "Cancelled payroll periods have no calculation reports.")
-    if kind is ReportAuthorityKind.LIVE:
+    if kind is AuthorityKind.LIVE:
         summary = PeriodSummary.model_construct(
             payroll_period_id=int(period["payrollperiodid"]), branch_id=int(period["branchid"]),
             branch_name=period["branchname"], period_code=period["periodcode"], period_name=period["periodname"],
@@ -259,16 +241,13 @@ def _report_totals(
 
 async def build_report(*, report_type: str, period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> dict[str, Any]:
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    authority = await resolve_report_financial_authority(db=db, period_id=period_id, company_id=company_id, branch_id=int(period["branchid"]))
-    if authority.authority_kind is ReportAuthorityKind.UNAVAILABLE:
+    authority = await require_financial_authority(db, period_id=period_id, company_id=company_id, branch_id=int(period["branchid"]))
+    if authority.authority_kind is AuthorityKind.UNAVAILABLE:
         raise _unavailable("REPORT_UNAVAILABLE", "Cancelled payroll periods have no calculation reports.")
     columns = await _columns(period, db)
     definition_columns = await _definition_columns(period, db)
     definition_column_ids = [c["payroll_period_definition_id"] for c in definition_columns]
-    frozen = (
-        await _frozen_content(authority, period, db)
-        if authority.authority_kind in _FROZEN_AUTHORITIES else None
-    )
+    frozen = authority.content if authority.authority_kind in FROZEN_KINDS else None
     lines, financial_totals, blockers, warnings, financials_available, snapshot_id, snapshot_hash = await _financial_packet(authority, period, db, frozen)
     per_driver_definitions: dict[int, dict[int, Decimal]] = {}
     definition_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in definition_column_ids}
@@ -287,7 +266,7 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
     for driver_assignment_id, total in financial_totals.items():
         drivers.setdefault(driver_assignment_id, {"driver_assignment_id": driver_assignment_id, "driver_id": total.get("driver_id"), "driver_number": total.get("driver_number"), "driver_name": total.get("driver_name")})
     evidence_available, evidence_version, evidence_hash, statuses, bonuses = (False, None, None, [], [])
-    if authority.authority_kind is ReportAuthorityKind.LIVE:
+    if authority.authority_kind is AuthorityKind.LIVE:
         statuses = await _live_statuses(period, db)
         bonuses = [{"bonus_event_id": int(r["payrollbonuseventid"]), "driver_assignment_id": int(r["driverassignmentid"]),
                     "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
@@ -297,10 +276,7 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         evidence_available = True
     elif frozen is not None:
         evidence_available, evidence_version, evidence_hash, statuses, bonuses = (
-            await status_evidence.read_report_evidence(
-                db, snapshot_id=int(frozen["PayrollCalculationSnapshotID"]),
-                company_id=company_id, branch_id=int(period["branchid"]),
-                period_id=int(period["payrollperiodid"])))
+            status_evidence.report_evidence_from_content(frozen))
     summaries = _status_summaries(statuses)
     by_driver_work: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in work_rows:

@@ -209,21 +209,20 @@ async def list_finalized_periods(
     return items
 
 
-async def _financial_summary(period: dict[str, Any], db: AsyncConnection) -> dict[str, Any]:
-    row = (await db.execute(text("""
-        SELECT COUNT(*) AS final_line_count,
-               COUNT(DISTINCT driverassignmentid) AS driver_count,
-               COALESCE(SUM(finalamount), 0) AS total_pay
-        FROM payroll.payrollfinallines
-        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-    """), {
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).mappings().one()
+def _financial_summary(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    """The finalized totals of the verified snapshot, or none when its provenance is unavailable.
+
+    The totals are the snapshot's frozen ExpectedPay and the number of its official components
+    (one FinalLine each); the FinalLines were proved equal to that projection, so these are the
+    ledger's totals. Nothing is summed from FinalLines that did not verify.
+    """
+    if snapshot is None:
+        return {"total_pay": None, "final_line_count": 0, "driver_count": 0}
+    content = snapshot["content"]
     return {
-        "total_pay": Decimal(str(row["total_pay"])),
-        "final_line_count": int(row["final_line_count"]),
-        "driver_count": int(row["driver_count"]),
+        "total_pay": Decimal(str(content["TotalExpectedPay"])),
+        "final_line_count": sum(len(total["Components"]) for total in content["DriverTotals"]),
+        "driver_count": len(content["DriverTotals"]),
     }
 
 
@@ -243,13 +242,11 @@ def _frozen_report_totals(
     return frozen_financial_packet(snapshot["content"])
 
 
-async def _snapshot_evidence(
-    snapshot_id: int, period: dict[str, Any], db: AsyncConnection,
+def _snapshot_evidence(
+    snapshot: dict[str, Any],
 ) -> tuple[bool, int | None, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
-    return await status_evidence.read_report_evidence(
-        db, snapshot_id=snapshot_id,
-        company_id=int(period["companyid"]), branch_id=int(period["branchid"]),
-        period_id=int(period["payrollperiodid"]))
+    """The report evidence verified with the snapshot (never queried unverified)."""
+    return status_evidence.report_evidence_from_content(snapshot["content"])
 
 
 async def _finalized_off_status_availability(
@@ -460,8 +457,8 @@ async def build_overview(
     *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
 ) -> dict[str, Any]:
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    financial_summary = await _financial_summary(period, db)
     snapshot, provenance = await _originating_snapshot(period, db)
+    financial_summary = _financial_summary(snapshot)
     off_status_availability = await _finalized_off_status_availability(
         period, snapshot, provenance, db,
     )
@@ -486,7 +483,12 @@ async def build_overview(
         evidence = _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
     else:
         evidence = _availability("AVAILABLE")
-    financial_state = "AVAILABLE" if financial_summary["final_line_count"] else "EMPTY"
+    # Money exists only behind a verified snapshot: without one the financial sections are
+    # unavailable for the same reason as the provenance, never an AVAILABLE zero.
+    financial_availability = (
+        _availability("UNAVAILABLE", provenance["reason_code"]) if snapshot is None
+        else _availability("AVAILABLE" if financial_summary["final_line_count"] else "EMPTY")
+    )
     return {
         "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
         "period_name": period["periodname"], "period_status": period["status"],
@@ -501,8 +503,8 @@ async def build_overview(
             "source_config_hash": None if snapshot is None else str(snapshot["sourceconfighash"]),
         },
         "section_availability": {
-            "financials": _availability(financial_state), "snapshot_provenance": provenance,
-            "report_evidence": evidence, "reports": _availability(financial_state),
+            "financials": financial_availability, "snapshot_provenance": provenance,
+            "report_evidence": evidence, "reports": financial_availability,
             "off_status": off_status_availability,
             "rates_used": rates_used_availability,
             "audit": audit_availability,
@@ -545,10 +547,9 @@ async def build_finalized_report(
     evidence_hash: str | None = None
     evidence_availability = _availability("UNAVAILABLE", provenance["reason_code"])
     if snapshot is not None:
-        snapshot_id = int(snapshot["payrollcalculationsnapshotid"])
         frozen_drivers, work_rows = frozen_operational_rows(snapshot["content"])
-        evidence_available, evidence_version, evidence_hash, statuses, bonuses = await _snapshot_evidence(
-            snapshot_id, period, db,
+        evidence_available, evidence_version, evidence_hash, statuses, bonuses = _snapshot_evidence(
+            snapshot,
         )
         evidence_availability = (
             _availability("AVAILABLE") if evidence_available
@@ -604,29 +605,34 @@ async def build_finalized_report(
             "pay": pay,
             "bonus_events": by_driver_bonus[driver_assignment_id],
         })
-    financial_state = "AVAILABLE" if final_lines else "EMPTY"
+    financials_available = snapshot is not None
+    financial_availability = (
+        _availability("UNAVAILABLE", provenance["reason_code"]) if snapshot is None
+        else _availability("AVAILABLE" if final_lines else "EMPTY")
+    )
     return {
         "metadata": {
             "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
             "period_name": period["periodname"], "period_status": period["status"],
         "currency_code": period["currency_code"], "currency_minor_unit_digits": period["currency_minor_unit_digits"],
             "branch_id": int(period["branchid"]), "report_type": report_type,
-            "financials_available": True,
+            "financials_available": financials_available,
             "snapshot_id": None if snapshot is None else int(snapshot["payrollcalculationsnapshotid"]),
             "revision_number": None if snapshot is None else int(snapshot["revisionnumber"]),
             "snapshot_hash": None if snapshot is None else str(snapshot["snapshothash"]),
             "report_evidence_available": evidence_available,
             "report_evidence_version": evidence_version, "report_evidence_hash": evidence_hash,
             "section_availability": {
-                "financials": _availability(financial_state),
+                "financials": financial_availability,
                 "snapshot_provenance": provenance, "columns": columns_availability,
                 "report_evidence": evidence_availability,
             },
             "generated_at_utc": datetime.now(UTC),
         },
         "columns": columns, "definition_columns": definition_columns, "drivers": result_drivers,
-        "work_totals": _work_totals(work_rows), "pay_totals": _pay_totals(financial_totals),
-        "definition_totals": None if report_type == "period-work" else [
+        "work_totals": _work_totals(work_rows),
+        "pay_totals": _pay_totals(financial_totals) if financials_available else None,
+        "definition_totals": None if report_type == "period-work" or not financials_available else [
             {"payroll_period_definition_id": cid,
              "amount": definition_total_map.get(cid, Decimal("0"))}
             for cid in definition_column_ids
@@ -713,18 +719,12 @@ async def _finalized_eligible_driver_days(
     return result, _availability("EMPTY" if not result else "AVAILABLE")
 
 
-async def _finalized_status_entries(
-    snapshot: dict[str, Any] | None, period: dict[str, Any], db: AsyncConnection,
+def _finalized_status_entries(
+    snapshot: dict[str, Any] | None,
 ) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
     entries: list[dict[str, Any]] = []
     if snapshot is not None and snapshot["reportevidenceversion"] is not None:
-        entries = await status_evidence.read_status_entries(
-            db,
-            snapshot_id=snapshot["payrollcalculationsnapshotid"],
-            company_id=period["companyid"],
-            branch_id=period["branchid"],
-            period_id=period["payrollperiodid"],
-        )
+        entries = status_evidence.status_entries_from_content(snapshot["content"])
     return entries, status_evidence.status_evidence_availability(snapshot, entries)
 
 
@@ -759,7 +759,7 @@ async def build_finalized_off_drivers(
     """Build P6B's full-period immutable Off/Status source projection."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
     snapshot, provenance = await _originating_snapshot(period, db)
-    statuses, status_availability = await _finalized_status_entries(snapshot, period, db)
+    statuses, status_availability = _finalized_status_entries(snapshot)
     calendar_days, calendar_availability = await _finalized_scheduled_work_days(period, db)
     eligibility: dict[int, dict[str, Any]] | None = None
     eligibility_availability = _availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")

@@ -11,8 +11,8 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency
-from app.payroll.final_line_projection import verify_final_lines
-from app.payroll.snapshot_verification import SnapshotEvidenceError, verify_snapshot
+from app.payroll.financial_authority import resolve_financial_authority
+from app.payroll.snapshot_verification import SnapshotEvidenceError
 
 FINALIZED_STATUSES = {"Locked", "Archived"}
 
@@ -91,31 +91,26 @@ async def resolve_originating_snapshot(
 ) -> tuple[dict[str, Any] | None, dict[str, str | None]]:
     """The one snapshot a finalized period's FinalLines name, verified; never a "latest".
 
-    The snapshot is selected by ``PayrollFinalLines.PayrollCalculationSnapshotID`` (exactly one
-    snapshot per finalized period), then verified: calculation version, the hash recomputed from
-    its persisted rows, the evidence arithmetic, and the FinalLines being exactly its component
-    projection. Any failure raises its stable code. The returned mapping carries the header
-    fields readers use and the verified ``content``.
+    Resolved through the shared financial authority, which selects the snapshot by
+    ``PayrollFinalLines.PayrollCalculationSnapshotID`` (exactly one per finalized period) and
+    verifies it: calculation version, the financial hash (with the used rates), the evidence
+    arithmetic, the report evidence, and the FinalLines being exactly its component projection.
+    A snapshot that does not verify raises its stable code. A period whose FinalLines name no
+    snapshot or several is unavailable: the financial sections are withheld with the reason.
+    The returned mapping carries the header fields readers use and the verified ``content``.
     """
-    rows = (await db.execute(text("""
-        SELECT DISTINCT payrollcalculationsnapshotid
-        FROM payroll.payrollfinallines
-        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-    """), {
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).all()
-    if not rows:
-        return None, availability("UNAVAILABLE", "FINAL_LINES_EMPTY")
-    if len(rows) != 1:
-        return None, availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
     try:
-        content = await verify_snapshot(
-            db, snapshot_id=int(rows[0][0]), company_id=int(period["companyid"]),
-            branch_id=int(period["branchid"]), period_id=int(period["payrollperiodid"]))
-        await verify_final_lines(db, content)
+        authority = await resolve_financial_authority(
+            db, period_id=int(period["payrollperiodid"]), company_id=int(period["companyid"]),
+            branch_id=int(period["branchid"]))
     except SnapshotEvidenceError as exc:
+        if exc.code in {"FINAL_LINES_EMPTY", "PROVENANCE_UNAVAILABLE"}:
+            return None, availability("UNAVAILABLE", exc.code)
         raise finalized_error(exc.code, exc.message) from exc
+    content = authority.content
+    if content is None:
+        raise finalized_error(
+            "FINALIZED_LIBRARY_UNAVAILABLE", "The period has no finalized financial authority.")
     return {
         "payrollcalculationsnapshotid": content["PayrollCalculationSnapshotID"],
         "revisionnumber": content["RevisionNumber"],

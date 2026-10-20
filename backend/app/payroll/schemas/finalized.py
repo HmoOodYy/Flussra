@@ -66,7 +66,7 @@ class FinalLineSummary(BaseModel):
 
 class FinalizedFinancialSummary(BaseModel):
     __module__ = "app.payroll.schemas"
-    total_pay: Decimal
+    total_pay: Decimal | None = None
     final_line_count: int
     driver_count: int
 

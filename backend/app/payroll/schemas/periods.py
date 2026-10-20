@@ -35,9 +35,12 @@ class PeriodSummary(BaseModel):
     draft_lines: int = 0
     draft_lines_needing_attention: int = 0
     final_lines: int = 0
-    # Ledger aggregates (vw_PayrollPeriodList 0024 — populated only for Locked/Archived)
-    final_gross: Decimal = Decimal("0")
+    # Ledger aggregates, populated only for Locked/Archived from the verified snapshot of the
+    # period; withheld (None) when its financial authority is unavailable.
+    final_gross: Decimal | None = Decimal("0")
     final_driver_count: int = 0
+    financial_authority: str | None = None
+    financial_authority_reason: str | None = None
 
 
 
