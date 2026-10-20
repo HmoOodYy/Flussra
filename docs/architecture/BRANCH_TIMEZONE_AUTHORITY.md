@@ -57,7 +57,7 @@ New payroll source checks intersect the live assignment instant range with the f
 
 Migration `0086` refuses before DDL when any Driver profile, DriverTransferRequest, or PayrollPeriod exists (`BRANCH_TIMEZONE_REBUILD_REQUIRED`). The old DATE history cannot be truthfully translated into instants and old frozen payroll evidence cannot be rewritten. Rebuild the preproduction database or explicitly correct invalid legacy Branch timezone configuration before retrying; the migration does not invent transfer times or default to UTC. Branches without Driver history and Employees without profiles may remain. The Durable Driver Stage 1 migration follows the same clean-cutover pattern.
 
-This refoundation does not complete P4c. Target payroll submit, resubmit, finalization, finalization preview and immutable evidence remain blocked under the existing `TARGET_PAYROLL_EVIDENCE_NOT_READY` gate until the Unified Refoundation Plan's P4c requirements are met.
+This refoundation did not complete P4c. Target payroll submit, resubmit, finalization, finalization preview and immutable evidence stayed blocked under the `TARGET_PAYROLL_EVIDENCE_NOT_READY` gate until P4c delivered immutable calculation evidence (migration `0089`) and removed that gate.
 
 ## References
 
