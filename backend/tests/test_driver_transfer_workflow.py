@@ -38,13 +38,13 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.builders.final_evidence import seed_finalized_evidence
 from tests.builders.owned_scope import (
     create_owned_branch,
 )
 from tests.builders.pay_rules import insert_pay_rule
 from tests.builders.workforce import create_driver_employee_record
 from tests.builders.workforce_db import current_driver_assignment_id
-from tests.db_state import allow_final_line_insert
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -1359,12 +1359,6 @@ async def test_completion_preserves_final_lines_on_old_assignment(
         session_client, auth_token, paytest_branch_id, suffix=sfx
     )
 
-    cid_r = await direct_db.execute(
-        _text("SELECT companyid FROM core.drivers WHERE driverid = :did"),
-        {"did": drv_id},
-    )
-    company_id = cid_r.scalar_one()
-
     period_id = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
         "2092-07-01", "2092-07-07", direct_db,
@@ -1372,20 +1366,8 @@ async def test_completion_preserves_final_lines_on_old_assignment(
     old_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
 
     # Insert a FinalLine for the old assignment
-    # Phase 6: authorise via session-level GUC for test setup.
-    async with allow_final_line_insert(direct_db):
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollfinallines
-                    (payrollperiodid, companyid, branchid, driverassignmentid, driverid,
-                     linetype, sourcetype, finalamount, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES
-                    (:pid, :cid, :bid, :aid, :did,
-                     'FinalHistTest', 'Manual', 100.00, 'USD', 2)
-            """),
-            {"pid": period_id, "cid": company_id, "bid": paytest_branch_id,
-             "aid": old_assignment_id, "did": drv_id},
-        )
+    await seed_finalized_evidence(
+        direct_db, period_id=period_id, driver_assignment_id=old_assignment_id)
 
     # Complete transfer
     r_t = await _create_transfer(
@@ -1401,7 +1383,7 @@ async def test_completion_preserves_final_lines_on_old_assignment(
     # Old final line still on the old assignment
     cnt_old = await direct_db.execute(
         _text("SELECT COUNT(*) FROM payroll.payrollfinallines "
-              "WHERE driverassignmentid = :aid AND linetype='FinalHistTest'"),
+              "WHERE driverassignmentid = :aid AND linetype = 'BONUS'"),
         {"aid": old_assignment_id},
     )
     assert cnt_old.scalar_one() == 1

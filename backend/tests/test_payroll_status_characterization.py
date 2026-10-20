@@ -973,7 +973,7 @@ async def _owned_driver_pay_rule(
                         """
                         SELECT EXISTS(
                             SELECT 1
-                            FROM payroll.payrollcalculationsnapshotusedratedefinitions
+                            FROM payroll.payrollcalculationsnapshotminmaxrules
                             WHERE driverpayruleid = :id
                         )
                         """

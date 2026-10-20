@@ -519,11 +519,10 @@ async def _hire_date_has_payroll_history(
                   AND dl.Status <> 'Void' AND dl.WorkDate < :hire_date
             ) OR EXISTS (
                 SELECT 1
-                FROM payroll.PayrollFinalLines fl
-                JOIN core.DriverAssignments a ON a.DriverAssignmentID = fl.DriverAssignmentID
+                FROM payroll.vw_FinalizedWorkDates fw
+                JOIN core.DriverAssignments a ON a.DriverAssignmentID = fw.DriverAssignmentID
                 WHERE a.CompanyID = :company_id AND a.EmployeeID = :employee_id
-                  AND fl.CompanyID = :company_id AND fl.WorkDate IS NOT NULL
-                  AND fl.WorkDate < :hire_date
+                  AND fw.CompanyID = :company_id AND fw.WorkDate < :hire_date
             )
         """),
         {"company_id": company_id, "employee_id": employee_id, "hire_date": hire_date},
@@ -740,9 +739,9 @@ async def terminate_driver_employee(
 
     final_line = await db.execute(text("""
         SELECT 1
-        FROM payroll.PayrollFinalLines fl
-        WHERE fl.DriverID = :driver_id
-          AND fl.CompanyID = :company_id AND fl.WorkDate > :termination_date
+        FROM payroll.vw_FinalizedWorkDates fw
+        WHERE fw.DriverID = :driver_id
+          AND fw.CompanyID = :company_id AND fw.WorkDate > :termination_date
         LIMIT 1
     """), {"company_id": company_id, "driver_id": driver_id,
            "termination_date": data.termination_date})

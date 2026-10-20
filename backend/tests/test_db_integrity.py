@@ -17,14 +17,16 @@ Isolation principles:
     composite FK (not the individual Company or Branch FK) is the specific
     constraint under test.  All temp rows are cleaned up in try/finally.
 """
+from uuid import uuid4
+
 import pytest
 from sqlalchemy import text as _text
 from sqlalchemy.exc import IntegrityError
 
+from tests.builders.final_evidence import discard_chain, insert_final_line, seed_snapshot_component
 from tests.builders.pay_rules import insert_pay_rule, publish_version
 from tests.db_state import (
     DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
-    allow_final_line_insert,
     suspended_test_triggers,
 )
 
@@ -436,32 +438,18 @@ class TestFinalLinePeriodIntegrity:
     async def test_final_line_wrong_branch_for_period_rejected(
         self,
         direct_db,
-        hq_branch_id: int,
         paytest_branch_id: int,
         created_driver_assignment_id: int,
         created_period_id: int,
     ):
-        company_id = await _get_company_id(direct_db, hq_branch_id)
-        # Phase 6: allow the INSERT so the FK violation (not the insert guard) is tested.
-        async with allow_final_line_insert(direct_db):
+        chain = await seed_snapshot_component(
+            direct_db, period_id=created_period_id,
+            driver_assignment_id=created_driver_assignment_id)
+        try:
             with pytest.raises(IntegrityError) as exc_info:
-                await direct_db.execute(
-                    _text("""
-                        INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
-                             linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                        VALUES
-                            (:cid, :bad_branch, :period_id, :assignment_id,
-                             (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :assignment_id),
-                             'REGULAR', 1, 100, 'Test', 'USD', 2)
-                    """),
-                    {
-                        "cid": company_id,
-                        "bad_branch": paytest_branch_id,
-                        "period_id": created_period_id,
-                        "assignment_id": created_driver_assignment_id,
-                    },
-                )
+                await insert_final_line(direct_db, chain, branch=paytest_branch_id)
+        finally:
+            await discard_chain(direct_db, chain)
         assert _is_fk_violation(exc_info.value), (
             f"Expected FK violation (23503), got: {exc_info.value}"
         )
@@ -469,30 +457,17 @@ class TestFinalLinePeriodIntegrity:
     async def test_final_line_wrong_company_for_period_rejected(
         self,
         direct_db,
-        hq_branch_id: int,
         created_driver_assignment_id: int,
         created_period_id: int,
     ):
-        # Phase 6: allow the INSERT so the FK violation (not the insert guard) is tested.
-        async with allow_final_line_insert(direct_db):
+        chain = await seed_snapshot_component(
+            direct_db, period_id=created_period_id,
+            driver_assignment_id=created_driver_assignment_id)
+        try:
             with pytest.raises(IntegrityError) as exc_info:
-                await direct_db.execute(
-                    _text("""
-                        INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
-                             linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                        VALUES
-                            (:bad_cid, :branch_id, :period_id, :assignment_id,
-                             (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :assignment_id),
-                             'REGULAR', 1, 100, 'Test', 'USD', 2)
-                    """),
-                    {
-                        "bad_cid": 99999,
-                        "branch_id": hq_branch_id,
-                        "period_id": created_period_id,
-                        "assignment_id": created_driver_assignment_id,
-                    },
-                )
+                await insert_final_line(direct_db, chain, company=99999)
+        finally:
+            await discard_chain(direct_db, chain)
         assert _is_fk_violation(exc_info.value), (
             f"Expected FK violation (23503), got: {exc_info.value}"
         )
@@ -504,36 +479,42 @@ class TestFinalLinePeriodIntegrity:
 
 @pytest.mark.asyncio
 class TestFinalLineDriverIntegrity:
-    """FinalLine.BranchID must match its Driver's BranchID."""
+    """FinalLine.BranchID must match its DriverAssignment's BranchID."""
 
     async def test_final_line_wrong_branch_for_driver_rejected(
         self,
         direct_db,
         hq_branch_id: int,
+        paytest_branch_id: int,
         paytest_driver_assignment_id: int,
         created_period_id: int,
     ):
         company_id = await _get_company_id(direct_db, hq_branch_id)
-        # Phase 6: allow the INSERT so the FK violation (not the insert guard) is tested.
-        async with allow_final_line_insert(direct_db):
+        other_period_id = (await direct_db.execute(
+            _text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype,
+                     startdate, enddate)
+                VALUES (:cid, :bid, 'Cancelled', :code, 'integrity', 'Week',
+                        DATE '2041-01-01', DATE '2041-01-07')
+                RETURNING payrollperiodid
+            """),
+            {"cid": company_id, "bid": paytest_branch_id, "code": "FLI-" + uuid4().hex[:10]},
+        )).scalar_one()
+        chain = await seed_snapshot_component(
+            direct_db, period_id=other_period_id,
+            driver_assignment_id=paytest_driver_assignment_id)
+        # The line names the Branch of another period while the DriverAssignment belongs to
+        # the PAYTEST Branch.
+        try:
             with pytest.raises(IntegrityError) as exc_info:
-                await direct_db.execute(
-                    _text("""
-                        INSERT INTO payroll.payrollfinallines
-                            (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
-                             linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                        VALUES
-                            (:cid, :hq_branch, :period_id, :assignment_id,
-                             (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :assignment_id),
-                             'REGULAR', 1, 100, 'Test', 'USD', 2)
-                    """),
-                    {
-                        "cid": company_id,
-                        "hq_branch": hq_branch_id,
-                        "period_id": created_period_id,
-                        "assignment_id": paytest_driver_assignment_id,
-                    },
-                )
+                await insert_final_line(
+                    direct_db, chain, branch=hq_branch_id, period=created_period_id)
+        finally:
+            await discard_chain(direct_db, chain)
+            await direct_db.execute(
+                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
+                {"pid": other_period_id})
         assert _is_fk_violation(exc_info.value), (
             f"Expected FK violation (23503), got: {exc_info.value}"
         )

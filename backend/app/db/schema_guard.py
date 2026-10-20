@@ -270,6 +270,76 @@ def _trigger_exists_and_enabled(cur, trigger_name: str, table_schema: str, table
 # Payroll trust guard — checks all Phase 1–9 required objects
 # ---------------------------------------------------------------------------
 
+# Immutable calculation evidence (migration 0089): the tables of the v2 evidence shape, the
+# columns the writer and the readers depend on, and the objects that protect them.
+_EVIDENCE_V2_TABLES = (
+    "payrollcalculationsnapshotcomponents",
+    "payrollcalculationsnapshotminmaxevaluations",
+    "payrollcalculationsnapshotminmaxrules",
+)
+_EVIDENCE_V2_COLUMNS = (
+    ("payrollcalculationsnapshots", "periodstartdate"),
+    ("payrollcalculationsnapshots", "periodenddate"),
+    ("payrollcalculationsnapshots", "payableroundingversion"),
+    ("payrollcalculationsnapshots", "minmaxprorationversion"),
+    ("payrollcalculationsnapshots", "scheduledworkdates"),
+    ("payrollcalculationsnapshots", "warnings"),
+    ("payrollcalculationdrivertotals", "employeeid"),
+    ("payrollcalculationsnapshotlines", "payrollcalculationsnapshotcomponentid"),
+    ("payrollcalculationsnapshotlines", "driverratescheduleid"),
+    ("payrollcalculationsnapshotlines", "payrollperioddefinitionid"),
+    ("payrollcalculationsnapshotusedratedefinitions", "driverratescheduleid"),
+    ("payrollfinallines", "payrollcalculationsnapshotid"),
+    ("payrollfinallines", "payrollcalculationsnapshotcomponentid"),
+    ("payrollfinallines", "employeeid"),
+    ("payrollfinallines", "componentkind"),
+)
+_EVIDENCE_V2_RETIRED_COLUMNS = (
+    ("payrollcalculationsnapshotlines", "payitemid"),
+    ("payrollcalculationsnapshotusedratedefinitions", "payitemid"),
+    ("payrollcalculationsnapshotusedratedefinitions", "driverpayruleid"),
+)
+_EVIDENCE_V2_IMMUTABLE_TRIGGERS = (
+    ("trg_payrollcalculationsnapshotcomponents_immutable", "payrollcalculationsnapshotcomponents"),
+    ("trg_payrollcalculationsnapshotminmaxevaluations_immutable", "payrollcalculationsnapshotminmaxevaluations"),
+    ("trg_payrollcalculationsnapshotminmaxrules_immutable", "payrollcalculationsnapshotminmaxrules"),
+)
+_EVIDENCE_V2_FUNCTIONS = (
+    "payroll.fn_driverrateusedinfinalizedpayroll(bigint)",
+    "payroll.fn_iscanonicaldateset(date[])",
+)
+
+
+def _check_calculation_evidence_v2(cur) -> list[str]:
+    errors: list[str] = []
+    for table in _EVIDENCE_V2_TABLES:
+        cur.execute("SELECT to_regclass(%s)", (f"payroll.{table}",))
+        if cur.fetchone()[0] is None:
+            errors.append(f"Missing calculation evidence table payroll.{table}")
+    for table, column in _EVIDENCE_V2_COLUMNS:
+        if not _column_exists(cur, "payroll", table, column):
+            errors.append(f"Missing calculation evidence column payroll.{table}.{column}")
+    for table, column in _EVIDENCE_V2_RETIRED_COLUMNS:
+        if _column_exists(cur, "payroll", table, column):
+            errors.append(f"Retired calculation evidence column still exists: payroll.{table}.{column}")
+    for trigger, table in _EVIDENCE_V2_IMMUTABLE_TRIGGERS:
+        if not _trigger_exists_and_enabled(cur, trigger, "payroll", table):
+            errors.append(f"Missing or disabled calculation evidence immutability trigger {trigger}.")
+    for signature in _EVIDENCE_V2_FUNCTIONS:
+        cur.execute("SELECT to_regprocedure(%s)", (signature,))
+        if cur.fetchone()[0] is None:
+            errors.append(f"Missing calculation evidence function {signature}.")
+    cur.execute(
+        "SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c "
+        "WHERE c.conrelid = to_regclass('payroll.payrollcalculationsnapshots') "
+        "AND c.conname = 'ck_payrollcalculationsnapshots_calculationversion'"
+    )
+    version_check = cur.fetchone()
+    if version_check is None or "payroll-calculation-v2" not in version_check[0]:
+        errors.append("The calculation snapshot version check is not payroll-calculation-v2.")
+    return errors
+
+
 def _check_payroll_trust(cur) -> list[str]:
     """
     Verify all payroll trust schema objects required by Phases 1–11.
@@ -687,6 +757,8 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
             )
     if not _trigger_exists_and_enabled(cur, "trg_driverpayrules_beforeupdate", "payroll", "driverpayrules"):
         temporal_errors.append("Missing or disabled pay-rule integrity trigger trg_DriverPayRules_BeforeUpdate.")
+
+    temporal_errors.extend(_check_calculation_evidence_v2(cur))
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)

@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from uuid import uuid4
 
 import httpx
 import pytest
 from sqlalchemy import text
 
+from tests.builders.final_evidence import discard_chain, insert_final_line, seed_snapshot_component
 from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
-from tests.db_state import (
-    FINAL_LINE_IMMUTABLE_TRIGGER,
-    allow_final_line_insert,
-    suspended_test_triggers,
-)
 
 
 def auth(token: str) -> dict[str, str]:
@@ -568,19 +565,11 @@ async def test_hire_date_guard_protects_final_line_dates(
         client, auth_token, hq_branch_id, hire_date="2000-01-01",
         driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
-    driver_id = employee["driver"]["driver_id"]
     assignment_id = employee["current_or_pending_assignment"]["driver_assignment_id"]
-    async with allow_final_line_insert(direct_db):
-        final_line_id = (await direct_db.execute(text("""
-            INSERT INTO payroll.PayrollFinalLines
-                (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, DriverID, WorkDate, LineType,
-                 Quantity, FinalAmount, SourceType, LineScope, CurrencyCode, CurrencyMinorUnitDigits)
-            VALUES (1, :branch_id, :period_id, :assignment_id, :driver_id, DATE '2018-06-01',
-                    :line_type, 1, 1, 'Manual', 'Daily', 'USD', 2)
-            RETURNING FinalLineID
-        """), {"branch_id": hq_branch_id, "period_id": created_period_id,
-               "assignment_id": assignment_id, "driver_id": driver_id,
-               "line_type": f"P1B-{suffix()}"})).scalar_one()
+    chain = await seed_snapshot_component(
+        direct_db, period_id=created_period_id, driver_assignment_id=assignment_id,
+        work_date=date(2018, 6, 1))
+    await insert_final_line(direct_db, chain)
     try:
         response = await client.patch(
             f"/workforce/employees/{employee['employee_id']}",
@@ -588,13 +577,8 @@ async def test_hire_date_guard_protects_final_line_dates(
         )
         assert response.status_code == 422
     finally:
-        # The line sits on the session-shared HQ period; remove exactly this row.
-        async with suspended_test_triggers(direct_db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
-            deleted = await direct_db.execute(
-                text("DELETE FROM payroll.PayrollFinalLines WHERE FinalLineID = :id"),
-                {"id": final_line_id},
-            )
-            assert deleted.rowcount == 1, f"expected to delete exactly FinalLine {final_line_id}"
+        # The evidence sits on the session-shared HQ period; remove exactly this chain.
+        await discard_chain(direct_db, chain)
 
 
 @pytest.mark.asyncio

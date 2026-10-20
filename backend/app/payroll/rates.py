@@ -1240,18 +1240,16 @@ async def void_rate(
             {"cid": company_id, "bid": rate.branch_id},
         )
 
-    # Block void if this DriverRate is referenced by PayrollFinalLines.
+    # Block void if this DriverRate is used by finalized payroll: the used-rate evidence of a
+    # snapshot that has FinalLines records it.
     # Runs after ownership validation so cross-company ID probing does not leak info.
     # Runs before mutation and before any audit write.
     # (For Approved/Superseded rates this now also runs under the advisory lock.)
     used = await db.execute(
-        text(
-            "SELECT 1 FROM payroll.payrollfinallines "
-            "WHERE driverrateid = :rid LIMIT 1"
-        ),
+        text("SELECT payroll.fn_DriverRateUsedInFinalizedPayroll(:rid)"),
         {"rid": rate_id},
     )
-    if used.first() is not None:
+    if used.scalar_one():
         raise HTTPException(
             status_code=422,
             detail="This rate has been used in finalized payroll and cannot be voided.",

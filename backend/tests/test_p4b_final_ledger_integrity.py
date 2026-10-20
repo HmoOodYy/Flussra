@@ -7,11 +7,15 @@ controlled finalization path writes them (through the insert-guard setting).
 """
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 import psycopg2
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
+from tests.builders.final_evidence import insert_final_line, seed_snapshot_component
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     p3c_application,
     p3c_database_engine,
@@ -32,43 +36,24 @@ from tests.payroll_runtime_fixtures import (
 
 pytestmark = pytest.mark.asyncio
 
-INSERT = """
-    INSERT INTO payroll.payrollfinallines
-        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, linetype, sourcetype,
-         currencycode, currencyminorunitdigits, quantity, finalamount, linescope, workdate)
-    SELECT p.companyid, p.branchid, p.payrollperiodid, %s,
-           (SELECT a.driverid FROM core.driverassignments a WHERE a.driverassignmentid = %s),
-           'DailyNote', 'Manual',
-           'USD', 2, 1, 100, 'Daily', p.startdate
-    FROM payroll.payrollperiods p WHERE p.payrollperiodid = %s
-    RETURNING finallineid
-"""
-
-
 @pytest.fixture(name="tenant")
 def payroll_tenant(p3b_dsn):
     return build_payroll_tenant(p3b_dsn)
 
 
-def _insert_final_line(tenant, period_id: int) -> int:
-    """The controlled write path: the guard setting is on for the writing transaction."""
-    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT set_config('app.allow_payroll_final_line_insert', 'true', true)")
-            cur.execute(INSERT, (tenant.driver_a, tenant.driver_a, period_id))
-            line_id = cur.fetchone()[0]
-        conn.commit()
-        return line_id
-    finally:
-        conn.close()
+async def _insert_final_line(engine, tenant, period_id: int, **chain_options) -> int:
+    """The controlled write path: a snapshot component and the FinalLine projecting it."""
+    async with engine.begin() as conn:
+        chain = await seed_snapshot_component(
+            conn, period_id=period_id, driver_assignment_id=tenant.driver_a, **chain_options)
+        return await insert_final_line(conn, chain)
 
 
 async def _locked_period(client, engine, tenant) -> tuple[dict, int]:
     period, _ = await open_period_with_grid(client, engine, tenant)
     period_id = period["payroll_period_id"]
     force_status(tenant, period_id, "Approved")
-    line_id = _insert_final_line(tenant, period_id)
+    line_id = await _insert_final_line(engine, tenant, period_id)
     force_status(tenant, period_id, "Locked")
     return period, line_id
 
@@ -82,11 +67,25 @@ async def test_final_lines_can_only_be_inserted_through_the_controlled_path(
 ):
     period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
     period_id = period["payroll_period_id"]
+    async with p3c_engine.begin() as conn:
+        chain = await seed_snapshot_component(
+            conn, period_id=period_id, driver_assignment_id=tenant.driver_a)
     for status in ("Open", "Locked"):
         if status == "Locked":
             force_status(tenant, period_id, "Locked")
-        with pytest.raises(psycopg2.errors.RestrictViolation):
-            query(tenant, INSERT, (tenant.driver_a, tenant.driver_a, period_id))
+        async with p3c_engine.connect() as conn:
+            with pytest.raises(DBAPIError) as refused:
+                await conn.execute(text(
+                    "INSERT INTO payroll.payrollfinallines "
+                    "(companyid, branchid, payrollperiodid, driverassignmentid, driverid, employeeid, "
+                    "linetype, linescope, finalamount, sourcetype, sourceid, sourcesnapshot, "
+                    "currencycode, currencyminorunitdigits, payrollcalculationsnapshotid, "
+                    "payrollcalculationsnapshotcomponentid, componentkind) "
+                    "VALUES (:company, :branch, :period, :assignment, :driver, :employee, 'BONUS', "
+                    "'Period', 100, 'SnapshotComponent', 'x', '{}'::jsonb, 'USD', 2, :snapshot, "
+                    ":component, 'BONUS')"), {**chain.params, "snapshot": chain.snapshot_id,
+                                              "component": chain.component_id})
+            assert "payroll_insert_guard" in str(refused.value)
     assert query(tenant, "SELECT count(*) FROM payroll.payrollfinallines "
                          "WHERE payrollperiodid = %s", (period_id,)) == [(0,)]
 
@@ -278,17 +277,10 @@ async def test_a_driver_rate_used_by_a_final_line_cannot_be_voided_changed_or_de
     period_id = period["payroll_period_id"]
     used, unused = _driver_rate(tenant, tenant.driver_a), _driver_rate(tenant, tenant.driver_a2)
     force_status(tenant, period_id, "Approved")
-    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT set_config('app.allow_payroll_final_line_insert', 'true', true)")
-            cur.execute(INSERT,
-                        (tenant.driver_a, tenant.driver_a, period_id))
-            cur.execute("UPDATE payroll.payrollfinallines SET driverrateid = %s "
-                        "WHERE payrollperiodid = %s", (used, period_id))
-        conn.commit()
-    finally:
-        conn.close()
+    # The finalized snapshot records the Status rate its line used (the used-rate evidence).
+    await _insert_final_line(
+        p3c_engine, tenant, period_id, amount=Decimal("15"), work_date=date(2000, 1, 5),
+        driver_rate_id=used)
 
     with pytest.raises(psycopg2.errors.RestrictViolation, match="driverrate_void_guard"):
         query(tenant, "UPDATE payroll.driverrates SET status = 'Voided' WHERE driverrateid = %s",

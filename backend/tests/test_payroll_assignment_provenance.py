@@ -21,10 +21,12 @@ from app.payroll.snapshot_hash import (
 )
 
 
-def _driver_total(**overrides):
+def _content(**overrides):
     total = {
         "DriverAssignmentID": 11,
         "DriverID": 5,
+        "EmployeeID": 3,
+        "BranchID": 1,
         "DriverNumberSnapshot": "D-5",
         "DriverNameSnapshot": "Alex",
         "DailyPay": Decimal("100.00"),
@@ -33,26 +35,25 @@ def _driver_total(**overrides):
         "MaximumAdjustment": Decimal("0"),
         "BonusTotal": Decimal("0"),
         "ExpectedPay": Decimal("100.00"),
+        "Components": [],
+        "MinMax": {"Status": "NO_RULE", "Rules": []},
         "Lines": [],
     }
     total.update(overrides)
-    return total
+    return {
+        "CompanyID": 1, "BranchID": 1, "PayrollPeriodID": 1,
+        "CalculationVersion": "payroll-calculation-v2", "SourceConfigHash": "0" * 64,
+        "DriverTotals": [total],
+    }
 
 
-def _snapshot_hash(total):
-    return calculate_snapshot_hash(
-        company_id=1, branch_id=1, payroll_period_id=1, revision_number=1,
-        calculation_version="payroll-calculation-v1", source_config_hash="0" * 64,
-        driver_totals=[total],
-    )
-
-
-def test_snapshot_hash_covers_assignment_driver_and_number():
-    base = _snapshot_hash(_driver_total())
-    assert base == _snapshot_hash(deepcopy(_driver_total()))
-    assert base != _snapshot_hash(_driver_total(DriverAssignmentID=12))
-    assert base != _snapshot_hash(_driver_total(DriverID=6))
-    assert base != _snapshot_hash(_driver_total(DriverNumberSnapshot="D-6"))
+def test_snapshot_hash_covers_assignment_driver_employee_and_number():
+    base = calculate_snapshot_hash(_content())
+    assert base == calculate_snapshot_hash(deepcopy(_content()))
+    assert base != calculate_snapshot_hash(_content(DriverAssignmentID=12))
+    assert base != calculate_snapshot_hash(_content(DriverID=6))
+    assert base != calculate_snapshot_hash(_content(EmployeeID=4))
+    assert base != calculate_snapshot_hash(_content(DriverNumberSnapshot="D-6"))
 
 
 def test_report_evidence_hash_covers_assignment_and_driver():

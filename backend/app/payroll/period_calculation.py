@@ -180,7 +180,6 @@ class _CalculationPacketLine:
     pay_definition_id: int | None = None
     definition_name: str | None = None
     calculation_status: str | None = None
-    pay_item_id: int | None = None
     rate_column_id: int | None = None
     rate_type_id: int | None = None
     driver_rate_id: int | None = None
@@ -189,6 +188,16 @@ class _CalculationPacketLine:
     snapshot_source_type: str | None = None
     snapshot_source_id: str | None = None
     snapshot_calculated_amount: Decimal | None = None
+    # The rate an ordinary line used, as resolved for its WorkDate: the target definition,
+    # the whole schedule, the schedule value and its status and window. ``resolved_rate_amount``
+    # is the rate amount itself. Status lines keep rate_type_id / driver_rate_id instead.
+    rate_definition_id: int | None = None
+    driver_rate_schedule_id: int | None = None
+    rate_component_definition_id: int | None = None
+    schedule_status: str | None = None
+    schedule_effective_from: date | None = None
+    schedule_effective_to: date | None = None
+    calculation_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,9 +219,13 @@ class _OfficialComponent:
     official_amount: Decimal
     payroll_period_definition_id: int | None = None
     pay_definition_id: int | None = None
+    rate_definition_id: int | None = None
     calculation_method: str | None = None
     calculation_method_version: int | None = None
+    definition_code: str | None = None
+    definition_name: str | None = None
     status_rate_column_id: int | None = None
+    status_rate_column_name: str | None = None
     driver_pay_rule_id: int | None = None
     source_ids: tuple[str, ...] = ()
     unresolved_line_count: int = 0
@@ -243,7 +256,10 @@ class _MinMaxProration:
     ``status`` is APPLIED or the reason neither rule applied. ``numerator`` / ``denominator``
     are the eligible and the scheduled whole days of the period (None when the evaluation
     stopped before the days were counted). ``base_amount`` is the official ordinary plus
-    status pay the rules were compared with (Bonus excluded).
+    status pay the rules were compared with (Bonus excluded). ``scheduled_work_dates`` are
+    the frozen scheduled days the denominator counted and ``counted_work_dates`` the days the
+    DriverAssignment owns, is eligible on and is not off for (the numerator); both are empty
+    when the evaluation stopped before the days were counted.
     """
 
     driver_assignment_id: int
@@ -257,12 +273,15 @@ class _MinMaxProration:
     minimum_rule: _MinMaxRule | None = None
     maximum_rule: _MinMaxRule | None = None
     version: str = MINMAX_PRORATION_VERSION
+    scheduled_work_dates: tuple[date, ...] = ()
+    counted_work_dates: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True)
 class _CalculationPacketDriverTotal:
     driver_assignment_id: int
     driver_id: int
+    employee_id: int
     driver_number: str | None
     driver_name: str | None
     daily_pay: Decimal
@@ -292,6 +311,9 @@ class _LiveCalculationPacket:
     currency_minor_unit_digits: int | None = None
     payable_rounding_version: str = PAYABLE_ROUNDING_VERSION
     minmax_proration_version: str = MINMAX_PRORATION_VERSION
+    # The frozen scheduled days the Min/Max proration counted (empty when no evaluation
+    # reached the day count).
+    scheduled_work_dates: tuple[date, ...] = ()
 
 
 async def _validate_legacy_status_canonicalized(
@@ -685,15 +707,19 @@ async def _evaluate_minmax(
                     + " cannot be prorated."])
             continue
 
-        numerator, denominator = minmax.coverage(
+        counted = minmax.counted_days(
             scheduled, eligible.get(assignment_id, ()), off_days.get(assignment_id, ()))
+        numerator, denominator = len(counted), len(scheduled)
+        # The days behind the fraction travel with it so it can be frozen without recounting.
+        scheduled_days = tuple(sorted(scheduled))
         if denominator == 0 or numerator == 0:
             # Neither rule applies: no top-up, no cap, the Driver is paid exactly what was
             # earned. Only a period with no scheduled day at all is worth a warning.
             outcome = _MinMaxOutcome(proration(
                 minmax.NO_SCHEDULED_DAYS if denominator == 0 else minmax.NO_ELIGIBLE_SCHEDULED_DAYS,
                 numerator=numerator, denominator=denominator,
-                minimum_rule=minimum, maximum_rule=maximum))
+                minimum_rule=minimum, maximum_rule=maximum,
+                scheduled_work_dates=scheduled_days, counted_work_dates=counted))
             if denominator == 0:
                 ids = ", ".join(
                     f"{label} {rule.driver_pay_rule_id}"
@@ -713,7 +739,8 @@ async def _evaluate_minmax(
                 maximum, prorated_amount=minmax.prorate(maximum.amount, numerator, denominator))
         outcomes[assignment_id] = _MinMaxOutcome(
             proration(minmax.APPLIED, numerator=numerator, denominator=denominator,
-                      minimum_rule=minimum, maximum_rule=maximum),
+                      minimum_rule=minimum, maximum_rule=maximum,
+                      scheduled_work_dates=scheduled_days, counted_work_dates=counted),
             raw_minimum=minmax.raw_minimum_adjustment(
                 base, None if minimum is None else minimum.prorated_amount),
             raw_maximum=minmax.raw_maximum_adjustment(
@@ -829,6 +856,7 @@ async def _build_live_calculation_packet(
     driver_names: dict[int, str | None] = {}
     driver_numbers: dict[int, str | None] = {}
     driver_permanent_ids: dict[int, int] = {}
+    driver_employee_ids: dict[int, int] = {}
     driver_line_nmr: dict[int, bool] = {}
     driver_lines: dict[int, list[_CalculationPacketLine]] = {}
     ordinary: dict[tuple[int, int], _Accumulator] = {}
@@ -850,8 +878,11 @@ async def _build_live_calculation_packet(
             _Accumulator("ORDINARY", drv, {
                 "payroll_period_definition_id": definition.payroll_period_definition_id,
                 "pay_definition_id": definition.pay_definition_id,
+                "rate_definition_id": definition.rate_definition_id,
                 "calculation_method": definition.calculation_method,
                 "calculation_method_version": definition.calculation_method_version,
+                "definition_code": definition.code,
+                "definition_name": definition.name,
             }))
         component.add(calc.amount, str(line.draft_line_id), unresolved=calc.needs_attention)
         driver_lines[drv].append(_CalculationPacketLine(
@@ -862,7 +893,7 @@ async def _build_live_calculation_packet(
             work_date=line.work_date,
             driver_assignment_id=drv,
             quantity=line.quantity,
-            resolved_rate_amount=None,
+            resolved_rate_amount=calc.rate_amount,
             calculated_amount=calc.amount,
             needs_manager_review=calc.needs_attention,
             blocker_reason=_CALCULATION_BLOCKER_REASONS.get(calc.status),
@@ -870,20 +901,16 @@ async def _build_live_calculation_packet(
             pay_definition_id=definition.pay_definition_id,
             definition_name=definition.name,
             calculation_status=calc.status.value,
-            source_evidence={
-                "DraftLineID": line.draft_line_id,
-                "PayrollPeriodDefinitionID": definition.payroll_period_definition_id,
-                "PayDefinitionID": definition.pay_definition_id,
-                "RateDefinitionID": definition.rate_definition_id,
-                "CalculationMethod": definition.calculation_method,
-                "CalculationMethodVersion": definition.calculation_method_version,
-                "CalculationStatus": calc.status.value,
-                "DriverRateScheduleID": calc.driver_rate_schedule_id,
-                "CalculationVersion": calc.calculation_version,
-            },
             snapshot_source_type="DraftLine",
             snapshot_source_id=str(line.draft_line_id),
             snapshot_calculated_amount=amount,
+            rate_definition_id=definition.rate_definition_id,
+            driver_rate_schedule_id=calc.driver_rate_schedule_id,
+            rate_component_definition_id=calc.rate_component_definition_id,
+            schedule_status=calc.schedule_status,
+            schedule_effective_from=calc.schedule_effective_from,
+            schedule_effective_to=calc.schedule_effective_to,
+            calculation_version=calc.calculation_version,
         ))
 
     # ── Canonical live Status-derived pay (CP-4B) — never the stored
@@ -893,7 +920,6 @@ async def _build_live_calculation_packet(
     )
     for sl in live_status_lines:
         drv = sl.driver_assignment_id
-        driver_names.setdefault(drv, None)
         driver_lines.setdefault(drv, [])
 
         if sl.needs_manager_review:
@@ -902,7 +928,10 @@ async def _build_live_calculation_packet(
         source_id = f"STATUS_LIVE:{drv}:{sl.work_date}:{sl.status_key_id}"
         status_pay.setdefault(
             (drv, sl.status_rate_column_id),
-            _Accumulator("STATUS", drv, {"status_rate_column_id": sl.status_rate_column_id}),
+            _Accumulator("STATUS", drv, {
+                "status_rate_column_id": sl.status_rate_column_id,
+                "status_rate_column_name": sl.status_rate_column_name,
+            }),
         ).add(sl.calculated_amount, source_id, unresolved=sl.needs_manager_review)
         driver_lines[drv].append(_CalculationPacketLine(
             source_type="StatusEntryState",
@@ -924,17 +953,17 @@ async def _build_live_calculation_packet(
             rate_column_id=sl.status_rate_column_id,
             driver_rate_id=sl.driver_rate_id,
             source_evidence={
-                "PayrollPeriodDriverDayEntryStateID": sl.entry_state_id,
                 "StatusKeyID": sl.status_key_id,
                 "StatusCode": sl.status_code,
-                "StatusRateColumnID": sl.status_rate_column_id,
-                "HoursValue": sl.hours_value,
-                "WorkDate": sl.work_date,
-                "RateTypeID": sl.rate_type_id,
-                "DriverRateID": sl.driver_rate_id,
             },
             snapshot_source_type="StatusEntryState",
             snapshot_source_id=str(sl.entry_state_id),
+            # A resolved rate with zero hours earns nothing: that is an official zero line,
+            # not an unresolved one (the live line itself keeps its unset amount).
+            snapshot_calculated_amount=(
+                Decimal("0")
+                if sl.calculated_amount is None and not sl.needs_manager_review else None
+            ),
         ))
 
     # ── Canonical Active bonus (never Voided).
@@ -961,12 +990,9 @@ async def _build_live_calculation_packet(
             blocker_reason=None,
             bonus_event_id=int(b["payrollbonuseventid"]),
             source_evidence={
-                "PayrollBonusEventID": int(b["payrollbonuseventid"]),
-                "Amount": amt,
                 "Reason": b["reason"],
                 "Notes": b["notes"],
                 "DataRevision": b["datarevision"],
-                "Status": "Active",
             },
         ))
 
@@ -984,7 +1010,7 @@ async def _build_live_calculation_packet(
                 "amounts can be made official.")
         driver_assignment_identity_result = await db.execute(
             text("""
-                SELECT a.driverassignmentid, a.driverid, d.drivernumber, e.fullname
+                SELECT a.driverassignmentid, a.driverid, a.employeeid, d.drivernumber, e.fullname
                 FROM core.driverassignments a
                 JOIN core.drivers d ON d.driverid = a.driverid
                 JOIN core.employees e ON e.employeeid = a.employeeid
@@ -993,10 +1019,13 @@ async def _build_live_calculation_packet(
             """),
             {"cid": company_id, "driver_assignment_ids": sorted(all_driver_assignment_ids)},
         )
+        # The one identity read is the authority for every DriverAssignment of the packet.
         for identity in driver_assignment_identity_result.mappings().all():
-            driver_names.setdefault(int(identity["driverassignmentid"]), identity["fullname"])
-            driver_numbers.setdefault(int(identity["driverassignmentid"]), identity["drivernumber"])
-            driver_permanent_ids.setdefault(int(identity["driverassignmentid"]), int(identity["driverid"]))
+            assignment_id = int(identity["driverassignmentid"])
+            driver_names[assignment_id] = identity["fullname"]
+            driver_numbers[assignment_id] = identity["drivernumber"]
+            driver_permanent_ids[assignment_id] = int(identity["driverid"])
+            driver_employee_ids[assignment_id] = int(identity["employeeid"])
 
     # ── Official ordinary, Status and Bonus components: each raw sum rounded once.
     driver_components: dict[int, list[_OfficialComponent]] = {
@@ -1081,6 +1110,7 @@ async def _build_live_calculation_packet(
         driver_totals.append(_CalculationPacketDriverTotal(
             driver_assignment_id=drv_id,
             driver_id=driver_permanent_ids[drv_id],
+            employee_id=driver_employee_ids[drv_id],
             driver_number=driver_numbers.get(drv_id),
             driver_name=driver_names.get(drv_id),
             daily_pay=daily,
@@ -1116,6 +1146,10 @@ async def _build_live_calculation_packet(
         total_expected_pay=total_expected_pay,
         currency_code=None if currency is None else currency.code,
         currency_minor_unit_digits=digits,
+        scheduled_work_dates=tuple(sorted({
+            day for outcome in outcomes.values()
+            for day in outcome.proration.scheduled_work_dates
+        })),
     )
 
 

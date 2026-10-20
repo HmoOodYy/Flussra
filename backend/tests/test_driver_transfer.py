@@ -17,12 +17,13 @@ import pytest_asyncio
 from sqlalchemy import text as _text
 
 from tests.builders.access import create_provisioned_test_user
-from tests.builders.pay_rules import insert_pay_rule
-from tests.db_state import (
-    FINAL_LINE_IMMUTABLE_TRIGGER,
-    allow_final_line_insert,
-    suspended_test_triggers,
+from tests.builders.final_evidence import (
+    Chain,
+    discard_chain,
+    insert_final_line,
+    seed_snapshot_component,
 )
+from tests.builders.pay_rules import insert_pay_rule
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,6 +113,7 @@ class _OwnedPeriodLines:
         self._db = direct_db
         self.draft_line_ids: list[int] = []
         self.final_line_ids: list[int] = []
+        self.chains: list[Chain] = []
 
     async def add_draft_line(
         self, company_id: int, branch_id: int, period_id: int, assignment_id: int, source: str,
@@ -134,33 +136,16 @@ class _OwnedPeriodLines:
         self, company_id: int, branch_id: int, period_id: int, assignment_id: int,
         driver_id: int, source: str,
     ) -> int:
-        # Phase 6: direct FinalLine setup is authorised by a GUC that is
-        # revoked as soon as the INSERT returns.
-        async with allow_final_line_insert(self._db):
-            line_id = (await self._db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
-                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :period_id, :assignment_id, :driver_id, 'REGULAR', 1, 100, :source, 'USD', 2)
-                    RETURNING finallineid
-                """),
-                {"cid": company_id, "bid": branch_id, "period_id": period_id,
-                 "assignment_id": assignment_id, "driver_id": driver_id, "source": source},
-            )).scalar_one()
+        chain = await seed_snapshot_component(
+            self._db, period_id=period_id, driver_assignment_id=assignment_id)
+        line_id = await insert_final_line(self._db, chain)
+        self.chains.append(chain)
         self.final_line_ids.append(line_id)
         return line_id
 
     async def remove_all(self) -> None:
-        if self.final_line_ids:
-            async with suspended_test_triggers(self._db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
-                deleted = await self._db.execute(
-                    _text("DELETE FROM payroll.payrollfinallines WHERE finallineid = ANY(:ids)"),
-                    {"ids": self.final_line_ids},
-                )
-            assert deleted.rowcount == len(self.final_line_ids), (
-                f"expected to delete FinalLines {self.final_line_ids}, deleted {deleted.rowcount}"
-            )
+        for chain in self.chains:
+            await discard_chain(self._db, chain)
         if self.draft_line_ids:
             deleted = await self._db.execute(
                 _text("DELETE FROM payroll.payrolldraftlines WHERE draftlineid = ANY(:ids)"),

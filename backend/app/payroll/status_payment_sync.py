@@ -315,6 +315,7 @@ class _LiveStatusLine(NamedTuple):
     resolved_rate_amount: "Decimal | None"
     calculated_amount: "Decimal | None"
     needs_manager_review: bool
+    status_rate_column_name: "str | None" = None
 
 
 async def _resolve_live_status_payment_lines(
@@ -356,6 +357,7 @@ async def _resolve_live_status_payment_lines(
                 sk.hoursvalue,
                 sk.statusratecolumnid,
                 src.ratetypeid,
+                src.columnname AS statusratecolumnname,
                 rt.ratecode
             FROM   payroll.payrollperioddriverdayentrystate ppdes
             JOIN   payroll.payrollstatuskeys sk ON sk.statuskeyid = ppdes.statuskeyid
@@ -416,6 +418,7 @@ async def _resolve_live_status_payment_lines(
             resolved_rate_amount=resolved_rate,
             calculated_amount=_calculate_status_payment_amount(hours_value, resolved_rate),
             needs_manager_review=(resolved_rate is None),
+            status_rate_column_name=row["statusratecolumnname"],
         ))
 
     return results

@@ -20,9 +20,9 @@ from app.workforce.projection import (
     sync_company_employee_branch_projections,
     sync_employee_branch_projection,
 )
+from tests.builders.final_evidence import insert_final_line, seed_snapshot_component
 from tests.builders.pay_rules import insert_pay_rule
 from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
-from tests.db_state import allow_final_line_insert
 
 
 def auth(token: str) -> dict[str, str]:
@@ -1020,16 +1020,9 @@ async def test_termination_rejects_dated_finalized_work_after_date_without_mutat
         "start_date": today,
         "end_date": later,
     })).scalar_one()
-    async with allow_final_line_insert(direct_db):
-        final_line_id = (await direct_db.execute(text("""
-            INSERT INTO payroll.PayrollFinalLines
-                (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, DriverID, WorkDate, LineType, SourceType, FinalAmount, CurrencyCode, CurrencyMinorUnitDigits)
-            VALUES (1, :branch_id, :period_id, :assignment_id, :driver_id, :work_date, 'HOURS', 'P1cTest', 100, 'USD', 2)
-            RETURNING FinalLineID
-        """), {
-            "branch_id": paytest_branch_id, "period_id": period_id,
-            "assignment_id": assignment_id, "driver_id": driver_id, "work_date": later,
-        })).scalar_one()
+    chain = await seed_snapshot_component(
+        direct_db, period_id=period_id, driver_assignment_id=assignment_id, work_date=later)
+    final_line_id = await insert_final_line(direct_db, chain)
 
     rejected = await client.post(
         f"/workforce/employees/{employee['employee_id']}/terminate",

@@ -1,4 +1,12 @@
-"""Pure canonical serialization and hash helpers for CP-4C snapshots."""
+"""Pure canonical serialization and hash helpers for calculation snapshots.
+
+The financial hash is a pure function of the persisted immutable evidence of one snapshot
+(see ``snapshot_verification.load_snapshot_content``): identities, frozen versions,
+official components, Min/Max evidence and per-source lines. It never includes generated row
+ids, the revision number, the author or any other audit metadata, so two revisions with
+identical financial content hash identically. Only the fields named below are projected,
+whatever else a content mapping carries.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -13,10 +21,14 @@ from typing import Any
 # migration, the UI, a report, or company configuration). Bump it only for an
 # incompatible change to component arithmetic, min/max/bonus ordering, the
 # meaning or set of canonical hashed components, or the source/provenance
-# semantics inside the hash. New rates, PayItem data, company setup, wording
-# and report formatting do not bump it.
-CURRENT_PAYROLL_CALCULATION_VERSION = "payroll-calculation-v1"
+# semantics inside the hash. New rates, company setup, wording and report
+# formatting do not bump it.
+CURRENT_PAYROLL_CALCULATION_VERSION = "payroll-calculation-v2"
 CURRENT_REPORT_EVIDENCE_VERSION = 2
+
+# The label of the source/configuration packet hashed into SourceConfigHash.
+SOURCE_CONFIG_PACKET_CONTRACT = "payroll-source-config-v2"
+
 
 class UnsupportedCalculationVersionError(ValueError):
     """A persisted calculation packet uses a contract this code cannot parse."""
@@ -31,9 +43,27 @@ def require_supported_calculation_version(version: object) -> None:
         )
 
 
+_HEADER_FIELDS = (
+    "CompanyID",
+    "BranchID",
+    "PayrollPeriodID",
+    "PeriodStartDate",
+    "PeriodEndDate",
+    "CurrencyCode",
+    "CurrencyMinorUnitDigits",
+    "CalculationVersion",
+    "PayableRoundingVersion",
+    "MinMaxProrationVersion",
+    "SourceConfigHash",
+    "ScheduledWorkDates",
+    "Warnings",
+    "TotalExpectedPay",
+)
 _DRIVER_TOTAL_FIELDS = (
     "DriverAssignmentID",
     "DriverID",
+    "EmployeeID",
+    "BranchID",
     "DriverNumberSnapshot",
     "DriverNameSnapshot",
     "DailyPay",
@@ -43,13 +73,62 @@ _DRIVER_TOTAL_FIELDS = (
     "BonusTotal",
     "ExpectedPay",
 )
+_COMPONENT_FIELDS = (
+    "ComponentKind",
+    "PayrollPeriodDefinitionID",
+    "PayDefinitionID",
+    "RateDefinitionID",
+    "CalculationMethod",
+    "CalculationMethodVersion",
+    "DefinitionCodeSnapshot",
+    "DefinitionNameSnapshot",
+    "StatusRateColumnID",
+    "StatusRateColumnNameSnapshot",
+    "DriverPayRuleID",
+    "PreRoundingAmount",
+    "OfficialAmount",
+    "SourceCount",
+    "UnresolvedLineCount",
+)
+_MINMAX_FIELDS = (
+    "Status",
+    "SelectionDate",
+    "ProrationVersion",
+    "Numerator",
+    "Denominator",
+    "BaseAmount",
+    "BaseOrdinaryAmount",
+    "BaseStatusAmount",
+    "ExcludedBonusAmount",
+    "CountedWorkDates",
+)
+_RULE_FIELDS = (
+    "DriverPayRuleID",
+    "RuleType",
+    "Amount",
+    "RuleStatus",
+    "EffectiveFrom",
+    "EffectiveTo",
+    "ProratedAmount",
+    "CalendarFrequency",
+    "CalendarAnchorStartDate",
+    "CalendarCustomIntervalDays",
+    "CalendarSourceBranchID",
+    "CalendarSourcePayrollSetupVersionID",
+)
 _LINE_FIELDS = (
     "SourceType",
     "SourceID",
     "LineType",
     "LineScope",
     "WorkDate",
-    "PayItemID",
+    "PayrollPeriodDefinitionID",
+    "PayDefinitionID",
+    "RateDefinitionID",
+    "DriverRateScheduleID",
+    "CalculationStatus",
+    "CalculationVersion",
+    "StatusRateColumnID",
     "RateTypeID",
     "DriverRateID",
     "BonusEventID",
@@ -58,6 +137,13 @@ _LINE_FIELDS = (
     "CalculatedAmount",
     "SourceEvidenceJSONB",
 )
+_COMPONENT_KIND_ORDER = {
+    "ORDINARY": 0,
+    "STATUS": 1,
+    "BONUS": 2,
+    "MINIMUM_ADJUSTMENT": 3,
+    "MAXIMUM_ADJUSTMENT": 4,
+}
 
 
 def _canonical_decimal(value: Decimal) -> str:
@@ -173,60 +259,91 @@ def calculate_report_evidence_hash(
     })
 
 
-def _line_projection(line: Mapping[str, Any]) -> dict[str, Any]:
-    return {field: line.get(field) for field in _LINE_FIELDS}
+
+
+def _projection(value: Mapping[str, Any], fields: Sequence[str]) -> dict[str, Any]:
+    return {field: value.get(field) for field in fields}
 
 
 def _nulls_last(value: Any) -> tuple[bool, Any]:
     return value is None, value
 
 
-def _line_sort_key(line: Mapping[str, Any]) -> tuple[Any, ...]:
-    projection = _line_projection(line)
+def _component_projection(component: Mapping[str, Any]) -> dict[str, Any]:
+    return _projection(component, _COMPONENT_FIELDS)
+
+
+def _component_sort_key(component: Mapping[str, Any]) -> tuple[int, int, int, int]:
     return (
-        _nulls_last(projection["WorkDate"]),
-        _nulls_last(projection["LineScope"]),
-        projection["LineType"],
-        projection["SourceType"],
-        _nulls_last(projection["SourceID"]),
-        _nulls_last(projection["PayItemID"]),
-        _nulls_last(projection["RateTypeID"]),
-        _nulls_last(projection["DriverRateID"]),
-        _nulls_last(projection["BonusEventID"]),
-        canonical_json(projection),
+        _COMPONENT_KIND_ORDER[component["ComponentKind"]],
+        component.get("PayrollPeriodDefinitionID") or 0,
+        component.get("StatusRateColumnID") or 0,
+        component.get("DriverPayRuleID") or 0,
     )
 
 
-def _driver_total_projection(total: Mapping[str, Any]) -> dict[str, Any]:
-    lines = total.get("Lines", ())
-    if not isinstance(lines, Sequence) or isinstance(lines, (str, bytes, bytearray)):
-        raise TypeError("snapshot driver total Lines must be a sequence")
-    line_projections = [_line_projection(line) for line in lines]
+def _line_projection(line: Mapping[str, Any]) -> dict[str, Any]:
+    return _projection(line, _LINE_FIELDS)
+
+
+def _line_sort_key(line: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        _nulls_last(line.get("WorkDate")),
+        line["LineType"],
+        line["SourceType"],
+        line["SourceID"],
+    )
+
+
+def _minmax_projection(minmax: Mapping[str, Any]) -> dict[str, Any]:
+    rules = minmax.get("Rules", ())
+    if not isinstance(rules, Sequence) or isinstance(rules, (str, bytes, bytearray)):
+        raise TypeError("snapshot Min/Max evaluation Rules must be a sequence")
     return {
-        **{field: total.get(field) for field in _DRIVER_TOTAL_FIELDS},
-        "Lines": sorted(line_projections, key=_line_sort_key),
+        **_projection(minmax, _MINMAX_FIELDS),
+        "Rules": sorted(
+            (_projection(rule, _RULE_FIELDS) for rule in rules),
+            key=lambda rule: rule["RuleType"],
+        ),
     }
 
 
-def calculate_snapshot_hash(
-    *,
-    company_id: int,
-    branch_id: int,
-    payroll_period_id: int,
-    revision_number: int,
-    calculation_version: str,
-    source_config_hash: str,
-    driver_totals: Sequence[Mapping[str, Any]],
-) -> str:
-    """Hash the complete financial packet without generated IDs or audit metadata."""
-    totals = [_driver_total_projection(total) for total in driver_totals]
+def _sequence(total: Mapping[str, Any], name: str) -> Sequence[Mapping[str, Any]]:
+    value = total.get(name, ())
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        raise TypeError(f"snapshot driver total {name} must be a sequence")
+    return value
+
+
+def _driver_total_projection(total: Mapping[str, Any]) -> dict[str, Any]:
+    minmax = total.get("MinMax")
+    if not isinstance(minmax, Mapping):
+        raise TypeError("snapshot driver total MinMax must be a mapping")
+    return {
+        **_projection(total, _DRIVER_TOTAL_FIELDS),
+        "Components": sorted(
+            (_component_projection(c) for c in _sequence(total, "Components")),
+            key=_component_sort_key,
+        ),
+        "MinMax": _minmax_projection(minmax),
+        "Lines": sorted(
+            (_line_projection(line) for line in _sequence(total, "Lines")),
+            key=_line_sort_key,
+        ),
+    }
+
+
+def calculate_snapshot_hash(content: Mapping[str, Any]) -> str:
+    """Hash the complete financial content of one snapshot.
+
+    ``content`` carries the header fields (``_HEADER_FIELDS``) and ``DriverTotals``, each with
+    its ``Components``, its ``MinMax`` evaluation (with its ``Rules``) and its ``Lines``.
+    Anything else in the mapping, in particular row ids, the revision number and audit
+    metadata, is not part of the hash.
+    """
+    totals = [_driver_total_projection(total) for total in content["DriverTotals"]]
     totals.sort(key=lambda total: total["DriverAssignmentID"])
     return sha256_hex({
-        "CompanyID": company_id,
-        "BranchID": branch_id,
-        "PayrollPeriodID": payroll_period_id,
-        "RevisionNumber": revision_number,
-        "CalculationVersion": calculation_version,
-        "SourceConfigHash": source_config_hash,
+        **_projection(content, _HEADER_FIELDS),
         "DriverTotals": totals,
     })
