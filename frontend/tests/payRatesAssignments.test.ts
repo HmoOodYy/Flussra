@@ -5,7 +5,6 @@ import type { DriverAssignmentRosterRow } from '../src/types/core.ts';
 import {
   assignmentLabel,
   assignmentWindow,
-  isReadOnlyAssignment,
 } from '../src/pages/people/pay-rates/payRatesAssignments.ts';
 
 function row(id: number, state: DriverAssignmentRosterRow['state'], overrides: Partial<DriverAssignmentRosterRow> = {}): DriverAssignmentRosterRow {
@@ -35,13 +34,6 @@ test('assignment labels carry Branch, window and end reason; open windows read "
   assert.equal(assignmentLabel(current), 'South · Mar 3, 2026 – present');
   assert.equal(assignmentLabel(pending), 'Upcoming · East · Jan 1, 2027 – present');
   assert.equal(assignmentWindow(ended), 'Jan 2, 2026 – Mar 3, 2026 (Transferred)');
-});
-
-test('only ended assignments are read-only; current and pending stay editable', () => {
-  assert.equal(isReadOnlyAssignment(ended), true);
-  assert.equal(isReadOnlyAssignment(current), false);
-  assert.equal(isReadOnlyAssignment(pending), false);
-  assert.equal(isReadOnlyAssignment(null), false);
 });
 
 const read = (name: string) => readFileSync(

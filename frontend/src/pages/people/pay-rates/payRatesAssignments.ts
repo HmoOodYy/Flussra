@@ -26,8 +26,3 @@ export function assignmentLabel(a: DriverAssignmentInfo): string {
   const prefix = a.state === 'pending' ? 'Upcoming · ' : '';
   return `${prefix}${a.branch_name} · ${assignmentWindow(a)}`;
 }
-
-/** Ended assignments are shown for reference only; rates there are never edited. */
-export function isReadOnlyAssignment(a: DriverAssignmentInfo | null | undefined): boolean {
-  return a != null && a.state === 'ended';
-}
