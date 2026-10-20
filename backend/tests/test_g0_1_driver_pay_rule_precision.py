@@ -19,21 +19,23 @@ def _create_payload(amount: str) -> dict:
     }
 
 
-def test_driver_pay_rule_create_accepts_four_decimals_and_exact_trailing_zero_scale():
+def test_driver_pay_rule_create_accepts_extra_typed_precision_for_entry_rounding():
+    """DD3 amends G0.1: the schema accepts typed precision; the service rounds it on entry."""
     assert DriverPayRuleCreate.model_validate(_create_payload("1.2345")).amount == Decimal("1.2345")
     assert DriverPayRuleCreate.model_validate(_create_payload("1.23000")).amount == Decimal("1.23000")
+    assert DriverPayRuleCreate.model_validate(_create_payload("1.23456")).amount == Decimal("1.23456")
 
 
 @pytest.mark.parametrize("amount", [
-    "1.23456", "NaN", "Infinity", "-Infinity", "0", "-1", "100000000000000",
+    "1.12345678901", "NaN", "Infinity", "-Infinity", "0", "-1", "100000000000000",
 ])
-def test_driver_pay_rule_create_rejects_values_outside_numeric_18_4(amount: str):
+def test_driver_pay_rule_create_rejects_values_outside_the_typed_amount_limits(amount: str):
     with pytest.raises(ValueError):
         DriverPayRuleCreate.model_validate(_create_payload(amount))
 
 
 @pytest.mark.asyncio
-async def test_four_decimal_driver_pay_rule_persists_and_audits_canonical_amount(
+async def test_typed_driver_pay_rule_amount_is_normalized_persisted_and_audited(
     session_client,
     auth_token: str,
     paytest_branch_id: int,
@@ -60,7 +62,8 @@ async def test_four_decimal_driver_pay_rule_persists_and_audits_canonical_amount
     )
     assert response.status_code == 201, response.text
     rule_id = response.json()["driver_pay_rule_id"]
-    assert Decimal(str(response.json()["amount"])) == Decimal("1.2345")
+    # The Company currency is USD: 1.2345 is normalized to two decimals (half-even) on entry.
+    assert Decimal(str(response.json()["amount"])) == Decimal("1.23")
 
     persisted = (await direct_db.execute(text("""
         SELECT r.amount, (a.newvaluejson::jsonb)->>'amount' AS audit_amount
@@ -72,7 +75,7 @@ async def test_four_decimal_driver_pay_rule_persists_and_audits_canonical_amount
          AND a.actioncode = 'DRIVER_PAY_RULE_CREATED'
         WHERE r.driverpayruleid = :rule_id
     """), {"rule_id": rule_id})).mappings().one()
-    assert Decimal(str(persisted["amount"])) == Decimal("1.2345")
+    assert Decimal(str(persisted["amount"])) == Decimal("1.23")
     assert Decimal(persisted["audit_amount"]) == Decimal(str(persisted["amount"]))
 
     cleanup = await session_client.post(
@@ -83,7 +86,7 @@ async def test_four_decimal_driver_pay_rule_persists_and_audits_canonical_amount
 
 
 @pytest.mark.asyncio
-async def test_five_decimal_driver_pay_rule_request_creates_no_row_or_audit(
+async def test_pay_rule_amount_that_rounds_to_zero_creates_no_row_or_audit(
     session_client,
     auth_token: str,
     paytest_branch_id: int,
@@ -117,11 +120,12 @@ async def test_five_decimal_driver_pay_rule_request_creates_no_row_or_audit(
 
     response = await session_client.post(
         "/payroll/driver-pay-rules",
-        json={**_create_payload("1.23456"), "driver_id": driver_id,
+        json={**_create_payload("0.004"), "driver_id": driver_id,
               "effective_from": effective_from.isoformat()},
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "AMOUNT_ROUNDS_TO_ZERO"
 
     after_rows = (await direct_db.execute(text("""
         SELECT COUNT(*) FROM payroll.driverpayrules

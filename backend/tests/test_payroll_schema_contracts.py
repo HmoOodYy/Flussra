@@ -46,7 +46,15 @@ def test_bonus_schema_facade_preserves_decimal_boundaries():
     assert accepted.amount == Decimal("99999999999999.9999")
     assert schemas.BonusEventCreate(driver_assignment_id=7, amount=Decimal("0.10000")).amount == Decimal("0.10000")
 
-    for amount in (Decimal("100000000000000"), Decimal("0.00001"), Decimal("NaN"), Decimal("Infinity")):
+    # Typed-in precision beyond four decimals is accepted (the server rounds it to the Company
+    # currency on entry) up to ten decimals; the magnitude and finiteness limits are unchanged.
+    assert schemas.BonusEventCreate(driver_assignment_id=7, amount=Decimal("0.00001")).amount == Decimal("0.00001")
+    assert schemas.BonusEventCreate(
+        driver_assignment_id=7, amount=Decimal("1.1234567890")).amount == Decimal("1.1234567890")
+
+    for amount in (
+        Decimal("100000000000000"), Decimal("0.12345678901"), Decimal("NaN"), Decimal("Infinity"),
+    ):
         try:
             schemas.BonusEventCreate(driver_assignment_id=7, amount=amount)
         except ValidationError:

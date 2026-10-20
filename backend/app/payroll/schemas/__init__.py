@@ -25,7 +25,7 @@ from .bonus import (
     PeriodEligibleDriversResponse,
 )
 from .bonus import (
-    _validate_positive_numeric_18_4 as _validate_positive_numeric_18_4,
+    _validate_typed_monetary_amount as _validate_typed_monetary_amount,
 )
 from .calculation import (
     CalculationPreviewDriverTotal,

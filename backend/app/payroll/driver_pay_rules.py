@@ -31,6 +31,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.policy import require_non_driver_subject
+from app.company_currency import currency_error
 from app.compensation.driver_context import (
     ReadScope,
     driver_compensation_read_scope,
@@ -41,6 +42,7 @@ from app.compensation.driver_context import (
 )
 from app.payroll.guards import require_no_finalized_payroll
 from app.payroll.schemas import DriverPayRuleCreate, DriverPayRuleSummary
+from app.payroll.typed_amount import normalize_typed_amount
 from app.payroll_setup.chronology import (
     Schedule,
     period_end,
@@ -317,8 +319,15 @@ async def create_driver_pay_rule(
     await require_compensation_authority(
         company_id, user_id, data.driver_id, data.effective_from, db)
 
-    await lock_driver_compensation_write(
+    currency = await lock_driver_compensation_write(
         company_id, data.driver_id, None, db, monetary=True, lock_from=data.effective_from)
+    # Typed-in precision is rounded once to the Company currency, under the monetary lock;
+    # the normalized amount is what is persisted, audited and returned.
+    if currency is None:  # monetary=True takes the required Company currency
+        raise currency_error(
+            "COMPANY_CURRENCY_REQUIRED",
+            "Configure Company currency before creating monetary state.")
+    amount = normalize_typed_amount(data.amount, currency, label="Driver pay rule amount")
     instant = await decision_instant(db)
     context = await require_compensation_authority(
         company_id, user_id, data.driver_id, data.effective_from, db, at=instant)
@@ -378,7 +387,7 @@ async def create_driver_pay_rule(
                 "cid":      company_id,
                 "did":      data.driver_id,
                 "rtype":    data.rule_type,
-                "amount":   data.amount,
+                "amount":   amount,
                 "eff_from": data.effective_from,
                 "eff_to":   data.effective_to,
                 "creator":  user_id,

@@ -8,9 +8,11 @@ persistence remain the caller's responsibility.
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 
+from app.payroll.calculation.payable_rounding import INTERNAL_QUANTUM
+
 PER_UNIT_CALCULATION_VERSION = "cp4a-per-unit-v1"
 
-_LINE_QUANTUM = Decimal("0.0001")
+_LINE_QUANTUM = INTERNAL_QUANTUM
 
 
 @dataclass(frozen=True)

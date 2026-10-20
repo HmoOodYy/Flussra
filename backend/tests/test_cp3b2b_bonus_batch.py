@@ -543,30 +543,48 @@ async def test_sequential_same_key_yields_one_apply_one_replay(
 # ===========================================================================
 
 @pytest.mark.asyncio
-async def test_four_decimal_batch_is_stored_and_replayed_exactly(
+async def test_extra_precision_batch_is_normalized_stored_and_replayed(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
+    """Typed-in precision is rounded to the Company currency (USD: two decimals) on entry.
+
+    The normalized amount is stored, returned and hashed, so an exact replay and an
+    equivalent request that types the normalized value are the same request.
+    """
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
     key = _key()
     items = [{"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "12.3456"}]
     first = await _batch(client, auth_token, period_id, key, 0, items)
     assert first.status_code == 201, first.text
-    assert Decimal(str(first.json()["events"][0]["amount"])) == Decimal("12.3456")
+    assert Decimal(str(first.json()["events"][0]["amount"])) == Decimal("12.35")
     stored = (await db_conn.execute(_text("""
         SELECT amount FROM payroll.payrollbonusevents
         WHERE payrollbonuseventid = :event_id
     """), {"event_id": first.json()["created_event_ids"][0]})).scalar_one()
-    assert Decimal(str(stored)) == Decimal("12.3456")
+    assert Decimal(str(stored)) == Decimal("12.35")
+    payload = (await db_conn.execute(_text("""
+        SELECT requestpayloadjson FROM payroll.payrollbonusbatchrequests
+        WHERE payrollperiodid = :period_id AND idempotencykey = :key
+    """), {"period_id": period_id, "key": key})).scalar_one()
+    assert payload["version"] == 2
+    assert payload["items"][0]["amount"] == "12.3500"
 
     replay = await _batch(client, auth_token, period_id, key, 0, items)
     assert replay.status_code == 200, replay.text
     assert replay.json()["replayed"] is True
-    assert Decimal(str(replay.json()["events"][0]["amount"])) == Decimal("12.3456")
+    assert Decimal(str(replay.json()["events"][0]["amount"])) == Decimal("12.35")
+
+    normalized_replay = await _batch(client, auth_token, period_id, key, 0, [
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "12.35"},
+    ])
+    assert normalized_replay.status_code == 200, normalized_replay.text
+    assert normalized_replay.json()["replayed"] is True
 
     conflict = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "12.3457"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "12.3657"},
     ])
     assert conflict.status_code == 409, conflict.text
+    assert await _count_events(db_conn, period_id) == 1
     await _cancel_period_db(db_conn, period_id)
 
 
@@ -583,7 +601,7 @@ async def test_exact_replay_does_not_require_currency_lookup(
     assert applied.status_code == 201, applied.text
 
     async def reject_currency_lookup(*args, **kwargs):
-        raise AssertionError("An exact read-only replay must not require Company currency.")
+        raise AssertionError("An exact read-only replay must not take the Company monetary lock.")
 
     monkeypatch.setattr(bonus, "lock_and_get_company_currency_for_monetary_write", reject_currency_lookup)
     replay = await _batch(client, auth_token, period_id, key, 0, items)
@@ -593,7 +611,7 @@ async def test_exact_replay_does_not_require_currency_lookup(
 
 
 @pytest.mark.asyncio
-async def test_legacy_v1_replay_requires_exact_two_decimal_amount(
+async def test_legacy_v1_replay_requires_the_exact_normalized_two_decimal_amount(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
@@ -622,10 +640,17 @@ async def test_legacy_v1_replay_requires_exact_two_decimal_amount(
     replay = await _batch(client, auth_token, period_id, key, 0, [item])
     assert replay.status_code == 200, replay.text
     assert replay.json()["replayed"] is True
-    fractional = await _batch(client, auth_token, period_id, key, 0, [
+    # Amounts are normalized to the Company currency (USD: two decimals) before they are
+    # hashed, so 50.001 is the same request as 50.00; a different normalized amount is not.
+    equivalent = await _batch(client, auth_token, period_id, key, 0, [
         {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.001"},
     ])
-    assert fractional.status_code == 409, fractional.text
+    assert equivalent.status_code == 200, equivalent.text
+    assert equivalent.json()["replayed"] is True
+    different = await _batch(client, auth_token, period_id, key, 0, [
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.01"},
+    ])
+    assert different.status_code == 409, different.text
     assert await _count_events(db_conn, period_id) == 1
     await _cancel_period_db(db_conn, period_id)
 
@@ -699,14 +724,35 @@ async def test_negative_amount_rejected(
 
 
 @pytest.mark.asyncio
-async def test_more_than_four_decimals_rejected(
+async def test_extra_precision_is_accepted_but_absurd_scale_is_rejected(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
-    r = await _batch(client, auth_token, period_id, _key(), 0, [
+    absurd = await _batch(client, auth_token, period_id, _key(), 0, [
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.12345678901"},
+    ])
+    assert absurd.status_code == 422, absurd.text
+    assert await _count_events(db_conn, period_id) == 0
+    accepted = await _batch(client, auth_token, period_id, _key(), 0, [
         {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.00005"},
     ])
-    assert r.status_code == 422, r.text
+    assert accepted.status_code == 201, accepted.text
+    assert Decimal(str(accepted.json()["events"][0]["amount"])) == Decimal("50.00")
+    await _cancel_period_db(db_conn, period_id)
+
+
+@pytest.mark.asyncio
+async def test_an_item_that_rounds_to_zero_rolls_back_the_whole_batch(
+    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
+) -> None:
+    period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
+    response = await _batch(client, auth_token, period_id, _key(), 0, [
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "0.004"},
+    ])
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "AMOUNT_ROUNDS_TO_ZERO"
+    assert await _count_events(db_conn, period_id) == 0
     await _cancel_period_db(db_conn, period_id)
 
 
