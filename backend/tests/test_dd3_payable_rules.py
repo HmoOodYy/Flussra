@@ -432,6 +432,45 @@ async def test_a_period_without_scheduled_days_applies_nothing_and_warns(p3c_cli
     assert str(maximum["driver_pay_rule_id"]) in warning
 
 
+async def _bonus_source(client, tenant, period) -> None:
+    """A financial source that references no day row (a Day Grid entry would)."""
+    response = await client.post(
+        f"/payroll/periods/{period['payroll_period_id']}/bonuses",
+        json={"driver_assignment_id": tenant.driver_a, "amount": "1.00"}, headers=tenant.admin)
+    assert response.status_code == 201, response.text
+
+
+async def test_a_period_without_a_frozen_day_calendar_blocks_instead_of_inferring_days(
+    p3c_client, p3c_engine, tenant,
+):
+    period, _ = await _period(p3c_client, p3c_engine, tenant)
+    await _bonus_source(p3c_client, tenant, period)
+    rule = await _rule(p3c_client, tenant, period, "MinimumPay", "700")
+    query(tenant, "DELETE FROM payroll.payrollperioddays WHERE payrollperiodid = %s",
+          (period["payroll_period_id"],))
+
+    preview = await _preview(p3c_client, tenant, period)
+    row = _row(preview, tenant.driver_a)
+    assert row["minmax"]["status"] == "MINMAX_PERIOD_DAYS_MISSING"
+    assert (row["minmax"]["numerator"], row["minmax"]["denominator"]) == (None, None)
+    assert any(b.startswith("MINMAX_PERIOD_DAYS_MISSING") and str(rule["driver_pay_rule_id"]) in b
+               for b in row["blockers"])
+    assert preview["has_blockers"] is True and preview["warnings"] == []
+    assert _money(row["minimum_adjustment"]) == 0 and _money(row["expected_pay"]) == D("1.00")
+
+
+async def test_a_period_without_day_rows_and_without_a_rule_is_not_blocked(
+    p3c_client, p3c_engine, tenant,
+):
+    period, _ = await _period(p3c_client, p3c_engine, tenant)
+    await _bonus_source(p3c_client, tenant, period)
+    query(tenant, "DELETE FROM payroll.payrollperioddays WHERE payrollperiodid = %s",
+          (period["payroll_period_id"],))
+    preview = await _preview(p3c_client, tenant, period)
+    assert preview["blockers"] == []
+    assert _row(preview, tenant.driver_a)["minmax"]["status"] == "NO_RULE"
+
+
 async def test_an_off_reason_day_does_not_count_and_a_non_off_status_does(p3c_client, p3c_engine, tenant):
     seed_status_key(tenant, "VAC", off=True)
     seed_status_key(tenant, "LATE", off=False)

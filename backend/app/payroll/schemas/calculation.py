@@ -167,8 +167,8 @@ class CalculationPreviewMinMax(BaseModel):
 
     ``status`` is APPLIED, or why neither rule applied (NO_RULE, NO_SCHEDULED_DAYS,
     NO_ELIGIBLE_SCHEDULED_DAYS, CALENDAR_MISMATCH, MIN_EXCEEDS_MAX,
-    SOURCE_AMOUNT_PRECISION). ``numerator`` / ``denominator`` are the eligible and the
-    scheduled whole days of the period.
+    SOURCE_AMOUNT_PRECISION, MINMAX_PERIOD_DAYS_MISSING). ``numerator`` / ``denominator``
+    are the eligible and the scheduled whole days of the period.
     """
     __module__ = "app.payroll.schemas"
     status: str

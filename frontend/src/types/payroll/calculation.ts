@@ -37,7 +37,8 @@ export interface CalculationPreviewComponent {
 }
 
 export interface CalculationPreviewMinMax {
-  /** APPLIED, or why neither rule applied (NO_RULE, NO_SCHEDULED_DAYS, ...). */
+  /** APPLIED, or why neither rule applied: NO_RULE, NO_SCHEDULED_DAYS, NO_ELIGIBLE_SCHEDULED_DAYS,
+   *  CALENDAR_MISMATCH, MIN_EXCEEDS_MAX, SOURCE_AMOUNT_PRECISION, MINMAX_PERIOD_DAYS_MISSING. */
   status: string;
   proration_version: string;
   numerator: number | null;

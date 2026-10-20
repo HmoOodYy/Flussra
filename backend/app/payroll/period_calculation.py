@@ -50,7 +50,6 @@ from app.payroll.eligibility import (
     require_period_eligibility_snapshot,
 )
 from app.payroll.live_source_calculation import load_live_source_lines
-from app.payroll.off_drivers import _scheduled_work_days
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import ENTRY_ALLOWED_STATUSES, PeriodSummary
 from app.payroll.status_payment_sync import (
@@ -457,12 +456,31 @@ async def _load_effective_rules(
 
 
 async def _load_coverage_inputs(
-    period: PeriodSummary, company_id: int, assignment_ids: list[int], db: AsyncConnection,
-) -> tuple[set[date], dict[int, set[date]], dict[int, set[date]]]:
-    """Frozen scheduled days of the Branch period, and per DriverAssignment its eligible
-    work dates and its days with an off-reason Status. Three reads for all assignments."""
-    scheduled = await _scheduled_work_days(period, db)
-    ids = sorted(set(assignment_ids))
+    period: PeriodSummary, company_id: int, assignment_drivers: dict[int, int],
+    db: AsyncConnection,
+) -> tuple[bool, set[date], dict[int, set[date]], dict[int, set[date]]]:
+    """(has day rows, scheduled days, per DriverAssignment the eligible work dates it owns,
+    per DriverAssignment its days with an off-reason Status).
+
+    Scheduled days are read from the frozen ``PayrollPeriodDays`` only; a period without day
+    rows reports ``has day rows`` False (the caller blocks, nothing is inferred). A date belongs to
+    exactly one DriverAssignment of a Driver: the latest-starting one whose window overlaps
+    that Branch-local day (``core.fn_DriverAssignmentForBusinessDate``, rule D1), so a
+    transfer day shared by two tenures counts for one of them only. At most four reads for
+    all assignments, however many there are.
+    """
+    day_rows = (await db.execute(
+        text("""
+            SELECT workdate, (isdefaultworkday OR isaddedworkday) AS scheduled
+            FROM payroll.payrollperioddays
+            WHERE payrollperiodid = :pid AND companyid = :cid
+        """),
+        {"pid": period.payroll_period_id, "cid": company_id},
+    )).mappings().all()
+    scheduled = {row["workdate"] for row in day_rows if row["scheduled"]}
+    if not scheduled:
+        return bool(day_rows), scheduled, {}, {}
+    ids = sorted(assignment_drivers)
     snapshot_rows = (await db.execute(
         text("""
             SELECT driverassignmentid, iseligibleforperiod, eligibilityreasoncode,
@@ -473,11 +491,28 @@ async def _load_coverage_inputs(
         """),
         {"pid": period.payroll_period_id, "cid": company_id, "ids": ids},
     )).mappings().all()
+    owned_rows = (await db.execute(
+        text("""
+            SELECT t.assignmentid, d.workdate
+            FROM   unnest(CAST(:ids AS INTEGER[]), CAST(:drivers AS INTEGER[]))
+                       AS t(assignmentid, driverid)
+            CROSS JOIN unnest(CAST(:days AS DATE[])) AS d(workdate)
+            WHERE  core.fn_DriverAssignmentForBusinessDate(:cid, t.driverid, d.workdate)
+                   = t.assignmentid
+        """),
+        {"cid": company_id, "ids": ids, "drivers": [assignment_drivers[i] for i in ids],
+         "days": sorted(scheduled)},
+    )).mappings().all()
+    owned: dict[int, set[date]] = {}
+    for row in owned_rows:
+        owned.setdefault(int(row["assignmentid"]), set()).add(row["workdate"])
     eligible: dict[int, set[date]] = {}
     for row in snapshot_rows:
         snapshot = SimpleNamespace(**dict(row))
-        eligible[int(row["driverassignmentid"])] = {
-            day for day in scheduled if _is_snapshot_row_eligible_for_workdate(snapshot, day)
+        assignment_id = int(row["driverassignmentid"])
+        eligible[assignment_id] = {
+            day for day in owned.get(assignment_id, ())
+            if _is_snapshot_row_eligible_for_workdate(snapshot, day)
         }
     # The explicit IsOffReason flag, never a status name: the frozen snapshot once the entry
     # state is finalized, otherwise the live Status key (the pattern of off_drivers).
@@ -499,7 +534,7 @@ async def _load_coverage_inputs(
     off_days: dict[int, set[date]] = {}
     for row in off_rows:
         off_days.setdefault(int(row["driverassignmentid"]), set()).add(row["workdate"])
-    return scheduled, eligible, off_days
+    return True, scheduled, eligible, off_days
 
 
 def _proration(
@@ -531,15 +566,17 @@ async def _evaluate_minmax(
     digits = None if currency is None else currency.minor_unit_digits
     rules = await _load_effective_rules(
         company_id, list(assignment_driver.values()), period.start_date, db)
-    ruled = sorted(
-        assignment for assignment, driver in assignment_driver.items()
+    ruled = {
+        assignment: driver for assignment, driver in sorted(assignment_driver.items())
         if (driver, _MINIMUM) in rules or (driver, _MAXIMUM) in rules
-    )
+    }
+    has_days = False
     scheduled: set[date] = set()
     eligible: dict[int, set[date]] = {}
     off_days: dict[int, set[date]] = {}
     if ruled:
-        scheduled, eligible, off_days = await _load_coverage_inputs(period, company_id, ruled, db)
+        has_days, scheduled, eligible, off_days = await _load_coverage_inputs(
+            period, company_id, ruled, db)
 
     outcomes: dict[int, _MinMaxOutcome] = {}
     for assignment_id in sorted(assignment_driver):
@@ -597,6 +634,20 @@ async def _evaluate_minmax(
                 proration(reason or minmax.MIN_EXCEEDS_MAX,
                           minimum_rule=minimum, maximum_rule=maximum),
                 blockers=blockers)
+            continue
+
+        if not has_days:
+            # No frozen day calendar: the days are never inferred, so nothing can be prorated.
+            outcomes[assignment_id] = _MinMaxOutcome(
+                proration(minmax.MINMAX_PERIOD_DAYS_MISSING,
+                          minimum_rule=minimum, maximum_rule=maximum),
+                blockers=[
+                    "MINMAX_PERIOD_DAYS_MISSING: this period has no frozen day calendar, so "
+                    "the Minimum/Maximum pay rule(s) "
+                    + ", ".join(
+                        str(rule.driver_pay_rule_id) for rule in (minimum, maximum)
+                        if rule is not None)
+                    + " cannot be prorated."])
             continue
 
         numerator, denominator = minmax.coverage(

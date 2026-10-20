@@ -75,8 +75,8 @@ async def test_two_branch_periods_share_one_minimum_across_a_permanent_transfer(
 
     start = cut_day - timedelta(days=3)                     # the Monday of the transfer week
     end = start + timedelta(days=6)
-    old_period = await open_period(direct_db, w.old_branch, start, end)
-    new_period = await open_period(direct_db, w.new_branch, start, end)
+    old_period = await open_period(direct_db, w.old_branch, start, end, days=True)
+    new_period = await open_period(direct_db, w.new_branch, start, end, days=True)
     await _bonus(direct_db, old_period, w.old_branch, w.source)
     await _bonus(direct_db, new_period, w.new_branch, destination)
 
@@ -98,16 +98,13 @@ async def test_two_branch_periods_share_one_minimum_across_a_permanent_transfer(
     assert D(old_row["minimum_adjustment"]) + D(new_row["minimum_adjustment"]) == D("100.00")
 
 
-async def test_a_transfer_day_that_both_tenures_overlap_is_counted_by_both_periods(
+async def test_a_transfer_day_shared_by_two_tenures_counts_only_for_its_owner(
     client, auth_token, direct_db,
 ):
-    """Documents the frozen-eligibility semantics the proration is built on.
-
-    An immediate transfer happens inside a Branch-local day, so that day is in the frozen
-    EligibleWorkDates of both assignments and each period counts it: the two guarantees add
-    up to 8/7 of the Minimum for that week. A transfer at a Branch-local midnight (above) is
-    exact. Whether the shared day should count for only one tenure is a product decision.
-    """
+    """An immediate transfer happens inside a Branch-local day, so that day is in the frozen
+    EligibleWorkDates of both assignments. It counts only for the assignment that owns the
+    date under rule D1 (the latest-starting tenure overlapping it: the destination), so the
+    two guarantees add up to exactly one full set of scheduled days."""
     w = await _world(client, auth_token, direct_db)
     await _calendars(direct_db, w)
     await _make(client, w.old_manager, w, "2026-01-01", amount="700")
@@ -116,17 +113,22 @@ async def test_a_transfer_day_that_both_tenures_overlap_is_counted_by_both_perio
     today = await branch_today(direct_db, w.old_branch)
     start = today - timedelta(days=today.weekday())
     end = start + timedelta(days=6)
-    old_period = await open_period(direct_db, w.old_branch, start, end)
-    new_period = await open_period(direct_db, w.new_branch, start, end)
+    old_period = await open_period(direct_db, w.old_branch, start, end, days=True)
+    new_period = await open_period(direct_db, w.new_branch, start, end, days=True)
     await _bonus(direct_db, old_period, w.old_branch, w.source)
     await _bonus(direct_db, new_period, w.new_branch, destination)
 
     old_days = await _eligible_days(direct_db, old_period, w.source)
     new_days = await _eligible_days(direct_db, new_period, destination)
-    assert old_days & new_days == {today}
+    assert old_days & new_days == {today}                   # frozen eligibility overlaps ...
     old_row = await _preview_of(client, auth_token, old_period, w.source)
     new_row = await _preview_of(client, auth_token, new_period, destination)
-    assert D(old_row["minimum_adjustment"]) + D(new_row["minimum_adjustment"]) == D(700) * 8 / 7
+    # ... but the transfer day is the destination's: Monday .. day before vs the rest.
+    assert old_row["minmax"]["numerator"] == today.weekday()
+    assert new_row["minmax"]["numerator"] == 7 - today.weekday()
+    assert old_row["minmax"]["numerator"] + new_row["minmax"]["numerator"] == 7
+    assert D(old_row["minmax"]["denominator"]) == D(new_row["minmax"]["denominator"]) == 7
+    assert D(old_row["minimum_adjustment"]) + D(new_row["minimum_adjustment"]) == D(700)
 
 
 async def test_an_incompatible_destination_calendar_still_blocks_with_proration_in_play(
@@ -140,7 +142,7 @@ async def test_an_incompatible_destination_calendar_still_blocks_with_proration_
     today = await branch_today(direct_db, w.new_branch)
     start = today - timedelta(days=today.weekday())
     # A weekly rule against a two-week period of the destination Branch's own calendar.
-    period = await open_period(direct_db, w.new_branch, start, start + timedelta(days=13))
+    period = await open_period(direct_db, w.new_branch, start, start + timedelta(days=13), days=True)
     await _bonus(direct_db, period, w.new_branch, destination)
     row = await _preview_of(client, auth_token, period, destination)
     assert any(b.startswith("MINMAX_CALENDAR_MISMATCH") for b in row["blockers"]), row["blockers"]

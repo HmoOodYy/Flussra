@@ -116,3 +116,57 @@ async def insert_pay_rule(
            "e": None if end is None else date.fromisoformat(str(end)), "s": status,
            "cf": frequency, "ca": anchor, "ci": interval, "b": branch_id,
            "v": version_id})).scalar_one())
+
+
+async def freeze_period_days(db, period_id: int) -> int:
+    """Give a directly inserted period the frozen day calendar the canonical creator writes.
+
+    The period takes the authority of the Branch's Payroll Setup in force at its start date
+    (assignment and latest published version), and one PayrollPeriodDays row per date is
+    written from that version's days-off mask. Returns the number of day rows.
+    """
+    period = (await db.execute(text("""
+        SELECT companyid, branchid, startdate, enddate FROM payroll.payrollperiods
+        WHERE payrollperiodid = :p"""), {"p": period_id})).mappings().one()
+    authority = (await db.execute(text("""
+        SELECT a.branchpayrollsetupassignmentid AS assignment_id, a.payrollsetupid AS setup_id,
+               s.setupcode, v.payrollsetupversionid AS version_id, v.versionnumber,
+               v.payrollfrequency, v.anchorstartdate, v.customintervaldays,
+               v.normaldaysoffmask, v.confighash
+        FROM payroll.branchpayrollsetupassignments a
+        JOIN payroll.payrollsetups s ON s.payrollsetupid = a.payrollsetupid
+        JOIN payroll.payrollsetupversions v
+          ON v.payrollsetupid = a.payrollsetupid AND v.lifecyclestate = 'Published'
+         AND v.effectivefromdate <= :start
+        WHERE a.companyid = :c AND a.branchid = :b AND a.withdrawnatutc IS NULL
+          AND a.effectivefromdate <= :start
+          AND (a.effectivetodate IS NULL OR a.effectivetodate > :end)
+        ORDER BY v.effectivefromdate DESC, v.versionnumber DESC LIMIT 1
+    """), {"c": period["companyid"], "b": period["branchid"], "start": period["startdate"],
+           "end": period["enddate"]})).mappings().one()
+    await db.execute(text("""
+        UPDATE payroll.payrollperiods SET
+            branchpayrollsetupassignmentid = :a, payrollsetupversionid = :v,
+            frozenpayrollsetupid = :s, frozenpayrollsetupcode = :code,
+            frozenpayrollsetupversionnumber = :n, frozenpayrollfrequency = :f,
+            frozenanchorstartdate = :anchor, frozencustomintervaldays = :i,
+            frozennormaldaysoffmask = :m, scheduleconfighash = :h
+        WHERE payrollperiodid = :p
+    """), {"a": authority["assignment_id"], "v": authority["version_id"],
+           "s": authority["setup_id"], "code": authority["setupcode"],
+           "n": authority["versionnumber"], "f": authority["payrollfrequency"],
+           "anchor": authority["anchorstartdate"], "i": authority["customintervaldays"],
+           "m": authority["normaldaysoffmask"], "h": authority["confighash"], "p": period_id})
+    result = await db.execute(text("""
+        INSERT INTO payroll.payrollperioddays
+            (payrollperiodid, companyid, branchid, branchpayrollsetupassignmentid,
+             payrollsetupversionid, workdate, dayofweek, isdefaultworkday, isconfiguredoffday)
+        SELECT :p, :c, :b, :a, :v, d::date, extract(dow FROM d)::int,
+               ((:m >> extract(dow FROM d)::int) & 1) = 0,
+               ((:m >> extract(dow FROM d)::int) & 1) = 1
+        FROM generate_series(CAST(:start AS date), CAST(:end AS date), interval '1 day') AS d
+    """), {"p": period_id, "c": period["companyid"], "b": period["branchid"],
+           "a": authority["assignment_id"], "v": authority["version_id"],
+           "m": authority["normaldaysoffmask"] or 0, "start": period["startdate"],
+           "end": period["enddate"]})
+    return result.rowcount

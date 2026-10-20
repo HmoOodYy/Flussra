@@ -97,9 +97,16 @@ async def scheduled_transfer(client, token: str, driver_id: int, target_branch_i
     }
 
 
-async def open_period(db, branch_id: int, start: date, end: date, status: str = "Open") -> int:
-    """Insert a period, capture its roster (marker + rows) and set the requested status."""
+async def open_period(
+    db, branch_id: int, start: date, end: date, status: str = "Open", *, days: bool = False,
+) -> int:
+    """Insert a period, capture its roster (marker + rows) and set the requested status.
+
+    ``days=True`` also freezes the Branch's Payroll Setup day calendar into the period (the
+    Branch needs a published Setup in force), as the canonical creator does.
+    """
     from app.payroll.eligibility import _create_period_driver_eligibility_rows
+    from tests.builders.pay_rules import freeze_period_days
 
     period_id = int((await db.execute(text("""
         INSERT INTO payroll.PayrollPeriods
@@ -108,6 +115,9 @@ async def open_period(db, branch_id: int, start: date, end: date, status: str = 
         RETURNING PayrollPeriodID
     """), {"branch_id": branch_id, "code": f"SC-{sfx()}", "start": start, "end": end})).scalar_one())
     await db.commit()
+    if days:
+        await freeze_period_days(db, period_id)
+        await db.commit()
     await _create_period_driver_eligibility_rows(
         period_id, 1, branch_id, db, snapshot_source="Generated", freeze=True,
     )

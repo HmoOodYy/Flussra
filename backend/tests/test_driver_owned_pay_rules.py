@@ -74,7 +74,7 @@ def _next_monday(after: date) -> date:
 async def _preview_row(client, db, token, w: World, *, branch_id, assignment_id, start, end,
                        normal="50", rate_from="2026-01-01") -> dict:
     """The Driver's row of the live calculation preview for a period of ``branch_id``."""
-    period_id = await open_period(db, branch_id, start, end)
+    period_id = await open_period(db, branch_id, start, end, days=True)
     definition = await seed_period_definition(db, period_id=period_id, branch_id=branch_id)
     await seed_approved_rate(
         db, definition=definition, driver_assignment_id=assignment_id, amount=normal,
@@ -470,7 +470,8 @@ async def test_reconciliation_is_ending_the_old_rule_and_creating_a_new_one(
     start = _next_monday(today + timedelta(days=1))
     if (start - DEFAULT_ANCHOR).days % 14:
         start += timedelta(days=7)  # a period start on the biweekly grid
-    period_id = await open_period(direct_db, w.new_branch, start, start + timedelta(days=13))
+    period_id = await open_period(
+        direct_db, w.new_branch, start, start + timedelta(days=13), days=True)
     definition = await seed_period_definition(direct_db, period_id=period_id, branch_id=w.new_branch)
     await seed_approved_rate(
         direct_db, definition=definition, driver_assignment_id=destination, amount="50",
