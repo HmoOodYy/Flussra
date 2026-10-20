@@ -1,7 +1,6 @@
 """Immutable Phase 6 evidence writers shared by payroll and review actions."""
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterable
 from typing import Any
@@ -11,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import CompanyCurrency
+from app.payroll.snapshot_hash import used_rate_fingerprint
 
 
 def _canonical_json(value: Any) -> str:
@@ -155,10 +155,6 @@ async def capture_workflow_action_evidence(
     })
 
 
-def _definition_fingerprint(descriptor: dict[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json(descriptor).encode("utf-8")).hexdigest()
-
-
 def _scope_error(kind: str) -> HTTPException:
     return HTTPException(
         status_code=422,
@@ -194,17 +190,15 @@ def _schedule_descriptor(line: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def capture_snapshot_used_rate_definitions(
+async def build_used_rate_evidence(
     *,
-    snapshot_id: int,
     company_id: int,
     branch_id: int,
-    period_id: int,
     lines: Iterable[dict[str, Any]],
     currency: CompanyCurrency,
     db: AsyncConnection,
-) -> dict[int, int]:
-    """Persist the rates actually used by the snapshot's lines, one row per distinct rate.
+) -> tuple[list[dict[str, Any]], list[str | None]]:
+    """The rates actually used by the snapshot's lines, one descriptor per distinct rate.
 
     Ordinary lines record the target DriverRateSchedule they used (schedule, definition, the
     schedule value and its amount, status and effective window) exactly as the calculation
@@ -212,8 +206,9 @@ async def capture_snapshot_used_rate_definitions(
     remains assignment-owned). Bonus lines use no rate. DriverPayRules are not captured here:
     the Min/Max rule evidence of the snapshot is their one authority.
 
-    The returned mapping uses the caller's stable line ordinal, so every applicable immutable
-    line links to its rate evidence without a later mutable-rate lookup.
+    Returns the distinct descriptors (each with its ``DefinitionFingerprint``) and, per input
+    line in order, the fingerprint of the rate that line used (``None`` for a line that uses
+    none). Nothing is written: the descriptors are hashed with the snapshot first.
     """
     rows = list(lines)
     status_rate_ids = sorted({
@@ -240,9 +235,9 @@ async def capture_snapshot_used_rate_definitions(
             })).mappings().all()
         }
 
-    definition_ids: dict[str, int] = {}
-    line_definition_ids: dict[int, int] = {}
-    for ordinal, line in enumerate(rows):
+    descriptors: dict[str, dict[str, Any]] = {}
+    line_fingerprints: list[str | None] = []
+    for line in rows:
         source_type = line["SourceType"]
         if source_type == "DraftLine":
             descriptor = _schedule_descriptor(line)
@@ -261,67 +256,81 @@ async def capture_snapshot_used_rate_definitions(
                 "DriverID": int(line["DriverID"]),
                 "RateTypeID": int(rate["ratetypeid"]),
                 "DriverRateID": int(rate["driverrateid"]),
-                "RateTypeCode": rate["ratecode"],
-                "RateTypeName": rate["ratename"],
-                "UnitName": rate["unitname"],
+                "RateTypeCodeSnapshot": rate["ratecode"],
+                "RateTypeNameSnapshot": rate["ratename"],
+                "UnitNameSnapshot": rate["unitname"],
                 "RateAmount": rate["amount"],
                 "EffectiveFrom": rate["effectivefrom"],
                 "EffectiveTo": rate["effectiveto"],
                 "RateStatus": rate["status"],
             }
         else:
+            line_fingerprints.append(None)
             continue
         descriptor["CurrencyCodeSnapshot"] = currency.code
         descriptor["CurrencyMinorUnitDigitsSnapshot"] = currency.minor_unit_digits
-        fingerprint = _definition_fingerprint(descriptor)
-        definition_id = definition_ids.get(fingerprint)
-        if definition_id is None:
-            result = await db.execute(text("""
-                INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions
-                    (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-                     driverassignmentid, driverid, definitionfingerprint, evidencekind,
-                     sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
-                     paydefinitionid, ratecomponentdefinitionid, ratetypeid, driverrateid,
-                     ratetypecodesnapshot, ratetypenamesnapshot, unitnamesnapshot,
-                     rateamountsnapshot, effectivefromsnapshot, effectivetosnapshot,
-                     ratestatussnapshot, currencycodesnapshot,
-                     currencyminorunitdigitssnapshot)
-                VALUES
-                    (:snapshot_id, :company_id, :branch_id, :period_id,
-                     :driver_assignment_id, :driver_id, :fingerprint, :evidence_kind,
-                     :source_type, :schedule_id, :rate_definition_id, :pay_definition_id,
-                     :component_id, :rate_type_id, :driver_rate_id,
-                     :rate_type_code, :rate_type_name, :unit_name,
-                     :rate_amount, :effective_from, :effective_to, :rate_status,
-                     :currency_code, :currency_minor)
-                RETURNING payrollcalculationsnapshotusedratedefinitionid
-            """), {
-                "snapshot_id": snapshot_id,
-                "company_id": company_id,
-                "branch_id": branch_id,
-                "period_id": period_id,
-                "driver_assignment_id": descriptor["DriverAssignmentID"],
-                "driver_id": descriptor["DriverID"],
-                "fingerprint": fingerprint,
-                "evidence_kind": descriptor["EvidenceKind"],
-                "source_type": descriptor["SourceType"],
-                "schedule_id": descriptor.get("DriverRateScheduleID"),
-                "rate_definition_id": descriptor.get("RateDefinitionID"),
-                "pay_definition_id": descriptor.get("PayDefinitionID"),
-                "component_id": descriptor.get("RateComponentDefinitionID"),
-                "rate_type_id": descriptor.get("RateTypeID"),
-                "driver_rate_id": descriptor.get("DriverRateID"),
-                "rate_type_code": descriptor.get("RateTypeCode"),
-                "rate_type_name": descriptor.get("RateTypeName"),
-                "unit_name": descriptor.get("UnitName"),
-                "rate_amount": descriptor["RateAmount"],
-                "effective_from": descriptor["EffectiveFrom"],
-                "effective_to": descriptor["EffectiveTo"],
-                "rate_status": descriptor["RateStatus"],
-                "currency_code": currency.code,
-                "currency_minor": currency.minor_unit_digits,
-            })
-            definition_id = int(result.scalar_one())
-            definition_ids[fingerprint] = definition_id
-        line_definition_ids[ordinal] = definition_id
-    return line_definition_ids
+        fingerprint = used_rate_fingerprint(descriptor)
+        descriptors.setdefault(fingerprint, {**descriptor, "DefinitionFingerprint": fingerprint})
+        line_fingerprints.append(fingerprint)
+    return list(descriptors.values()), line_fingerprints
+
+
+async def insert_used_rate_evidence(
+    *,
+    snapshot_id: int,
+    company_id: int,
+    branch_id: int,
+    period_id: int,
+    used_rates: Iterable[dict[str, Any]],
+    db: AsyncConnection,
+) -> dict[str, int]:
+    """Persist the used-rate descriptors of one snapshot; returns fingerprint -> row id."""
+    ids: dict[str, int] = {}
+    for descriptor in used_rates:
+        result = await db.execute(text("""
+            INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions
+                (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
+                 driverassignmentid, driverid, definitionfingerprint, evidencekind,
+                 sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
+                 paydefinitionid, ratecomponentdefinitionid, ratetypeid, driverrateid,
+                 ratetypecodesnapshot, ratetypenamesnapshot, unitnamesnapshot,
+                 rateamountsnapshot, effectivefromsnapshot, effectivetosnapshot,
+                 ratestatussnapshot, currencycodesnapshot,
+                 currencyminorunitdigitssnapshot)
+            VALUES
+                (:snapshot_id, :company_id, :branch_id, :period_id,
+                 :driver_assignment_id, :driver_id, :fingerprint, :evidence_kind,
+                 :source_type, :schedule_id, :rate_definition_id, :pay_definition_id,
+                 :component_id, :rate_type_id, :driver_rate_id,
+                 :rate_type_code, :rate_type_name, :unit_name,
+                 :rate_amount, :effective_from, :effective_to, :rate_status,
+                 :currency_code, :currency_minor)
+            RETURNING payrollcalculationsnapshotusedratedefinitionid
+        """), {
+            "snapshot_id": snapshot_id,
+            "company_id": company_id,
+            "branch_id": branch_id,
+            "period_id": period_id,
+            "driver_assignment_id": descriptor["DriverAssignmentID"],
+            "driver_id": descriptor["DriverID"],
+            "fingerprint": descriptor["DefinitionFingerprint"],
+            "evidence_kind": descriptor["EvidenceKind"],
+            "source_type": descriptor["SourceType"],
+            "schedule_id": descriptor.get("DriverRateScheduleID"),
+            "rate_definition_id": descriptor.get("RateDefinitionID"),
+            "pay_definition_id": descriptor.get("PayDefinitionID"),
+            "component_id": descriptor.get("RateComponentDefinitionID"),
+            "rate_type_id": descriptor.get("RateTypeID"),
+            "driver_rate_id": descriptor.get("DriverRateID"),
+            "rate_type_code": descriptor.get("RateTypeCodeSnapshot"),
+            "rate_type_name": descriptor.get("RateTypeNameSnapshot"),
+            "unit_name": descriptor.get("UnitNameSnapshot"),
+            "rate_amount": descriptor["RateAmount"],
+            "effective_from": descriptor["EffectiveFrom"],
+            "effective_to": descriptor["EffectiveTo"],
+            "rate_status": descriptor["RateStatus"],
+            "currency_code": descriptor["CurrencyCodeSnapshot"],
+            "currency_minor": descriptor["CurrencyMinorUnitDigitsSnapshot"],
+        })
+        ids[descriptor["DefinitionFingerprint"]] = int(result.scalar_one())
+    return ids

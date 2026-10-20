@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.company_currency import CompanyCurrency, currency_error
 from app.payroll import bonus as payroll_bonus
 from app.payroll.calculation import minmax_proration as minmax
-from app.payroll.immutable_evidence import capture_snapshot_used_rate_definitions
+from app.payroll.immutable_evidence import build_used_rate_evidence, insert_used_rate_evidence
 from app.payroll.period_calculation import (
     _CalculationPacketDriverTotal,
     _CalculationPacketLine,
@@ -157,8 +157,8 @@ def _line_content(line: _CalculationPacketLine) -> dict[str, Any]:
         "ResolvedRateAmount": line.resolved_rate_amount,
         "CalculatedAmount": _line_amount(line),
         "SourceEvidenceJSONB": line.source_evidence or {},
-        # Descriptors of the rate the line used, for the used-rate evidence. Not hashed: the
-        # hash covers the schedule id and the resolved rate amount, which identify the rate.
+        # Descriptors of the rate the line used, for the used-rate evidence. The evidence
+        # rows themselves are hashed and the line links to its row by fingerprint.
         "RateComponentDefinitionID": line.rate_component_definition_id,
         "ScheduleStatus": line.schedule_status,
         "ScheduleEffectiveFrom": line.schedule_effective_from,
@@ -443,6 +443,20 @@ async def _capture_calculation_snapshot(
         period=period, company_id=company_id, packet=packet, currency=currency,
         source_config_hash=source_config_hash,
     )
+    # The rates the lines used are part of the hashed evidence: every line links to its rate by
+    # fingerprint and the rate rows are hashed with the snapshot.
+    flat_lines = [
+        {"DriverAssignmentID": total["DriverAssignmentID"], "DriverID": total["DriverID"], **line}
+        for total in content["DriverTotals"] for line in total["Lines"]
+    ]
+    used_rates, line_fingerprints = await build_used_rate_evidence(
+        company_id=company_id, branch_id=period.branch_id, lines=flat_lines,
+        currency=currency, db=db)
+    fingerprints = iter(line_fingerprints)
+    for total in content["DriverTotals"]:
+        for line in total["Lines"]:
+            line["UsedRateFingerprint"] = next(fingerprints)
+    content["UsedRates"] = used_rates
     snapshot_hash = calculate_snapshot_hash(content)
 
     revision_number = int((await db.execute(
@@ -496,21 +510,15 @@ async def _capture_calculation_snapshot(
     })
 
     # Rate evidence first: every ordinary and Status line links to the rate it used.
-    flat_lines = [
-        {"DriverAssignmentID": total["DriverAssignmentID"], "DriverID": total["DriverID"], **line}
-        for total in content["DriverTotals"] for line in total["Lines"]
-    ]
-    used_rate_definition_ids = await capture_snapshot_used_rate_definitions(
+    used_rate_definition_ids = await insert_used_rate_evidence(
         snapshot_id=snapshot_id,
         company_id=company_id,
         branch_id=period.branch_id,
         period_id=period.payroll_period_id,
-        lines=flat_lines,
-        currency=currency,
+        used_rates=used_rates,
         db=db,
     )
 
-    line_ordinal = 0
     for total in content["DriverTotals"]:
         driver_total_id = await _insert_scalar(db, """
             INSERT INTO payroll.payrollcalculationdrivertotals
@@ -680,9 +688,8 @@ async def _capture_calculation_snapshot(
                 "resolved_rate": line["ResolvedRateAmount"],
                 "calculated_amount": line["CalculatedAmount"],
                 "evidence": canonical_json(line["SourceEvidenceJSONB"]),
-                "used_rate_definition_id": used_rate_definition_ids.get(line_ordinal),
+                "used_rate_definition_id": used_rate_definition_ids.get(line["UsedRateFingerprint"]),
             })
-            line_ordinal += 1
 
     for entry in status_entries:
         await db.execute(

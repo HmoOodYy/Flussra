@@ -1,10 +1,14 @@
 """Load, hash-verify and reconcile one immutable calculation snapshot.
 
 ``load_snapshot_content`` rebuilds, from the persisted rows alone, the content that the
-financial hash covers (``snapshot_hash.calculate_snapshot_hash``). The snapshot writer, approval,
-finalization and finalization preview all verify through this one path, so a tampered or
-corrupted snapshot, or one captured under another contract, fails closed with a stable code
-instead of being consumed.
+financial hash covers (``snapshot_hash.calculate_snapshot_hash``) together with the report-only
+Status and Bonus evidence (its own hash). The snapshot writer, approval, finalization, the
+finalization preview and every frozen reader verify through ``verify_snapshot``, the one
+canonical verification, so a tampered or corrupted snapshot, or one captured under another
+contract, fails closed with a stable code instead of being consumed. It covers the financial
+hash (which includes the used-rate evidence), the arithmetic of the evidence, the line to
+used-rate links, the report evidence version and hash, and the overlaps between the report
+evidence and the financial evidence.
 
 Nothing here consults live payroll configuration: a snapshot is read as it was frozen.
 The functions are read-only and open no transaction; the caller owns the connection.
@@ -20,9 +24,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll.calculation.payable_rounding import PAYABLE_ROUNDING_VERSION, round_payable
 from app.payroll.snapshot_hash import (
+    CURRENT_REPORT_EVIDENCE_VERSION,
     UnsupportedCalculationVersionError,
+    calculate_report_evidence_hash,
     calculate_snapshot_hash,
     require_supported_calculation_version,
+    used_rate_fingerprint,
 )
 
 ZERO = Decimal("0")
@@ -132,12 +139,44 @@ async def load_snapshot_content(
                sl.ratedefinitionid, sl.driverratescheduleid, sl.calculationstatus,
                sl.calculationversion, sl.statusratecolumnid, sl.ratetypeid, sl.driverrateid,
                sl.bonuseventid, sl.quantity, sl.resolvedrateamount, sl.calculatedamount,
-               sl.sourceevidencejsonb, sl.usedratedefinitionid
+               sl.sourceevidencejsonb, sl.usedratedefinitionid,
+               ur.definitionfingerprint AS usedratefingerprint
         FROM payroll.payrollcalculationsnapshotlines sl
         JOIN payroll.payrollcalculationdrivertotals dt
           ON dt.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
+        LEFT JOIN payroll.payrollcalculationsnapshotusedratedefinitions ur
+          ON ur.payrollcalculationsnapshotusedratedefinitionid = sl.usedratedefinitionid
         WHERE dt.payrollcalculationsnapshotid = :snapshot_id
         ORDER BY sl.payrollcalculationsnapshotlineid
+    """), params)).mappings().all()
+    used_rates = (await db.execute(text("""
+        SELECT payrollcalculationsnapshotusedratedefinitionid, companyid, branchid,
+               payrollperiodid, driverassignmentid, driverid, definitionfingerprint,
+               evidencekind, sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
+               paydefinitionid, ratecomponentdefinitionid, ratetypeid, driverrateid,
+               ratetypecodesnapshot, ratetypenamesnapshot, unitnamesnapshot,
+               rateamountsnapshot, effectivefromsnapshot, effectivetosnapshot,
+               ratestatussnapshot, currencycodesnapshot, currencyminorunitdigitssnapshot
+        FROM payroll.payrollcalculationsnapshotusedratedefinitions
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+        ORDER BY payrollcalculationsnapshotusedratedefinitionid
+    """), params)).mappings().all()
+    status_entries = (await db.execute(text("""
+        SELECT payrollperioddriverdayentrystateid, companyid, branchid, payrollperiodid,
+               driverassignmentid, driverid, workdate, statuskeyid, statuscodesnapshot,
+               statuslabelsnapshot, statusisoffreasonsnapshot
+        FROM payroll.payrollcalculationsnapshotstatusentries
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+        ORDER BY driverassignmentid, workdate, payrollperioddriverdayentrystateid
+    """), params)).mappings().all()
+    bonus_events = (await db.execute(text("""
+        SELECT payrollbonuseventid, companyid, branchid, payrollperiodid, driverassignmentid,
+               driverid, amount, reason, notes, datarevision, createdbyuserid,
+               creatordisplaynamesnapshot, createdatutc, currencycodesnapshot,
+               currencyminorunitdigitssnapshot
+        FROM payroll.payrollcalculationsnapshotbonusevents
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+        ORDER BY driverassignmentid, payrollbonuseventid
     """), params)).mappings().all()
 
     rules_by_evaluation: dict[int, list[dict[str, Any]]] = {}
@@ -202,6 +241,7 @@ async def load_snapshot_content(
             "PayrollCalculationSnapshotLineID": int(row["payrollcalculationsnapshotlineid"]),
             "PayrollCalculationSnapshotComponentID": int(row["payrollcalculationsnapshotcomponentid"]),
             "UsedRateDefinitionID": row["usedratedefinitionid"],
+            "UsedRateFingerprint": row["usedratefingerprint"],
             "SourceType": row["sourcetype"],
             "SourceID": row["sourceid"],
             "LineType": row["linetype"],
@@ -222,6 +262,64 @@ async def load_snapshot_content(
             "CalculatedAmount": _decimal(row["calculatedamount"]),
             "SourceEvidenceJSONB": row["sourceevidencejsonb"],
         })
+
+    used_rate_content = [{
+        "PayrollCalculationSnapshotUsedRateDefinitionID":
+            int(row["payrollcalculationsnapshotusedratedefinitionid"]),
+        "CompanyID": int(row["companyid"]),
+        "BranchID": int(row["branchid"]),
+        "PayrollPeriodID": int(row["payrollperiodid"]),
+        "DefinitionFingerprint": row["definitionfingerprint"],
+        "EvidenceKind": row["evidencekind"],
+        "SourceType": row["sourcetypesnapshot"],
+        "DriverAssignmentID": int(row["driverassignmentid"]),
+        "DriverID": int(row["driverid"]),
+        "DriverRateScheduleID": row["driverratescheduleid"],
+        "RateDefinitionID": row["ratedefinitionid"],
+        "PayDefinitionID": row["paydefinitionid"],
+        "RateComponentDefinitionID": row["ratecomponentdefinitionid"],
+        "RateTypeID": row["ratetypeid"],
+        "DriverRateID": row["driverrateid"],
+        "RateTypeCodeSnapshot": row["ratetypecodesnapshot"],
+        "RateTypeNameSnapshot": row["ratetypenamesnapshot"],
+        "UnitNameSnapshot": row["unitnamesnapshot"],
+        "RateAmount": _optional_decimal(row["rateamountsnapshot"]),
+        "EffectiveFrom": row["effectivefromsnapshot"],
+        "EffectiveTo": row["effectivetosnapshot"],
+        "RateStatus": row["ratestatussnapshot"],
+        "CurrencyCodeSnapshot": row["currencycodesnapshot"],
+        "CurrencyMinorUnitDigitsSnapshot": row["currencyminorunitdigitssnapshot"],
+    } for row in used_rates]
+    report_status_entries = [{
+        "PayrollPeriodDriverDayEntryStateID": int(row["payrollperioddriverdayentrystateid"]),
+        "CompanyID": int(row["companyid"]),
+        "BranchID": int(row["branchid"]),
+        "PayrollPeriodID": int(row["payrollperiodid"]),
+        "DriverAssignmentID": int(row["driverassignmentid"]),
+        "DriverID": int(row["driverid"]),
+        "WorkDate": row["workdate"],
+        "StatusKeyID": int(row["statuskeyid"]),
+        "StatusCodeSnapshot": row["statuscodesnapshot"],
+        "StatusLabelSnapshot": row["statuslabelsnapshot"],
+        "StatusIsOffReasonSnapshot": bool(row["statusisoffreasonsnapshot"]),
+    } for row in status_entries]
+    report_bonus_events = [{
+        "PayrollBonusEventID": int(row["payrollbonuseventid"]),
+        "CompanyID": int(row["companyid"]),
+        "BranchID": int(row["branchid"]),
+        "PayrollPeriodID": int(row["payrollperiodid"]),
+        "DriverAssignmentID": int(row["driverassignmentid"]),
+        "DriverID": int(row["driverid"]),
+        "Amount": _decimal(row["amount"]),
+        "CurrencyCodeSnapshot": row["currencycodesnapshot"],
+        "CurrencyMinorUnitDigitsSnapshot": row["currencyminorunitdigitssnapshot"],
+        "Reason": row["reason"],
+        "Notes": row["notes"],
+        "DataRevision": int(row["datarevision"]),
+        "CreatedByUserID": row["createdbyuserid"],
+        "CreatorDisplayNameSnapshot": row["creatordisplaynamesnapshot"],
+        "CreatedAtUtc": row["createdatutc"],
+    } for row in bonus_events]
 
     driver_totals = []
     for row in totals:
@@ -267,6 +365,11 @@ async def load_snapshot_content(
         "Warnings": list(header["warnings"]),
         "TotalExpectedPay": _decimal(header["totalexpectedpay"]),
         "DriverTotals": driver_totals,
+        "UsedRates": used_rate_content,
+        "ReportEvidence": {
+            "StatusEntries": report_status_entries,
+            "BonusEvents": report_bonus_events,
+        },
     }
 
 
@@ -386,6 +489,182 @@ def _reconcile_minmax(
             raise _integrity(f"{label}: the {kind.lower()} is not reproduced by its Min/Max evidence.")
 
 
+def _used_rate_error(message: str) -> SnapshotEvidenceError:
+    return SnapshotEvidenceError("USED_RATE_EVIDENCE_INTEGRITY_ERROR", message)
+
+
+def reconcile_used_rate_evidence(content: dict[str, Any]) -> None:
+    """The used-rate evidence is self-consistent and agrees with the lines that link to it.
+
+    * every row's fingerprint is the fingerprint of its own descriptor, rows are unique and
+      belong to the snapshot scope, currency and a Driver total of the snapshot;
+    * every ordinary line links to a schedule row of its own DriverAssignment that agrees on
+      the schedule, the rate definition, the pay definition and the resolved rate amount;
+    * every Status line links to a Status DriverRate row that agrees on the DriverRate, the
+      RateType and the rate amount; a Bonus line links to no rate;
+    * every row is used by at least one line (no orphans).
+    """
+    used_rates = content.get("UsedRates", [])
+    by_fingerprint: dict[str, dict[str, Any]] = {}
+    drivers = {t["DriverAssignmentID"]: t["DriverID"] for t in content["DriverTotals"]}
+    for rate in used_rates:
+        fingerprint = rate["DefinitionFingerprint"]
+        if used_rate_fingerprint(rate) != fingerprint or fingerprint in by_fingerprint:
+            raise _used_rate_error("a used-rate row does not match its own fingerprint.")
+        by_fingerprint[fingerprint] = rate
+        if (
+            (rate["CompanyID"], rate["BranchID"], rate["PayrollPeriodID"])
+            != (content["CompanyID"], content["BranchID"], content["PayrollPeriodID"])
+            or rate["CurrencyCodeSnapshot"] != content["CurrencyCode"]
+            or rate["CurrencyMinorUnitDigitsSnapshot"] != content["CurrencyMinorUnitDigits"]
+            or drivers.get(rate["DriverAssignmentID"]) != rate["DriverID"]
+        ):
+            raise _used_rate_error("a used-rate row is outside the snapshot scope.")
+
+    used: set[str] = set()
+    for total in content["DriverTotals"]:
+        for line in total["Lines"]:
+            fingerprint = line.get("UsedRateFingerprint")
+            source_type = line["SourceType"]
+            if source_type == "BonusEvent":
+                if fingerprint is not None:
+                    raise _used_rate_error("a Bonus line links to a rate.")
+                continue
+            rate = by_fingerprint.get(fingerprint) if fingerprint is not None else None
+            if rate is None or rate["DriverAssignmentID"] != total["DriverAssignmentID"]:
+                raise _used_rate_error("a line does not link to a used-rate row of its Driver.")
+            if source_type == "DraftLine":
+                agrees = (
+                    rate["EvidenceKind"] == "DriverRateSchedule"
+                    and rate["SourceType"] == "DraftLine"
+                    and rate["DriverRateScheduleID"] == line["DriverRateScheduleID"]
+                    and rate["RateDefinitionID"] == line["RateDefinitionID"]
+                    and rate["PayDefinitionID"] == line["PayDefinitionID"]
+                    and rate["RateAmount"] == line["ResolvedRateAmount"]
+                )
+            elif source_type == "StatusEntryState":
+                agrees = (
+                    rate["EvidenceKind"] == "StatusDriverRate"
+                    and rate["SourceType"] == "StatusEntryState"
+                    and rate["DriverRateID"] == line["DriverRateID"]
+                    and rate["RateTypeID"] == line["RateTypeID"]
+                    and rate["RateAmount"] == line["ResolvedRateAmount"]
+                )
+            else:
+                agrees = False
+            if not agrees:
+                raise _used_rate_error("a line disagrees with the used-rate row it links to.")
+            used.add(fingerprint)
+    if used != set(by_fingerprint):
+        raise _used_rate_error("a used-rate row is not used by any line of the snapshot.")
+
+
+def _report_error(code: str, message: str) -> SnapshotEvidenceError:
+    return SnapshotEvidenceError(code, message)
+
+
+def _require_report_evidence_version(content: dict[str, Any]) -> None:
+    if content["ReportEvidenceVersion"] != CURRENT_REPORT_EVIDENCE_VERSION:
+        raise _report_error(
+            "UNSUPPORTED_REPORT_EVIDENCE_VERSION",
+            f"unsupported report evidence version {content['ReportEvidenceVersion']!r}; "
+            f"only {CURRENT_REPORT_EVIDENCE_VERSION!r} can be consumed",
+        )
+
+
+def reconcile_report_evidence(content: dict[str, Any]) -> None:
+    """The report-only Status and Bonus evidence: version, own hash and its overlaps with the
+    financial evidence.
+
+    The report evidence keeps its own hash (it is not financial), but it is verified here so no
+    reader can expose it unverified, and two facts that can disagree are never left unchecked:
+
+    * the stored version is the supported one and the stored hash equals the hash recomputed
+      from the persisted rows;
+    * the Bonus events equal the BONUS lines one to one (event, DriverAssignment, Driver,
+      amount) and carry the snapshot currency;
+    * each STATUS line's entry state is a Status entry of the same DriverAssignment, WorkDate
+      and Status key;
+    * no work date counted by a Min/Max evaluation is an off-reason Status entry of that Driver;
+    * every Driver named by the evidence is the Driver of that DriverAssignment's total.
+    """
+    _require_report_evidence_version(content)
+    evidence = content["ReportEvidence"]
+    statuses, bonuses = evidence["StatusEntries"], evidence["BonusEvents"]
+    if calculate_report_evidence_hash(
+        status_entries=statuses, bonus_events=bonuses,
+    ) != content["ReportEvidenceHash"]:
+        raise _report_error(
+            "REPORT_EVIDENCE_HASH_MISMATCH",
+            "the persisted report evidence does not match its frozen hash.",
+        )
+
+    scope = (content["CompanyID"], content["BranchID"], content["PayrollPeriodID"])
+    drivers = {t["DriverAssignmentID"]: t["DriverID"] for t in content["DriverTotals"]}
+    for item in (*statuses, *bonuses):
+        if (item["CompanyID"], item["BranchID"], item["PayrollPeriodID"]) != scope:
+            raise _report_error(
+                "REPORT_EVIDENCE_INTEGRITY_ERROR", "report evidence is outside the snapshot scope.")
+        driver_id = drivers.get(item["DriverAssignmentID"])
+        if driver_id is not None and driver_id != item["DriverID"]:
+            raise _report_error(
+                "REPORT_EVIDENCE_INTEGRITY_ERROR",
+                "report evidence names another Driver than the Driver total of its assignment.")
+
+    bonus_lines = sorted(
+        (int(line["BonusEventID"]), total["DriverAssignmentID"], total["DriverID"],
+         line["CalculatedAmount"])
+        for total in content["DriverTotals"] for line in total["Lines"]
+        if line["SourceType"] == "BonusEvent"
+    )
+    bonus_events = sorted(
+        (event["PayrollBonusEventID"], event["DriverAssignmentID"], event["DriverID"],
+         event["Amount"])
+        for event in bonuses
+    )
+    if (
+        bonus_lines != bonus_events
+        or any(
+            event["CurrencyCodeSnapshot"] != content["CurrencyCode"]
+            or event["CurrencyMinorUnitDigitsSnapshot"] != content["CurrencyMinorUnitDigits"]
+            for event in bonuses
+        )
+    ):
+        raise _report_error(
+            "REPORT_EVIDENCE_INTEGRITY_ERROR",
+            "the Bonus report evidence does not equal the Bonus lines of the snapshot.")
+
+    entries = {entry["PayrollPeriodDriverDayEntryStateID"]: entry for entry in statuses}
+    for total in content["DriverTotals"]:
+        for line in total["Lines"]:
+            if line["SourceType"] != "StatusEntryState":
+                continue
+            entry = entries.get(int(line["SourceID"]))
+            status_key = (line["SourceEvidenceJSONB"] or {}).get("StatusKeyID")
+            if (
+                entry is None
+                or entry["DriverAssignmentID"] != total["DriverAssignmentID"]
+                or entry["WorkDate"] != line["WorkDate"]
+                or entry["StatusKeyID"] != status_key
+            ):
+                raise _report_error(
+                    "REPORT_EVIDENCE_INTEGRITY_ERROR",
+                    "a Status line is not a Status entry of the report evidence.")
+    off_days = {
+        (entry["DriverAssignmentID"], entry["WorkDate"])
+        for entry in statuses if entry["StatusIsOffReasonSnapshot"]
+    }
+    for total in content["DriverTotals"]:
+        evaluation = total["MinMax"]
+        if evaluation is not None and any(
+            (total["DriverAssignmentID"], day) in off_days
+            for day in evaluation["CountedWorkDates"]
+        ):
+            raise _report_error(
+                "REPORT_EVIDENCE_INTEGRITY_ERROR",
+                "a work date counted by Min/Max is an off-reason Status entry.")
+
+
 async def verify_snapshot(
     db: AsyncConnection,
     *,
@@ -396,18 +675,24 @@ async def verify_snapshot(
 ) -> dict[str, Any]:
     """Load one snapshot and fail closed unless its persisted evidence matches its frozen hash.
 
-    Checks, in order: the scope, the calculation version, the recomputed financial hash
-    (SNAPSHOT_HASH_MISMATCH) and the arithmetic of the evidence. Returns the loaded content.
+    Checks, in order: the scope, the calculation version, the report evidence version, the
+    recomputed financial hash over the evidence and the rates it used (SNAPSHOT_HASH_MISMATCH),
+    the arithmetic of the evidence, the used-rate links, the report evidence hash and its
+    overlaps with the financial evidence. Returns the loaded and verified content, including the
+    report evidence, so a reader never queries the evidence tables itself.
     """
     content = await load_snapshot_content(
         db, snapshot_id=snapshot_id, company_id=company_id, branch_id=branch_id,
         period_id=period_id)
     if any(total["MinMax"] is None for total in content["DriverTotals"]):
         raise _integrity("a Driver total has no Min/Max evaluation.")
+    _require_report_evidence_version(content)
     if calculate_snapshot_hash(content) != content["SnapshotHash"]:
         raise SnapshotEvidenceError(
             "SNAPSHOT_HASH_MISMATCH",
             "the persisted calculation evidence does not match its frozen hash.",
         )
     reconcile_snapshot_content(content)
+    reconcile_used_rate_evidence(content)
+    reconcile_report_evidence(content)
     return content

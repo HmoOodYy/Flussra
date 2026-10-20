@@ -2,7 +2,8 @@
 
 The financial hash is a pure function of the persisted immutable evidence of one snapshot
 (see ``snapshot_verification.load_snapshot_content``): identities, frozen versions,
-official components, Min/Max evidence and per-source lines. It never includes generated row
+official components, Min/Max evidence, per-source lines and the used-rate evidence the lines
+link to. It never includes generated row
 ids, the revision number, the author or any other audit metadata, so two revisions with
 identical financial content hash identically. Only the fields named below are projected,
 whatever else a content mapping carries.
@@ -136,6 +137,30 @@ _LINE_FIELDS = (
     "ResolvedRateAmount",
     "CalculatedAmount",
     "SourceEvidenceJSONB",
+    "UsedRateFingerprint",
+)
+# The rate a line used, as frozen: every descriptor field is financially meaningful, and the
+# fingerprint of the projection is both the identity the lines link to and a self-check.
+_USED_RATE_FIELDS = (
+    "EvidenceKind",
+    "SourceType",
+    "DriverAssignmentID",
+    "DriverID",
+    "DriverRateScheduleID",
+    "RateDefinitionID",
+    "PayDefinitionID",
+    "RateComponentDefinitionID",
+    "RateTypeID",
+    "DriverRateID",
+    "RateTypeCodeSnapshot",
+    "RateTypeNameSnapshot",
+    "UnitNameSnapshot",
+    "RateAmount",
+    "EffectiveFrom",
+    "EffectiveTo",
+    "RateStatus",
+    "CurrencyCodeSnapshot",
+    "CurrencyMinorUnitDigitsSnapshot",
 )
 _COMPONENT_KIND_ORDER = {
     "ORDINARY": 0,
@@ -265,6 +290,18 @@ def _projection(value: Mapping[str, Any], fields: Sequence[str]) -> dict[str, An
     return {field: value.get(field) for field in fields}
 
 
+def used_rate_fingerprint(descriptor: Mapping[str, Any]) -> str:
+    """The identity of one used-rate descriptor: the hash of its financial fields only."""
+    return sha256_hex(_projection(descriptor, _USED_RATE_FIELDS))
+
+
+def _used_rate_projection(used_rate: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        **_projection(used_rate, _USED_RATE_FIELDS),
+        "DefinitionFingerprint": used_rate.get("DefinitionFingerprint"),
+    }
+
+
 def _nulls_last(value: Any) -> tuple[bool, Any]:
     return value is None, value
 
@@ -336,14 +373,20 @@ def _driver_total_projection(total: Mapping[str, Any]) -> dict[str, Any]:
 def calculate_snapshot_hash(content: Mapping[str, Any]) -> str:
     """Hash the complete financial content of one snapshot.
 
-    ``content`` carries the header fields (``_HEADER_FIELDS``) and ``DriverTotals``, each with
-    its ``Components``, its ``MinMax`` evaluation (with its ``Rules``) and its ``Lines``.
+    ``content`` carries the header fields (``_HEADER_FIELDS``), ``DriverTotals`` (each with its
+    ``Components``, its ``MinMax`` evaluation with its ``Rules``, and its ``Lines``) and the
+    ``UsedRates`` the lines link to by fingerprint.
     Anything else in the mapping, in particular row ids, the revision number and audit
     metadata, is not part of the hash.
     """
     totals = [_driver_total_projection(total) for total in content["DriverTotals"]]
     totals.sort(key=lambda total: total["DriverAssignmentID"])
+    used_rates = sorted(
+        (_used_rate_projection(rate) for rate in content.get("UsedRates", ())),
+        key=lambda rate: str(rate["DefinitionFingerprint"]),
+    )
     return sha256_hex({
         **_projection(content, _HEADER_FIELDS),
         "DriverTotals": totals,
+        "UsedRates": used_rates,
     })
