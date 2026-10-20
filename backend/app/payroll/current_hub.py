@@ -16,7 +16,6 @@ from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
     require_period_eligibility_snapshot,
 )
-from app.payroll.evidence_gate import EVIDENCE_NOT_READY_MESSAGE, TARGET_PAYROLL_EVIDENCE_NOT_READY
 from app.payroll.period_creation import _check_slot_matrix
 from app.payroll.schemas import (
     BranchWorkflowCapabilities,
@@ -483,8 +482,7 @@ def _build_branch_entry(
         elif draft_promotion_conflict:
             cs = _denied("DRAFT_PROMOTION_CONFLICT", "Draft period is not adjacent to this Open period.")
         else:
-            # The backend refuses every submit until target calculation evidence exists.
-            cs = _denied(TARGET_PAYROLL_EVIDENCE_NOT_READY, EVIDENCE_NOT_READY_MESSAGE)
+            cs = _cap(True)
 
         # can_resubmit_returned
         if st != "Returned":
@@ -494,7 +492,7 @@ def _build_branch_entry(
         elif inreview_row:
             cr = _denied("INREVIEW_SLOT_OCCUPIED", "Another period is already in review.")
         else:
-            cr = _denied(TARGET_PAYROLL_EVIDENCE_NOT_READY, EVIDENCE_NOT_READY_MESSAGE)
+            cr = _cap(True)
 
         # can_view_review
         if st == "InReview":

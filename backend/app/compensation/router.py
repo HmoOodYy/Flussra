@@ -6,7 +6,7 @@ PayDefinitions, their Branch configuration and ordinary PerUnit rates; the
 Settings Pay Items and Pay Rates pages call them.
 
 Status rates retain their separate legacy path. Payroll owns period layout and
-live calculation; its evidence gate still refuses target submission/finalization.
+live calculation, and freezes it into immutable evidence on submission.
 """
 
 from datetime import date

@@ -47,7 +47,7 @@ class PeriodSummary(BaseModel):
 
 # Transitions that can be performed via PATCH /periods/{id}/status.
 # Approved → Locked is intentionally excluded here — that path goes through
-# POST /periods/{id}/finalize. Financial transitions remain subject to the evidence gate.
+# POST /periods/{id}/finalize.
 _VALID_TRANSITIONS: dict[str, set[str]] = {
     "Draft":    {"Cancelled"},
     "Open":     {"InReview", "Cancelled"},

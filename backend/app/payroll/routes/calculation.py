@@ -23,7 +23,8 @@ router = APIRouter()
     summary="Finalize an Approved period — creates FinalLines and locks the period",
     description=(
         "The period must be in **Approved** status. "
-        "All non-Void draft lines are copied to `PayrollFinalLines` "
+        "The approved calculation snapshot bound to the Approved review item is verified "
+        "and projected into one `PayrollFinalLines` row per official component, "
         "and the period transitions to **Locked**. "
         "This is the only path that creates final lines — "
         "the PATCH /status endpoint intentionally blocks Approved → Locked."
@@ -31,7 +32,7 @@ router = APIRouter()
     responses={
         403: {"description": "No access to this period's branch"},
         404: {"description": "Period not found"},
-        422: {"description": "Period is not in Approved status"},
+        422: {"description": "Period is not in Approved status, or its approved snapshot does not verify"},
     },
 )
 async def finalize_period(

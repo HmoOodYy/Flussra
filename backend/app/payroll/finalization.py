@@ -28,7 +28,6 @@ from app.company_currency import (
     lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
-from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.final_line_projection import project_final_lines
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
@@ -202,7 +201,6 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Only Approved periods can be finalized (current status: '{period.status}').")
     await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
-    require_target_payroll_evidence()
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await acquire_branch_workflow_lock(company_id, period.branch_id, db)
     locked = (await db.execute(text("""
@@ -259,7 +257,6 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Finalization preview requires an Approved period. Current status: '{period.status}'.")
     await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
-    require_target_payroll_evidence()
     packet = await _load_approved_snapshot_packet(period_id=period_id, company_id=company_id, branch_id=period.branch_id, db=db)
     snapshot = packet["snapshot"]
     currency = frozen_currency(snapshot["CurrencyCode"], snapshot["CurrencyMinorUnitDigits"])

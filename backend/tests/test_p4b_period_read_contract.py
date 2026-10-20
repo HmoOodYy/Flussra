@@ -23,13 +23,10 @@ from tests.payroll_runtime_fixtures import (
     force_status,
     make_driver_self_user,
     make_user,
-    open_period_with_grid,
     rated_definition,
 )
 
 pytestmark = pytest.mark.asyncio
-
-CODE = "TARGET_PAYROLL_EVIDENCE_NOT_READY"
 
 
 @pytest.fixture(name="tenant")
@@ -122,49 +119,3 @@ async def test_the_review_page_discovers_inreview_periods_by_status(
     inreview = (await p3c_client.get("/payroll/periods", params={"status": "InReview"},
                                      headers=tenant.admin)).json()
     assert [p["payroll_period_id"] for p in inreview] == [open_a["payroll_period_id"]]
-
-
-# ---------------------------------------------------------------------------
-# The evidence refusal never masks the ordinary checks
-# ---------------------------------------------------------------------------
-
-async def test_permissions_and_status_are_checked_before_the_evidence_refusal(
-    p3c_client, p3c_engine, tenant,
-):
-    period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
-    period_id = period["payroll_period_id"]
-    viewer = make_user(tenant, ["payroll.view"])
-    entry_only = make_user(tenant, ["payroll.entry"])
-    driver = make_driver_self_user(tenant, ["payroll.view", "payroll.entry", "payroll.finalize"])
-
-    # Submit needs payroll.entry; the gate never answers a caller who lacks it.
-    submit = {"status": "InReview"}
-    for headers in (viewer, driver):
-        response = await p3c_client.patch(f"/payroll/periods/{period_id}/status", json=submit,
-                                          headers=headers)
-        assert response.status_code == 403, response.text
-    gated = await p3c_client.patch(f"/payroll/periods/{period_id}/status", json=submit,
-                                   headers=entry_only)
-    assert gated.status_code == 409 and gated.json()["detail"]["code"] == CODE
-
-    # An unapproved period is a status problem before anything else.
-    finalize = f"/payroll/periods/{period_id}/finalize"
-    preview = f"/payroll/periods/{period_id}/finalization-preview"
-    assert (await p3c_client.post(finalize, headers=tenant.admin)).status_code == 422
-    assert (await p3c_client.get(preview, headers=tenant.admin)).status_code == 422
-
-    force_status(tenant, period_id, "Approved")
-    for headers in (entry_only, viewer, driver):
-        assert (await p3c_client.post(finalize, headers=headers)).status_code == 403
-        assert (await p3c_client.get(preview, headers=headers)).status_code == 403
-    finalizer = make_user(tenant, ["payroll.finalize"])
-    for response in (await p3c_client.post(finalize, headers=finalizer),
-                     await p3c_client.get(preview, headers=finalizer)):
-        assert response.status_code == 409 and response.json()["detail"]["code"] == CODE
-
-    # Resubmission has its own state and permission checks first.
-    resubmit = f"/payroll/periods/{period_id}/resubmissions"
-    assert (await p3c_client.post(resubmit, json={}, headers=tenant.admin)).status_code == 422
-    force_status(tenant, period_id, "Returned")
-    assert (await p3c_client.post(resubmit, json={}, headers=viewer)).status_code == 403
-    assert (await p3c_client.post(resubmit, json={}, headers=entry_only)).status_code == 409

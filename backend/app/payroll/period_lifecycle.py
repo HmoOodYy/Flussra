@@ -1,9 +1,9 @@
 """
 Period transitions and submit/resubmit orchestration.
 
-Target submission and resubmission remain refused by the evidence gate.
-Retained submission logic consumes Calculation and Status Payment operations;
-Review owns approval decisions and Finalization owns approved-snapshot projection.
+Submission and resubmission each freeze exactly one new immutable calculation snapshot from the
+live packet and bind it to the new Pending PeriodApproval review item, all in the locked
+transaction. Review owns approval decisions and Finalization owns approved-snapshot projection.
 
 Callers own the ambient transaction and whole-transaction retry policy.
 _set_submit_transaction_isolation must issue the first SQL statement on a
@@ -29,7 +29,6 @@ from app.payroll import period_audit
 from app.payroll.audit_evidence import link_unmapped_audit_evidence_to_snapshot
 from app.payroll.calculation_snapshot import _capture_calculation_snapshot
 from app.payroll.eligibility import _regenerate_period_driver_eligibility_rows
-from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_calculation import _build_live_calculation_packet
 from app.payroll.period_read import get_period_by_id
@@ -101,11 +100,6 @@ async def change_period_status(
     required_perm = _TRANSITION_PERMISSIONS.get((existing.status, change.status))
     if required_perm:
         await check_permission(company_id, user_id, existing.branch_id, required_perm, db)
-
-    # P4c gate: submitting freezes target calculation evidence, which does not exist yet.
-    # Refuse before any lock, snapshot, review item or status transition.
-    if change.status == "InReview":
-        require_target_payroll_evidence()
 
     # M16: Open → InReview pre-submission guards + auto-create PeriodApproval review item.
     #
@@ -647,10 +641,6 @@ async def resubmit_period(
 
     # Permission gate: resubmission requires payroll.entry.
     await check_permission(company_id, user_id, existing.branch_id, "payroll.entry", db)
-
-    # P4c gate: resubmitting freezes target calculation evidence, which does not exist
-    # yet. Refuse before any lock, snapshot, review item or status transition.
-    require_target_payroll_evidence()
 
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
 
