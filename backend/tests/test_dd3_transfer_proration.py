@@ -148,3 +148,70 @@ async def test_an_incompatible_destination_calendar_still_blocks_with_proration_
     assert any(b.startswith("MINMAX_CALENDAR_MISMATCH") for b in row["blockers"]), row["blockers"]
     assert row["minmax"]["status"] == "CALENDAR_MISMATCH"
     assert D(row["minimum_adjustment"]) == 0
+
+
+async def _transfer_week(client, auth_token, direct_db, *, create_destination_period=True):
+    """A Driver with a 700 weekly Minimum, transferred between two UTC Branches at a Thursday
+    midnight; the source period always exists, the destination period optionally."""
+    w = await _world(client, auth_token, direct_db)
+    await _calendars(direct_db, w)
+    await _make(client, w.old_manager, w, "2026-01-01", amount="700")
+    cut_day = _next_thursday(await branch_today(direct_db, w.old_branch))
+    destination = await _scheduled(client, auth_token, direct_db, w, cut_day)
+    start = cut_day - timedelta(days=3)
+    end = start + timedelta(days=6)
+    old_period = await open_period(direct_db, w.old_branch, start, end, days=True)
+    await _bonus(direct_db, old_period, w.old_branch, w.source)
+    new_period = None
+    if create_destination_period:
+        new_period = await open_period(direct_db, w.new_branch, start, end, days=True)
+        await _bonus(direct_db, new_period, w.new_branch, destination)
+    return w, destination, old_period, new_period, (start, end)
+
+
+async def test_a_branch_timezone_edit_never_reinterprets_captured_transfer_dates(
+    client, auth_token, direct_db,
+):
+    """Settings PATCH /settings/branches/{id} moves the destination Branch's timezone after both
+    periods captured their eligibility. Ownership comes from the frozen eligibility, so the
+    Wednesday that the live D1 window would now hand to the destination stays with the source
+    and the guarantee is neither lost nor duplicated."""
+    w, destination, old_period, new_period, _ = await _transfer_week(client, auth_token, direct_db)
+    frozen_before = (await _eligible_days(direct_db, old_period, w.source),
+                     await _eligible_days(direct_db, new_period, destination))
+
+    async def totals():
+        old_row = await _preview_of(client, auth_token, old_period, w.source)
+        new_row = await _preview_of(client, auth_token, new_period, destination)
+        assert old_row["blockers"] == [] and new_row["blockers"] == []
+        return ((old_row["minmax"]["numerator"], new_row["minmax"]["numerator"]),
+                D(old_row["minimum_adjustment"]) + D(new_row["minimum_adjustment"]))
+
+    assert await totals() == ((3, 4), D(700) * 7 / 7)
+
+    changed = await client.patch(
+        f"/settings/branches/{w.new_branch}", json={"time_zone_id": "America/Los_Angeles"},
+        headers=auth(auth_token))
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["time_zone_id"] == "America/Los_Angeles"
+
+    assert await totals() == ((3, 4), D(700))
+    assert (await _eligible_days(direct_db, old_period, w.source),
+            await _eligible_days(direct_db, new_period, destination)) == frozen_before
+
+
+async def test_before_the_destination_period_exists_the_live_window_keeps_the_day_out_of_the_source(
+    client, auth_token, direct_db,
+):
+    w, destination, old_period, _, (start, end) = await _transfer_week(
+        client, auth_token, direct_db, create_destination_period=False)
+    old_row = await _preview_of(client, auth_token, old_period, w.source)
+    assert old_row["minmax"]["numerator"] == 3              # Monday .. Wednesday only
+    assert D(old_row["minimum_adjustment"]) == D("300.00")
+
+    new_period = await open_period(direct_db, w.new_branch, start, end, days=True)
+    await _bonus(direct_db, new_period, w.new_branch, destination)
+    new_row = await _preview_of(client, auth_token, new_period, destination)
+    old_row = await _preview_of(client, auth_token, old_period, w.source)
+    assert (old_row["minmax"]["numerator"], new_row["minmax"]["numerator"]) == (3, 4)
+    assert D(old_row["minimum_adjustment"]) + D(new_row["minimum_adjustment"]) == D(700)

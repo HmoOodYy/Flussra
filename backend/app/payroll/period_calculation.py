@@ -465,7 +465,7 @@ async def _load_coverage_inputs(
     Scheduled days are read from the frozen ``PayrollPeriodDays`` only; a period without day
     rows reports ``has day rows`` False (the caller blocks, nothing is inferred). A date belongs to
     exactly one DriverAssignment of a Driver: the latest-starting one whose window overlaps
-    that Branch-local day (``core.fn_DriverAssignmentForBusinessDate``, rule D1), so a
+    that Branch-local day (rule D1), decided from captured eligibility where it exists, so a
     transfer day shared by two tenures counts for one of them only. At most four reads for
     all assignments, however many there are.
     """
@@ -491,17 +491,48 @@ async def _load_coverage_inputs(
         """),
         {"pid": period.payroll_period_id, "cid": company_id, "ids": ids},
     )).mappings().all()
+    # Ownership by captured facts. A date of X is taken away only by a later-ranking tenure Y of
+    # the same Driver (rule D1 order: later start, then higher id) that claims it: (a) through
+    # its frozen eligibility in a live period, or (b) only when nothing of Y is frozen for that
+    # date, through the live D1 window. A Branch timezone edit therefore never moves a date
+    # that has been captured.
     owned_rows = (await db.execute(
         text("""
-            SELECT t.assignmentid, d.workdate
-            FROM   unnest(CAST(:ids AS INTEGER[]), CAST(:drivers AS INTEGER[]))
-                       AS t(assignmentid, driverid)
+            SELECT x.driverassignmentid AS assignmentid, d.workdate
+            FROM   core.driverassignments x
             CROSS JOIN unnest(CAST(:days AS DATE[])) AS d(workdate)
-            WHERE  core.fn_DriverAssignmentForBusinessDate(:cid, t.driverid, d.workdate)
-                   = t.assignmentid
+            WHERE  x.companyid = :cid AND x.driverassignmentid = ANY(:ids)
+              AND  NOT EXISTS (
+                SELECT 1 FROM core.driverassignments y
+                WHERE  y.companyid = x.companyid AND y.driverid = x.driverid
+                  AND  y.driverassignmentid <> x.driverassignmentid
+                  AND  (y.effectivefromat > x.effectivefromat
+                        OR (y.effectivefromat = x.effectivefromat
+                            AND y.driverassignmentid > x.driverassignmentid))
+                  AND  (
+                    EXISTS (
+                      SELECT 1
+                      FROM   payroll.payrollperioddrivereligibility e
+                      JOIN   payroll.payrollperiods p ON p.payrollperiodid = e.payrollperiodid
+                      WHERE  e.driverassignmentid = y.driverassignmentid
+                        AND  p.status <> 'Cancelled'
+                        AND  e.iseligibleforperiod
+                        AND  e.eligibilityreasoncode IS DISTINCT FROM 'IncludedByExistingData'
+                        AND  d.workdate = ANY(e.eligibleworkdates))
+                    OR (
+                      NOT EXISTS (
+                        SELECT 1
+                        FROM   payroll.payrollperioddrivereligibility e
+                        JOIN   payroll.payrollperiods p ON p.payrollperiodid = e.payrollperiodid
+                        WHERE  e.driverassignmentid = y.driverassignmentid
+                          AND  p.status <> 'Cancelled'
+                          AND  p.startdate <= d.workdate AND d.workdate <= p.enddate)
+                      AND core.fn_DriverEffectiveRange(y.effectivefromat, y.effectivetoat)
+                          && core.fn_BranchWorkDateRange(y.companyid, y.branchid,
+                                                         d.workdate, d.workdate)))
+              )
         """),
-        {"cid": company_id, "ids": ids, "drivers": [assignment_drivers[i] for i in ids],
-         "days": sorted(scheduled)},
+        {"cid": company_id, "ids": ids, "days": sorted(scheduled)},
     )).mappings().all()
     owned: dict[int, set[date]] = {}
     for row in owned_rows:
