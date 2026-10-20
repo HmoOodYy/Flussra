@@ -206,6 +206,24 @@
 .removeRowBtn:hover:not(:disabled) { background: #fef2f2; color: #dc2626; }
 .removeRowBtn:disabled { opacity: 0.45; cursor: default; }
 
+.formHint {
+  font-size: 0.8rem;
+  color: #6b7280;
+  margin: 0;
+  width: 100%;
+}
+
+.noticeMsg {
+  font-size: 0.85rem;
+  color: #374151;
+  background: #f3f4f6;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 0.75rem;
+}
+
+.noticeMsg p { margin: 0; }
+
 .formError {
   font-size: 0.82rem;
   color: #dc2626;

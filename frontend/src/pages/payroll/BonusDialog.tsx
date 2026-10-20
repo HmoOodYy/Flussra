@@ -14,6 +14,7 @@ import type { BonusBatchItem, BonusSummary } from '../../types/payroll/bonus';
 import styles from './BonusDialog.module.css';
 import { useAuth } from '../../store/authStore';
 import { formatMoney } from '../../lib/money';
+import { amountPlaceholder, amountRoundingNote, normalizedAmountNotices } from '../../lib/amountEntry';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -75,6 +76,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
   const idempotencyKey = useRef<string | null>(null);
   const [addSaving, setAddSaving] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [savedNotices, setSavedNotices] = useState<string[]>([]);
 
   const [voidingId, setVoidingId] = useState<number | null>(null);
   const [confirmVoidId, setConfirmVoidId] = useState<number | null>(null);
@@ -122,11 +124,17 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
         amount: row.amount,
         reason: row.reason.trim(),
       }));
-      await createBonusBatch(periodId, {
+      const saved = await createBonusBatch(periodId, {
         idempotency_key: requestKey,
         expected_bonus_data_revision: summary.bonus_data_revision,
         items,
       });
+      // The server rounds each amount to the currency's decimals; show what was saved.
+      setSavedNotices(normalizedAmountNotices(
+        items.map((item) => item.amount),
+        saved.events.map((event) => event.amount),
+        fmtAmount,
+      ));
       setShowAddForm(false);
       setAddRows([newBonusDraftRow(nextRowId.current++)]);
       idempotencyKey.current = null;
@@ -171,6 +179,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
         canVoid: driver.capabilities.can_void,
       })),
   ) ?? [];
+  const roundingNote = amountRoundingNote(user?.currency_code, user?.currency_minor_unit_digits);
   const eligibleDrivers = summary?.drivers.filter((driver) => driver.capabilities.can_create) ?? [];
   const canCreate = eligibleDrivers.length > 0;
   const canVoidAny = activeRows.some((row) => row.canVoid);
@@ -179,6 +188,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
     idempotencyKey.current = null;
     setAddRows([newBonusDraftRow(nextRowId.current++)]);
     setAddError(null);
+    setSavedNotices([]);
     setShowAddForm(true);
   }
 
@@ -240,6 +250,12 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
                 Total: <strong>{fmtAmount(summary?.active_bonus_total)}</strong>
                 &nbsp;|&nbsp;{summary?.active_event_count ?? 0} entr{summary?.active_event_count === 1 ? 'y' : 'ies'}
               </div>
+
+              {savedNotices.length > 0 && (
+                <div className={styles.noticeMsg} role="status">
+                  {savedNotices.map((notice) => <p key={notice}>{notice}</p>)}
+                </div>
+              )}
 
               {activeRows.length === 0 ? (
                 <div className={styles.emptyMsg}>No active bonus events for this period.</div>
@@ -338,9 +354,9 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
                             <input
                               className={styles.formInput}
                               type="number"
-                              step="0.0001"
-                              min="0.0001"
-                              placeholder="0.0000"
+                              step="any"
+                              min="0"
+                              placeholder={amountPlaceholder(user?.currency_minor_unit_digits)}
                               value={row.amount}
                               onChange={(e) => updateAddRow(row.rowId, 'amount', e.target.value)}
                               required
@@ -373,6 +389,7 @@ export function BonusDialog({ periodId, periodName, onClose }: BonusDialogProps)
                       ))}
                     </div>
 
+                    {roundingNote && <p className={styles.formHint}>{roundingNote}</p>}
                     {addError && <p className={styles.formError}>{addError}</p>}
 
                     <div className={styles.addFormActions}>
