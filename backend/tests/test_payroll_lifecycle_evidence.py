@@ -15,6 +15,7 @@ import pytest
 
 from app.payroll import period_lifecycle, snapshot_hash
 from tests.calculation_snapshot_helpers import (
+    add_rule,
     allow_self_approval,
     bound_snapshot_id,
     capture,
@@ -395,3 +396,26 @@ async def test_workflow_capabilities_allow_submission_and_resubmission_of_a_calc
     await submit(p3c_client, tenant, period)
     await decide(p3c_client, tenant, await pending_review_item(tenant, period), "EditRequested")
     assert (await capability("can_resubmit_returned"))["allowed"] is True
+
+
+async def test_submit_succeeds_when_a_minimum_prorates_to_zero_in_a_four_digit_currency(
+    p3c_client, p3c_engine, p3b_dsn,
+):
+    clf_tenant = build_payroll_tenant(p3b_dsn, currency="CLF")
+    period, ppd, _ = await open_period(
+        p3c_client, p3c_engine, clf_tenant, hire_offset=6, rate="0.3333")
+    await enter(p3c_client, clf_tenant, period, 6, ppd=ppd, quantity="1")
+    await add_rule(p3c_client, clf_tenant, period, "MinimumPay", "0.0001")
+    allow_self_approval(clf_tenant)
+
+    await submit(p3c_client, clf_tenant, period)
+
+    (snapshot_id,) = snapshot_ids(clf_tenant, period)
+    assert rows(clf_tenant, """
+        SELECT proratedamount FROM payroll.payrollcalculationsnapshotminmaxrules
+        WHERE payrollcalculationsnapshotid = %s
+    """, snapshot_id) == [(D("0.0000"),)]
+    await decide(p3c_client, clf_tenant, await pending_review_item(clf_tenant, period))
+    await finalize(p3c_client, clf_tenant, period)
+    assert rows(clf_tenant, "SELECT sum(finalamount) FROM payroll.payrollfinallines "
+                            "WHERE payrollperiodid = %s", period["payroll_period_id"]) == [(D("0.3333"),)]

@@ -217,7 +217,7 @@ CREATE TABLE payroll.PayrollCalculationSnapshotMinMaxRules (
     CONSTRAINT ck_PayrollCalculationSnapshotMinMaxRules_EffectiveDates
         CHECK (EffectiveTo IS NULL OR EffectiveTo >= EffectiveFrom),
     CONSTRAINT ck_PayrollCalculationSnapshotMinMaxRules_ProratedAmount
-        CHECK (ProratedAmount IS NULL OR ProratedAmount > 0),
+        CHECK (ProratedAmount IS NULL OR ProratedAmount >= 0),
     CONSTRAINT ck_PayrollCalculationSnapshotMinMaxRules_CalendarFrequency
         CHECK (CalendarFrequency IN ('Week', 'Biweek', 'Month', 'Custom')),
     CONSTRAINT ck_PayrollCalculationSnapshotMinMaxRules_CalendarInterval

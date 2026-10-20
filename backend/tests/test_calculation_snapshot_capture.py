@@ -465,3 +465,30 @@ async def test_the_packet_exposes_the_rate_used_and_the_identity_the_snapshot_fr
     assert len(proration.scheduled_work_dates) == 7 and len(proration.counted_work_dates) == 4
     assert packet.scheduled_work_dates == proration.scheduled_work_dates
     assert definition["pay_definition_id"] == ordinary_lines[0].pay_definition_id
+
+
+async def test_a_minimum_that_prorates_to_zero_is_frozen_with_a_zero_prorated_amount(
+    p3c_client, p3c_engine, p3b_dsn,
+):
+    """CLF has four minor-unit digits: a 0.0001 Minimum over one eligible day of seven is
+    0.0000 at internal precision. It is a valid, non-blocking outcome and must freeze."""
+    tenant = build_payroll_tenant(p3b_dsn, currency="CLF")
+    period, ppd, _ = await open_period(
+        p3c_client, p3c_engine, tenant, hire_offset=6, rate="0.3333")
+    await enter(p3c_client, tenant, period, 6, ppd=ppd, quantity="1")
+    rule = await add_rule(p3c_client, tenant, period, "MinimumPay", "0.0001")
+
+    packet = await build_packet(p3c_engine, tenant, period)
+    assert packet.blockers == []
+    frozen = await capture(p3c_engine, tenant, period)
+
+    content = await _content(p3c_engine, frozen.snapshot_id)
+    evaluation = _driver_total(content, tenant.driver_a)["MinMax"]
+    assert (evaluation["Status"], evaluation["Numerator"], evaluation["Denominator"]) == (
+        "APPLIED", 1, 7)
+    (recorded,) = evaluation["Rules"]
+    assert recorded["DriverPayRuleID"] == rule["driver_pay_rule_id"]
+    assert recorded["Amount"] == D("0.0001") and recorded["ProratedAmount"] == D("0.0000")
+    assert _kind(_driver_total(content, tenant.driver_a), "MINIMUM_ADJUSTMENT") == []
+    async with p3c_engine.connect() as conn:
+        await verify_snapshot(conn, snapshot_id=frozen.snapshot_id)
