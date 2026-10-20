@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from tests.builders.final_evidence import insert_final_line, seed_snapshot_component
+from tests.calculation_snapshot_helpers import finalize, standard_scenario, submit_and_approve
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     p3c_application,
     p3c_database_engine,
@@ -187,8 +188,7 @@ async def test_final_lines_and_finalized_routes_enforce_the_access_boundary(
             assert response.status_code in (403, 404), (label, url, response.status_code)
             assert period["period_code"] not in response.text, (label, url)
 
-    # The finalized library needs the ledger permission, not the operational one, and
-    # fails closed (no live rebuild) while target evidence does not exist.
+    # The finalized library needs the ledger permission, not the operational one.
     no_ledger = make_user(tenant, ["payroll.view", "payroll.entry", "reports.view"])
     for url in finalized:
         assert (await p3c_client.get(url, headers=no_ledger)).status_code == 403, url
@@ -199,10 +199,13 @@ async def test_final_lines_and_finalized_routes_enforce_the_access_boundary(
         assert "payitem" not in response.text.lower() or response.status_code != 200
 
 
-async def test_finalized_audit_route_uses_audit_owner_and_stops_at_evidence_gate(
+async def test_finalized_audit_route_uses_the_audit_owner_and_its_own_permission(
     p3c_client, p3c_engine, tenant, monkeypatch,
 ):
-    period, _ = await _locked_period(p3c_client, p3c_engine, tenant)
+    scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
+    period = scenario.period
+    await submit_and_approve(p3c_client, tenant, period)
+    await finalize(p3c_client, tenant, period)
     from app.payroll import finalized_audit
 
     owner_calls = []
@@ -212,22 +215,16 @@ async def test_finalized_audit_route_uses_audit_owner_and_stops_at_evidence_gate
         owner_calls.append(kwargs["period_id"])
         return await original(**kwargs)
 
-    async def unexpected_audit_read(*args, **kwargs):
-        raise AssertionError("audit reads must remain behind the target evidence gate")
-
     monkeypatch.setattr(finalized_audit, "build_finalized_audit", recording_owner)
-    monkeypatch.setattr(finalized_audit, "check_permission", unexpected_audit_read)
-    monkeypatch.setattr(finalized_audit, "_originating_snapshot", unexpected_audit_read)
-    monkeypatch.setattr(finalized_audit, "_audit_domain_availability", unexpected_audit_read)
+    url = f"/payroll/finalized/{period['payroll_period_id']}/audit"
 
     ledger_viewer = make_user(tenant, ["ledger.view"])
-    response = await p3c_client.get(
-        f"/payroll/finalized/{period['payroll_period_id']}/audit",
-        headers=ledger_viewer,
-    )
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"]["code"] == "TARGET_PAYROLL_EVIDENCE_NOT_READY"
-    assert owner_calls == [period["payroll_period_id"]]
+    assert (await p3c_client.get(url, headers=ledger_viewer)).status_code == 403
+    auditor = make_user(tenant, ["ledger.view", "ledger.audit.view"])
+    response = await p3c_client.get(url, headers=auditor)
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"]["authority_kind"] == "IMMUTABLE_PERIOD_AUDIT_EVIDENCE"
+    assert owner_calls == [period["payroll_period_id"]] * 2
 
 
 async def test_finalized_period_discovery_is_minimal_and_scoped(

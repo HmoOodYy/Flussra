@@ -215,3 +215,84 @@ async def submit_and_approve(client, tenant, period) -> int:
     item_id = await pending_review_item(tenant, period)
     await decide(client, tenant, item_id)
     return item_id
+
+
+# ---------------------------------------------------------------------------
+# A standard evidenced period and small lifecycle assertions
+# ---------------------------------------------------------------------------
+
+async def standard_scenario(client, engine, tenant) -> SimpleNamespace:
+    """An Open period of a Driver hired on day 3 with two ordinary days, a Minimum rule that
+    applies for 4/7 of the period and a Bonus: ordinary 0.67, top-up 39.33, Bonus 2.00."""
+    period, ppd, definition = await open_period(
+        client, engine, tenant, hire_offset=3, rate="0.3333",
+        definition_code="HAUL", definition_name="Haul")
+    for offset in (3, 4):
+        await enter(client, tenant, period, offset, ppd=ppd, quantity="1")
+    rule = await add_rule(client, tenant, period, "MinimumPay", "70")
+    await add_bonus(client, tenant, period, "2.00")
+    return SimpleNamespace(period=period, ppd=ppd, definition=definition, rule=rule,
+                           period_id=period["payroll_period_id"])
+
+
+def period_status(tenant, period) -> str:
+    return rows(tenant, "SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = %s",
+                period["payroll_period_id"])[0][0]
+
+
+def period_evidence_counts(tenant, period) -> dict[str, int]:
+    """Everything a refused or rolled-back lifecycle action must leave untouched."""
+    pid = period["payroll_period_id"]
+    scalar = lambda sql, *p: rows(tenant, sql, *p)[0][0]  # noqa: E731
+    return {
+        "snapshots": scalar("SELECT count(*) FROM payroll.payrollcalculationsnapshots "
+                            "WHERE payrollperiodid = %s", pid),
+        "final_lines": scalar("SELECT count(*) FROM payroll.payrollfinallines "
+                              "WHERE payrollperiodid = %s", pid),
+        "review_items": scalar("SELECT count(*) FROM review.managerreviewitems "
+                               "WHERE entityname = 'PayrollPeriods' AND entityid = %s", str(pid)),
+        "workflow_evidence": scalar("SELECT count(*) FROM payroll.payrollperiodworkflowactionevidence "
+                                    "WHERE payrollperiodid = %s", pid),
+    }
+
+
+def snapshot_ids(tenant, period) -> list[int]:
+    return [r[0] for r in rows(tenant, """
+        SELECT payrollcalculationsnapshotid FROM payroll.payrollcalculationsnapshots
+        WHERE payrollperiodid = %s ORDER BY revisionnumber
+    """, period["payroll_period_id"])]
+
+
+def bound_snapshot_id(tenant, item_id: int) -> int:
+    return rows(tenant, "SELECT payrollcalculationsnapshotid FROM review.managerreviewitems "
+                        "WHERE reviewitemid = %s", item_id)[0][0]
+
+
+# ---------------------------------------------------------------------------
+# Live-source mutation: nothing a snapshot froze may follow it
+# ---------------------------------------------------------------------------
+
+async def mutate_live_sources(engine, tenant, period) -> None:
+    """Change every live source the frozen snapshot was built from: the ordinary rate and
+    schedule values, the definition label, the Min/Max rule, the Bonus, the Driver's name and
+    the day-grid quantities. Triggers are suppressed because the point is that frozen money
+    does not read any of it."""
+    from sqlalchemy import text
+
+    from tests.db_state import replica_replication_role
+
+    statements = (
+        "UPDATE payroll.driverrateschedulevalues SET amount = amount * 7 WHERE amount IS NOT NULL",
+        "UPDATE payroll.paydefinitions SET definitionname = 'Renamed after submission' "
+        "WHERE companyid = :company",
+        "UPDATE payroll.driverpayrules SET amount = 1, status = 'Voided' WHERE companyid = :company",
+        "UPDATE payroll.payrollbonusevents SET amount = 999 WHERE companyid = :company",
+        "UPDATE core.employees SET fullname = 'Renamed Person' WHERE companyid = :company",
+        "UPDATE payroll.payrolldraftlines SET quantity = quantity * 10 "
+        "WHERE payrollperiodid = :period",
+    )
+    async with engine.begin() as conn:
+        async with replica_replication_role(conn):
+            for statement in statements:
+                await conn.execute(text(statement), {
+                    "company": tenant.company_id, "period": period["payroll_period_id"]})
