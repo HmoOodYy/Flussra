@@ -77,9 +77,55 @@ class ReviewItemDetail(ReviewItemSummary):
 # Immutable submitted payroll packet (CP-4E)
 # ---------------------------------------------------------------------------
 
+class ReviewPayrollSnapshotComponent(BaseModel):
+    """One official amount of the frozen snapshot: rounded once from its pre-rounding sum."""
+    component_kind: str
+    label: str | None = None
+    payroll_period_definition_id: int | None = None
+    pay_definition_id: int | None = None
+    rate_definition_id: int | None = None
+    calculation_method: str | None = None
+    calculation_method_version: int | None = None
+    status_rate_column_id: int | None = None
+    driver_pay_rule_id: int | None = None
+    pre_rounding_amount: Decimal
+    official_amount: Decimal
+    source_count: int
+
+
+class ReviewPayrollSnapshotMinMaxRule(BaseModel):
+    driver_pay_rule_id: int
+    rule_type: str
+    amount: Decimal
+    rule_status: str
+    effective_from: date
+    effective_to: date | None = None
+    prorated_amount: Decimal | None = None
+    calendar_frequency: str
+    calendar_anchor_start_date: date
+    calendar_custom_interval_days: int | None = None
+
+
+class ReviewPayrollSnapshotMinMax(BaseModel):
+    """The frozen Min/Max evaluation: enough to explain the adjustments on its own."""
+    status: str
+    selection_date: date
+    proration_version: str
+    numerator: int | None = None
+    denominator: int | None = None
+    base_amount: Decimal
+    base_ordinary_amount: Decimal
+    base_status_amount: Decimal
+    excluded_bonus_amount: Decimal
+    counted_work_dates: list[date] = []
+    rules: list[ReviewPayrollSnapshotMinMaxRule] = []
+
+
 class ReviewPayrollSnapshotDriverTotal(BaseModel):
     driver_assignment_id: int
     driver_id: int
+    employee_id: int
+    branch_id: int
     driver_number_snapshot: str | None = None
     driver_name_snapshot: str | None = None
     daily_pay: Decimal
@@ -88,15 +134,20 @@ class ReviewPayrollSnapshotDriverTotal(BaseModel):
     maximum_adjustment: Decimal
     bonus_total: Decimal
     expected_pay: Decimal
+    components: list[ReviewPayrollSnapshotComponent] = []
+    min_max: ReviewPayrollSnapshotMinMax | None = None
 
 
 class ReviewPayrollSnapshotLine(BaseModel):
     driver_assignment_id: int
     source_type: str
+    source_id: str
+    # ORDINARY / STATUS / BONUS: the kind of the component the line contributes to.
     line_type: str
     line_scope: str | None = None
     work_date: date | None = None
-    pay_item_id: int | None = None
+    payroll_period_definition_id: int | None = None
+    driver_rate_schedule_id: int | None = None
     quantity: Decimal | None = None
     resolved_rate_amount: Decimal | None = None
     calculated_amount: Decimal
@@ -107,7 +158,16 @@ class ReviewPayrollSnapshot(BaseModel):
     currency_minor_unit_digits: int
     review_item_id: int
     payroll_period_id: int
+    snapshot_id: int
     revision_number: int
+    snapshot_hash: str
+    calculation_version: str
+    payable_rounding_version: str
+    min_max_proration_version: str
+    period_start_date: date
+    period_end_date: date
+    scheduled_work_dates: list[date] = []
+    warnings: list[str] = []
     captured_at_utc: datetime
     total_expected_pay: Decimal
     driver_totals: list[ReviewPayrollSnapshotDriverTotal]

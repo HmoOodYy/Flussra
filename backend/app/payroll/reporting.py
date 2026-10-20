@@ -92,7 +92,55 @@ async def _resolve_review_snapshot_authority(
             "SNAPSHOT_REQUIRED_FOR_REPORTING",
             f"the {review_status} PeriodApproval review item has no immutable calculation snapshot.",
         )
+    return await _snapshot_authority(
+        db=db, snapshot_id=int(snapshot_id), period_id=period_id, company_id=company_id,
+        branch_id=branch_id, period_status=period_status, authority_kind=authority_kind,
+        review_item_id=int(review["reviewitemid"]),
+    )
 
+
+async def _resolve_final_lines_snapshot_authority(
+    *,
+    db: AsyncConnection,
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    period_status: str,
+) -> ReportFinancialAuthority:
+    """The snapshot a finalized period's FinalLines name: exactly one, never a "latest"."""
+    rows = (await db.execute(text("""
+        SELECT DISTINCT payrollcalculationsnapshotid
+        FROM payroll.payrollfinallines
+        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
+    """), {"period_id": period_id, "company_id": company_id, "branch_id": branch_id})).all()
+    if not rows:
+        raise _authority_error(
+            "REPORT_FINANCIAL_AUTHORITY_UNAVAILABLE",
+            "the finalized period has no FinalLines.",
+        )
+    if len(rows) != 1:
+        raise _authority_error(
+            "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
+            "the FinalLines of the finalized period name more than one calculation snapshot.",
+        )
+    return await _snapshot_authority(
+        db=db, snapshot_id=int(rows[0][0]), period_id=period_id, company_id=company_id,
+        branch_id=branch_id, period_status=period_status,
+        authority_kind=ReportAuthorityKind.FINAL_LINES, review_item_id=None,
+    )
+
+
+async def _snapshot_authority(
+    *,
+    db: AsyncConnection,
+    snapshot_id: int,
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    period_status: str,
+    authority_kind: ReportAuthorityKind,
+    review_item_id: int | None,
+) -> ReportFinancialAuthority:
     snapshot = (await db.execute(text("""
         SELECT payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
                revisionnumber, calculationversion, snapshothash, createdatutc, currencycode, currencyminorunitdigits
@@ -102,7 +150,7 @@ async def _resolve_review_snapshot_authority(
     if snapshot is None:
         raise _authority_error(
             "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
-            "the PeriodApproval review item references an unavailable calculation snapshot.",
+            "the financial authority references an unavailable calculation snapshot.",
         )
     try:
         require_supported_calculation_version(snapshot["calculationversion"])
@@ -115,7 +163,7 @@ async def _resolve_review_snapshot_authority(
     ):
         raise _authority_error(
             "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
-            "the PeriodApproval review item snapshot does not belong to the resolved period scope.",
+            "the calculation snapshot does not belong to the resolved period scope.",
         )
 
     currency = frozen_currency(snapshot['currencycode'], snapshot['currencyminorunitdigits'])
@@ -125,7 +173,7 @@ async def _resolve_review_snapshot_authority(
         branch_id=branch_id,
         period_status=period_status,
         authority_kind=authority_kind,
-        review_item_id=int(review["reviewitemid"]),
+        review_item_id=review_item_id,
         snapshot_id=int(snapshot["payrollcalculationsnapshotid"]),
         revision_number=int(snapshot["revisionnumber"]),
         snapshot_hash=str(snapshot["snapshothash"]),
@@ -179,7 +227,10 @@ async def resolve_report_financial_authority(
             db=db, review_status="Approved", authority_kind=ReportAuthorityKind.APPROVED_SNAPSHOT, **base,
         )
     if status in {"Locked", "Archived"}:
-        return ReportFinancialAuthority(**base, authority_kind=ReportAuthorityKind.FINAL_LINES)
+        return await _resolve_final_lines_snapshot_authority(
+            db=db, period_id=period_id, company_id=company_id, branch_id=branch_id,
+            period_status=status,
+        )
     if status == "Cancelled":
         return ReportFinancialAuthority(**base, authority_kind=ReportAuthorityKind.UNAVAILABLE)
     raise _authority_error(

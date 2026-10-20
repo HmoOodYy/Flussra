@@ -16,7 +16,9 @@ from .bonus import BonusEventPreviewEntry
 # ---------------------------------------------------------------------------
 
 class FinalizationPreviewLine(BaseModel):
-    """One draft line as it would appear in FinalLines after finalization."""
+    """One FinalLine as finalization will write it: one line per official component of the
+    approved snapshot. ``component_kind`` (with the component identity) is the classification;
+    ``line_type`` is the ledger display vocabulary only."""
     __module__ = "app.payroll.schemas"
     draft_line_id: int | None
     source_key: str
@@ -35,6 +37,11 @@ class FinalizationPreviewLine(BaseModel):
     driver_rate_id: int | None = None
     rate_type_id: int | None = None
     resolved_rate_amount: Decimal | None = None
+    component_kind: str | None = None
+    payroll_period_definition_id: int | None = None
+    pay_definition_id: int | None = None
+    label: str | None = None
+    pre_rounding_amount: Decimal | None = None
 
 
 
@@ -100,10 +107,10 @@ class FinalizationPreviewResponse(BaseModel):
     lines: list[FinalizationPreviewLine]
     total_final_gross: Decimal
     # Line count semantics (explicit to avoid frontend guessing):
-    draft_line_count: int        # non-Void draft lines that will be inserted
-    sys_adjustment_count: int    # SYS_MIN_TOPUP / SYS_MAX_CAP rows to be inserted
-    bonus_event_count: int = 0   # active PayrollBonusEvents rows to be inserted (CP-3A)
-    final_line_count_estimate: int  # draft_line_count + sys_adjustment_count + bonus_event_count
+    draft_line_count: int        # ordinary source lines behind the ordinary components
+    sys_adjustment_count: int    # Minimum / Maximum adjustment components to be written
+    bonus_event_count: int = 0   # frozen Bonus events behind the Bonus components
+    final_line_count_estimate: int  # FinalLines to be written: one per official component
     driver_count: int
     # CP-3A: canonical bonus events (separate from DraftLine-based lines list)
     bonus_events: list["BonusEventPreviewEntry"] = []

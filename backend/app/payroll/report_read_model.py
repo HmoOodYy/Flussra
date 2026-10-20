@@ -1,8 +1,10 @@
 """CP-5C read-only calculation-report model.
 
-This module owns the live report read flow and delegates shared report projections
-to report_components. It delegates lifecycle financial authority to RP-1 and never
-recalculates financial values or mutates payroll state.
+This module owns the report read flow and delegates shared report projections to
+report_components. It delegates lifecycle financial authority to ``reporting`` and never
+recalculates financial values or mutates payroll state. Open and Returned periods read the live
+packet; InReview, Approved, Locked and Archived periods read only the frozen snapshot their
+authority names (verified against its hash), with its frozen labels and money.
 """
 from __future__ import annotations
 
@@ -19,10 +21,14 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency, get_company_currency
-from app.payroll import bonus, period_calculation
-from app.payroll.evidence_gate import evidence_not_ready
+from app.payroll import bonus, period_calculation, status_evidence
+from app.payroll.final_line_projection import verify_final_lines
 from app.payroll.report_components import (
     aggregate_definition_amounts as _definition_amounts,
+)
+from app.payroll.report_components import (
+    frozen_financial_packet,
+    frozen_operational_rows,
 )
 from app.payroll.report_components import (
     load_financial_definition_columns as _definition_columns,
@@ -38,6 +44,7 @@ from app.payroll.report_components import (
 )
 from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
 from app.payroll.schemas import PeriodSummary
+from app.payroll.snapshot_verification import SnapshotEvidenceError, verify_snapshot
 
 
 async def _final_lines_currency(company_id: int, period_id: int, db: AsyncConnection):
@@ -125,7 +132,27 @@ async def _live_statuses(period: dict[str, Any], db: AsyncConnection) -> list[di
              "label": r["keyname"], "is_off": bool(r["isoffreason"])} for r in rows]
 
 
-async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], list[str], list[str], bool, int | None, str | None]:
+_FROZEN_AUTHORITIES = (
+    ReportAuthorityKind.SUBMITTED_SNAPSHOT,
+    ReportAuthorityKind.APPROVED_SNAPSHOT,
+    ReportAuthorityKind.FINAL_LINES,
+)
+
+
+async def _frozen_content(authority, period: dict[str, Any], db: AsyncConnection) -> dict[str, Any]:
+    """The verified snapshot a frozen authority names; its FinalLines too once finalized."""
+    try:
+        content = await verify_snapshot(
+            db, snapshot_id=int(authority.snapshot_id), company_id=int(period["companyid"]),
+            branch_id=int(period["branchid"]), period_id=int(period["payrollperiodid"]))
+        if authority.authority_kind is ReportAuthorityKind.FINAL_LINES:
+            await verify_final_lines(db, content)
+    except SnapshotEvidenceError as exc:
+        raise exc.http() from exc
+    return content
+
+
+async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnection, frozen: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], list[str], list[str], bool, int | None, str | None]:
     """Return authoritative financial lines and driver totals; never calculate them here."""
     kind = authority.authority_kind
     if kind is ReportAuthorityKind.SOURCE_ONLY:
@@ -180,9 +207,11 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
                       for c in d.components if c.kind == "ORDINARY"}}
                   for d in packet.drivers}
         return lines, totals, packet.blockers, packet.warnings, True, None, None
-    # Submitted, approved and final authorities freeze calculation evidence, which target
-    # payroll does not have yet. They are refused rather than rebuilt from mutable state.
-    raise evidence_not_ready()
+    # Submitted, approved and final authorities read only their frozen snapshot.
+    assert frozen is not None
+    lines, totals = frozen_financial_packet(frozen)
+    return (lines, totals, [], list(frozen["Warnings"]), True,
+            int(frozen["PayrollCalculationSnapshotID"]), str(frozen["SnapshotHash"]))
 
 
 def _official_definition_amounts(
@@ -236,7 +265,11 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
     columns = await _columns(period, db)
     definition_columns = await _definition_columns(period, db)
     definition_column_ids = [c["payroll_period_definition_id"] for c in definition_columns]
-    lines, financial_totals, blockers, warnings, financials_available, snapshot_id, snapshot_hash = await _financial_packet(authority, period, db)
+    frozen = (
+        await _frozen_content(authority, period, db)
+        if authority.authority_kind in _FROZEN_AUTHORITIES else None
+    )
+    lines, financial_totals, blockers, warnings, financials_available, snapshot_id, snapshot_hash = await _financial_packet(authority, period, db, frozen)
     per_driver_definitions: dict[int, dict[int, Decimal]] = {}
     definition_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in definition_column_ids}
     # Period Work is operational (quantities/Status), not financial, and stays
@@ -247,7 +280,9 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         _definition_amounts(lines, definition_column_ids)
         per_driver_definitions, definition_total_map = _official_definition_amounts(
             financial_totals, definition_column_ids)
-    operational_drivers, work_rows = await _operational_rows(period, db)
+    operational_drivers, work_rows = (
+        frozen_operational_rows(frozen) if frozen is not None
+        else await _operational_rows(period, db))
     drivers = {**operational_drivers}
     for driver_assignment_id, total in financial_totals.items():
         drivers.setdefault(driver_assignment_id, {"driver_assignment_id": driver_assignment_id, "driver_id": total.get("driver_id"), "driver_number": total.get("driver_number"), "driver_name": total.get("driver_name")})
@@ -260,6 +295,12 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
                     "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]}
                    for r in await bonus._load_active_bonus_events(int(period["payrollperiodid"]), company_id, db)]
         evidence_available = True
+    elif frozen is not None:
+        evidence_available, evidence_version, evidence_hash, statuses, bonuses = (
+            await status_evidence.read_report_evidence(
+                db, snapshot_id=int(frozen["PayrollCalculationSnapshotID"]),
+                company_id=company_id, branch_id=int(period["branchid"]),
+                period_id=int(period["payrollperiodid"])))
     summaries = _status_summaries(statuses)
     by_driver_work: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in work_rows:
@@ -303,7 +344,9 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         {"payroll_period_definition_id": cid, "amount": definition_total_map.get(cid, Decimal("0"))}
         for cid in definition_column_ids
     ]
-    currency = await get_company_currency(company_id, db)
+    currency = (
+        frozen_currency(frozen["CurrencyCode"], frozen["CurrencyMinorUnitDigits"])
+        if frozen is not None else await get_company_currency(company_id, db))
     metadata = {"currency_code": None if currency is None else currency.code,
                 "currency_minor_unit_digits": None if currency is None else currency.minor_unit_digits,
                 "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"], "period_name": period["periodname"],

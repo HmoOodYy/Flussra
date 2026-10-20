@@ -11,10 +11,8 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency
-from app.payroll.snapshot_hash import (
-    UnsupportedCalculationVersionError,
-    require_supported_calculation_version,
-)
+from app.payroll.final_line_projection import verify_final_lines
+from app.payroll.snapshot_verification import SnapshotEvidenceError, verify_snapshot
 
 FINALIZED_STATUSES = {"Locked", "Archived"}
 
@@ -91,45 +89,42 @@ async def get_finalized_period_context(
 async def resolve_originating_snapshot(
     period: dict[str, Any], db: AsyncConnection,
 ) -> tuple[dict[str, Any] | None, dict[str, str | None]]:
-    """Resolve FinalLines provenance exactly; never select a latest snapshot."""
+    """The one snapshot a finalized period's FinalLines name, verified; never a "latest".
+
+    The snapshot is selected by ``PayrollFinalLines.PayrollCalculationSnapshotID`` (exactly one
+    snapshot per finalized period), then verified: calculation version, the hash recomputed from
+    its persisted rows, the evidence arithmetic, and the FinalLines being exactly its component
+    projection. Any failure raises its stable code. The returned mapping carries the header
+    fields readers use and the verified ``content``.
+    """
     rows = (await db.execute(text("""
-        SELECT DISTINCT
-               sourcesnapshot ->> 'payroll_calculation_snapshot_id' AS snapshot_id,
-               sourcesnapshot ->> 'revision_number' AS revision_number,
-               sourcesnapshot ->> 'snapshot_hash' AS snapshot_hash
+        SELECT DISTINCT payrollcalculationsnapshotid
         FROM payroll.payrollfinallines
         WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
     """), {
         "period_id": period["payrollperiodid"], "company_id": period["companyid"],
         "branch_id": period["branchid"],
-    })).mappings().all()
+    })).all()
     if not rows:
         return None, availability("UNAVAILABLE", "FINAL_LINES_EMPTY")
-    if len(rows) != 1 or any(value is None for value in rows[0].values()):
-        return None, availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    source = rows[0]
-    try:
-        snapshot_id = int(source["snapshot_id"])
-        revision_number = int(source["revision_number"])
-    except (TypeError, ValueError):
-        return None, availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    snapshot = (await db.execute(text("""
-        SELECT payrollcalculationsnapshotid, revisionnumber, calculationversion, snapshothash, sourceconfighash,
-               currencycode, currencyminorunitdigits, reportevidenceversion, reportevidencehash
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
-    """), {
-        "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
-        "company_id": period["companyid"], "branch_id": period["branchid"],
-    })).mappings().first()
-    if snapshot is None or (
-        int(snapshot["revisionnumber"]) != revision_number
-        or str(snapshot["snapshothash"]) != str(source["snapshot_hash"])
-    ):
+    if len(rows) != 1:
         return None, availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
     try:
-        require_supported_calculation_version(snapshot["calculationversion"])
-    except UnsupportedCalculationVersionError as exc:
-        raise finalized_error("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
-    return dict(snapshot), availability("AVAILABLE")
+        content = await verify_snapshot(
+            db, snapshot_id=int(rows[0][0]), company_id=int(period["companyid"]),
+            branch_id=int(period["branchid"]), period_id=int(period["payrollperiodid"]))
+        await verify_final_lines(db, content)
+    except SnapshotEvidenceError as exc:
+        raise finalized_error(exc.code, exc.message) from exc
+    return {
+        "payrollcalculationsnapshotid": content["PayrollCalculationSnapshotID"],
+        "revisionnumber": content["RevisionNumber"],
+        "calculationversion": content["CalculationVersion"],
+        "snapshothash": content["SnapshotHash"],
+        "sourceconfighash": content["SourceConfigHash"],
+        "currencycode": content["CurrencyCode"],
+        "currencyminorunitdigits": content["CurrencyMinorUnitDigits"],
+        "reportevidenceversion": content["ReportEvidenceVersion"],
+        "reportevidencehash": content["ReportEvidenceHash"],
+        "content": content,
+    }, availability("AVAILABLE")

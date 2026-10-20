@@ -24,7 +24,10 @@ from .reporting import (
 # ---------------------------------------------------------------------------
 
 class FinalLineSummary(BaseModel):
-    """One locked payroll line as written to PayrollFinalLines."""
+    """One locked payroll line as written to PayrollFinalLines: the projection of one official
+    component of the approved calculation snapshot. ``component_kind`` (with the component
+    identity) is the classification; ``line_type`` is the ledger display vocabulary only.
+    Per-day detail stays readable from the immutable snapshot lines."""
     __module__ = "app.payroll.schemas"
     final_line_id: int
     currency_code: str
@@ -33,32 +36,25 @@ class FinalLineSummary(BaseModel):
     branch_id: int
     driver_assignment_id: int
     driver_id: int
+    employee_id: int
     driver_number: str | None = None
     driver_name: str
-    draft_line_id: int | None = None
-    work_date: date | None = None
     line_type: str
-    # LineScope is financial-component evidence. 'Daily': day-bound DraftLine and
-    # Status-derived components. 'Period': canonical period-level calculated
-    # outputs (BonusEvent and system min/max adjustment components).
-    line_scope: str = "Daily"
-    quantity: Decimal
-    rate_amount: Decimal | None = None
+    line_scope: str = "Period"
+    component_kind: str
+    component_label: str | None = None
+    payroll_calculation_snapshot_id: int
+    payroll_calculation_snapshot_component_id: int
+    payroll_period_definition_id: int | None = None
+    pay_definition_id: int | None = None
     final_amount: Decimal
     source_type: str
     approved_by_user_id: int | None = None
     approved_at_utc: datetime
     locked_at_utc: datetime | None = None
     notes: str | None = None
-    # Phase 3B: source snapshot — explains how FinalAmount was produced.
-    # NULL for pre-snapshot rows (finalized before migration 0034).
-    pay_item_id: int | None = None
-    rate_type_id: int | None = None
-    driver_rate_id: int | None = None
-    resolved_rate_amount: Decimal | None = None
-    rate_behavior: str | None = None
-    # Phase 9: rich JSONB audit record of rate/pay-item metadata at finalization time.
-    # NULL for rows finalized before migration 0039.
+    # The frozen provenance of the line: snapshot id, revision, hash, component identity and
+    # contributing source ids.
     source_snapshot: dict | None = None
 
 
@@ -203,6 +199,12 @@ class FinalizedOffDriversResponse(BaseModel):
 
 
 class FinalizedUsedRateDefinition(BaseModel):
+    """A rate the finalized snapshot used, or a Min/Max rule it evaluated, as frozen.
+
+    ``evidence_kind`` is DriverRateSchedule (a target ordinary rate), StatusDriverRate (the
+    legacy Status rate) or DriverPayRule (a Min/Max rule of the frozen evaluation). For a rule
+    ``used_rate_definition_id`` is the id of its evidence row.
+    """
     __module__ = "app.payroll.schemas"
     used_rate_definition_id: int
     driver_assignment_id: int
@@ -211,26 +213,28 @@ class FinalizedUsedRateDefinition(BaseModel):
     driver_number: str | None = None
     evidence_kind: str
     source_type: str
-    pay_item_id: int | None = None
-    pay_item_code: str | None = None
-    pay_item_label: str | None = None
+    driver_rate_schedule_id: int | None = None
+    rate_definition_id: int | None = None
+    pay_definition_id: int | None = None
+    rate_component_definition_id: int | None = None
+    pay_definition_code: str | None = None
+    pay_definition_label: str | None = None
     rate_type_id: int | None = None
     rate_type_code: str | None = None
     rate_type_name: str | None = None
     unit_name: str | None = None
     driver_rate_id: int | None = None
     driver_pay_rule_id: int | None = None
-    rate_behavior: str | None = None
     rate_amount: Decimal | None = None
     effective_from: date | None = None
     effective_to: date | None = None
     rate_status: str | None = None
-    block_size: Decimal | None = None
-    rounding_rule: str | None = None
     rule_type: str | None = None
     rule_amount: Decimal | None = None
     rule_status: str | None = None
-    definition_fingerprint: str
+    rule_prorated_amount: Decimal | None = None
+    min_max_status: str | None = None
+    definition_fingerprint: str | None = None
     snapshot_line_ids: list[int] = []
     line_use_count: int
 

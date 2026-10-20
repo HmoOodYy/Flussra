@@ -21,31 +21,31 @@ _FINAL_SELECT = """
         fl.branchid,
         fl.driverassignmentid,
         fl.driverid,
+        fl.employeeid,
         dr.drivernumber,
         e.fullname         AS drivername,
-        fl.draftlineid,
-        fl.workdate,
         fl.linetype,
         fl.linescope,
-        fl.quantity,
-        fl.rateamount,
+        fl.componentkind,
+        COALESCE(c.definitionnamesnapshot, c.statusratecolumnnamesnapshot) AS componentlabel,
+        fl.payrollcalculationsnapshotid,
+        fl.payrollcalculationsnapshotcomponentid,
+        fl.payrollperioddefinitionid,
+        fl.paydefinitionid,
         fl.finalamount,
         fl.sourcetype,
         fl.approvedbyuserid,
         fl.approvedatutc,
         fl.lockedatutc,
         fl.notes,
-        fl.payitemid,
-        fl.ratetypeid,
-        fl.driverrateid,
-        fl.resolvedrateamount,
-        fl.ratebehavior,
         fl.sourcesnapshot,
         fl.currencycode, fl.currencyminorunitdigits
     FROM   payroll.payrollfinallines fl
     JOIN   core.driverassignments    a  ON a.driverassignmentid = fl.driverassignmentid
     JOIN   core.drivers              dr ON dr.driverid  = fl.driverid
     JOIN   core.employees            e  ON e.employeeid = a.employeeid
+    JOIN   payroll.payrollcalculationsnapshotcomponents c
+           ON c.payrollcalculationsnapshotcomponentid = fl.payrollcalculationsnapshotcomponentid
 """
 
 
@@ -103,7 +103,7 @@ async def get_final_lines(
         text(
             f"{_FINAL_SELECT} "
             f"WHERE {where} "
-            f"ORDER BY fl.workdate, fl.driverassignmentid, fl.linetype"
+            f"ORDER BY fl.driverassignmentid, fl.finallineid"
         ),
         params,
     )
@@ -116,25 +116,23 @@ async def get_final_lines(
             branch_id=r["branchid"],
             driver_assignment_id=r["driverassignmentid"],
             driver_id=r["driverid"],
+            employee_id=r["employeeid"],
             driver_number=r["drivernumber"],
             driver_name=r["drivername"],
-            draft_line_id=r["draftlineid"],
-            work_date=r["workdate"],
             line_type=r["linetype"],
             line_scope=r["linescope"],
-            quantity=r["quantity"],
-            rate_amount=r["rateamount"],
+            component_kind=r["componentkind"],
+            component_label=r["componentlabel"],
+            payroll_calculation_snapshot_id=r["payrollcalculationsnapshotid"],
+            payroll_calculation_snapshot_component_id=r["payrollcalculationsnapshotcomponentid"],
+            payroll_period_definition_id=r["payrollperioddefinitionid"],
+            pay_definition_id=r["paydefinitionid"],
             final_amount=r["finalamount"],
             source_type=r["sourcetype"],
             approved_by_user_id=r["approvedbyuserid"],
             approved_at_utc=r["approvedatutc"],
             locked_at_utc=r["lockedatutc"],
             notes=r["notes"],
-            pay_item_id=r["payitemid"],
-            rate_type_id=r["ratetypeid"],
-            driver_rate_id=r["driverrateid"],
-            resolved_rate_amount=r["resolvedrateamount"],
-            rate_behavior=r["ratebehavior"],
             source_snapshot=r["sourcesnapshot"],
         )
         for r in result.mappings().all()

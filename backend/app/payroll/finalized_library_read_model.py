@@ -1,6 +1,9 @@
-"""P6A immutable finalized-payroll overview and calculation-report read model.
+"""Immutable finalized-payroll overview and calculation-report read model.
 
-P6D audit chronology is owned by finalized_audit.
+Every read here uses only frozen evidence: the one snapshot the FinalLines name, verified
+(version, persisted-row hash, FinalLines projection), with its frozen labels, money and
+evidence. Nothing is rebuilt from live rates, definitions, Status configuration or Bonus rows.
+Audit chronology is owned by finalized_audit.
 """
 from __future__ import annotations
 
@@ -20,7 +23,6 @@ from app.company_currency import frozen_currency
 from app.db.sql import build_in_clause
 from app.payroll import status_evidence
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
-from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.finalized_context import (
     FINALIZED_STATUSES as _FINALIZED_STATUSES,
 )
@@ -38,6 +40,8 @@ from app.payroll.finalized_context import (
 )
 from app.payroll.report_components import (
     aggregate_definition_amounts,
+    frozen_financial_packet,
+    frozen_operational_rows,
     load_financial_definition_columns,
     load_report_columns,
     summarize_status_entries,
@@ -229,144 +233,23 @@ async def _columns(period: dict[str, Any], db: AsyncConnection) -> tuple[list[di
     return columns, _availability("AVAILABLE")
 
 
-def classify_final_line_component(row: Any) -> str:
-    """Map one immutable FinalLine to its canonical financial component.
-
-    Every monetary FinalLine must belong to an explicit canonical owner; an
-    unrecognized source fails closed instead of falling into a catch-all.
-    """
-    if row["linetype"] == "SYS_MIN_TOPUP":
-        return "minimum_adjustment"
-    if row["linetype"] == "SYS_MAX_CAP":
-        return "maximum_adjustment"
-    if row["sourcetype"] == "BonusEvent":
-        return "bonus_total"
-    if row["sourcetype"] == "StatusEntryState":
-        return "status_pay"
-    if row["sourcetype"] == "DraftLine" and row["linescope"] == "Daily":
-        return "daily_pay"
-    raise _unavailable(
-        "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
-        "a FinalLine does not belong to a canonical payroll component "
-        f"(sourcetype={row['sourcetype']!r}, linetype={row['linetype']!r}, "
-        f"linescope={row['linescope']!r}).",
-    )
+def _frozen_report_totals(
+    snapshot: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
+    """Financial lines and driver totals from the verified snapshot content (FinalLines equal
+    its component projection, so these official amounts are the ledger's)."""
+    if snapshot is None:
+        return [], {}
+    return frozen_financial_packet(snapshot["content"])
 
 
-async def _final_lines(period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
-    rows = (await db.execute(text("""
-        SELECT driverassignmentid, driverid, linetype, linescope, workdate, payitemid, quantity,
-               resolvedrateamount, finalamount, sourcetype, sourceid, bonuseventid
-        FROM payroll.payrollfinallines
-        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-        ORDER BY driverassignmentid, finallineid
-    """), {
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).mappings().all()
-    totals: dict[int, dict[str, Any]] = defaultdict(lambda: {
-        "daily_pay": Decimal("0"), "status_pay": Decimal("0"),
-        "minimum_adjustment": Decimal("0"), "maximum_adjustment": Decimal("0"),
-        "bonus_total": Decimal("0"), "total_pay": Decimal("0"),
-    })
-    lines: list[dict[str, Any]] = []
-    for row in rows:
-        driver_assignment_id = int(row["driverassignmentid"])
-        amount = Decimal(str(row["finalamount"]))
-        total = totals[driver_assignment_id]
-        total["driver_id"] = int(row["driverid"])
-        total["total_pay"] += amount
-        total[classify_final_line_component(row)] += amount
-        lines.append({
-            "driver_assignment_id": driver_assignment_id, "source_type": row["sourcetype"],
-            "source_id": row["sourceid"], "line_type": row["linetype"],
-            "line_scope": row["linescope"], "work_date": row["workdate"],
-            "pay_item_id": row["payitemid"], "quantity": row["quantity"],
-            "resolved_rate_amount": row["resolvedrateamount"], "calculated_amount": amount,
-            "bonus_event_id": row["bonuseventid"], "snapshot_source_type": row["sourcetype"],
-        })
-    return lines, dict(totals)
-
-
-async def _snapshot_evidence(snapshot_id: int, period: dict[str, Any], db: AsyncConnection) -> tuple[bool, int | None, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
-    header = (await db.execute(text("""
-        SELECT reportevidenceversion, reportevidencehash, companyid, branchid, payrollperiodid
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-    """), {"snapshot_id": snapshot_id})).mappings().first()
-    if header is None or (
-        int(header["companyid"]) != int(period["companyid"])
-        or int(header["branchid"]) != int(period["branchid"])
-        or int(header["payrollperiodid"]) != int(period["payrollperiodid"])
-    ):
-        raise _unavailable(
-            "REPORT_FINANCIAL_AUTHORITY_INTEGRITY_ERROR",
-            "the finalization provenance does not identify this payroll period's snapshot.",
-        )
-    version = header["reportevidenceversion"]
-    if version is None:
-        return False, None, None, [], []
-    status_rows = await status_evidence.read_status_entries(
-        db,
-        snapshot_id=snapshot_id,
-        company_id=int(header["companyid"]),
-        branch_id=int(header["branchid"]),
-        period_id=int(header["payrollperiodid"]),
-    )
-    statuses = [{
-        "driver_assignment_id": row["driver_assignment_id"], "driver_id": row["driver_id"],
-        "work_date": row["work_date"],
-        "status_key_id": row["status_key_id"], "code": row["status_code"],
-        "label": row["status_label"], "is_off": row["is_off_reason"],
-    } for row in status_rows]
-    bonuses = (await db.execute(text("""
-        SELECT payrollbonuseventid, driverassignmentid, driverid, amount, reason, notes, datarevision,
-               createdbyuserid, creatordisplaynamesnapshot, createdatutc
-        FROM payroll.payrollcalculationsnapshotbonusevents
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-        ORDER BY driverassignmentid, payrollbonuseventid
-    """), {"snapshot_id": snapshot_id})).mappings().all()
-    return True, int(version), str(header["reportevidencehash"]), statuses, [
-        {"bonus_event_id": int(r["payrollbonuseventid"]), "driver_assignment_id": int(r["driverassignmentid"]),
-         "driver_id": int(r["driverid"]),
-         "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
-         "data_revision": int(r["datarevision"]), "creator_user_id": r["createdbyuserid"],
-         "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]} for r in bonuses
-    ]
-
-
-async def _snapshot_work_and_drivers(
+async def _snapshot_evidence(
     snapshot_id: int, period: dict[str, Any], db: AsyncConnection,
-) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
-    rows = (await db.execute(text("""
-        SELECT dt.driverassignmentid, dt.driverid, dt.drivernumbersnapshot, dt.drivernamesnapshot,
-               sl.sourcetype, sl.linetype, sl.linescope, sl.workdate, sl.payitemid, sl.quantity
-        FROM payroll.payrollcalculationdrivertotals dt
-        LEFT JOIN payroll.payrollcalculationsnapshotlines sl
-          ON sl.payrollcalculationdrivertotalid = dt.payrollcalculationdrivertotalid
-        WHERE dt.payrollcalculationsnapshotid = :snapshot_id
-          AND dt.companyid = :company_id AND dt.branchid = :branch_id
-        ORDER BY dt.driverassignmentid, sl.payrollcalculationsnapshotlineid
-    """), {
-        "snapshot_id": snapshot_id, "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).mappings().all()
-    drivers: dict[int, dict[str, Any]] = {}
-    work_rows: list[dict[str, Any]] = []
-    for row in rows:
-        driver_assignment_id = int(row["driverassignmentid"])
-        drivers.setdefault(driver_assignment_id, {
-            "driver_assignment_id": driver_assignment_id, "driver_id": int(row["driverid"]),
-            "driver_number": row["drivernumbersnapshot"],
-            "driver_name": row["drivernamesnapshot"],
-        })
-        if row["sourcetype"] == "DraftLine" and row["linescope"] == "Daily":
-            work_rows.append({
-                "driver_assignment_id": driver_assignment_id, "work_date": row["workdate"],
-                "line_type": row["linetype"], "pay_item_id": row["payitemid"],
-                "quantity": row["quantity"], "line_scope": row["linescope"],
-            })
-    return drivers, work_rows
+) -> tuple[bool, int | None, str | None, list[dict[str, Any]], list[dict[str, Any]]]:
+    return await status_evidence.read_report_evidence(
+        db, snapshot_id=snapshot_id,
+        company_id=int(period["companyid"]), branch_id=int(period["branchid"]),
+        period_id=int(period["payrollperiodid"]))
 
 
 async def _finalized_off_status_availability(
@@ -397,54 +280,22 @@ async def _finalized_off_status_availability(
     return _availability("AVAILABLE")
 
 
-async def _rate_evidence_capture_marker(
-    snapshot: dict[str, Any], period: dict[str, Any], db: AsyncConnection,
-) -> bool:
-    """A workflow action proves the 0064 capture transaction ran for a zero-rate snapshot."""
-    marker = (await db.execute(text("""
-        SELECT 1
-        FROM payroll.payrollperiodworkflowactionevidence
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id
-          AND payrollperiodid = :period_id
-          AND actioncode IN ('SUBMITTED', 'RESUBMITTED')
-        LIMIT 1
-    """), {
-        "snapshot_id": snapshot["payrollcalculationsnapshotid"],
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).first()
-    return marker is not None
-
-
 async def _finalized_rate_evidence_availability(
     period: dict[str, Any], snapshot: dict[str, Any] | None,
     provenance: dict[str, str | None], db: AsyncConnection,
 ) -> dict[str, str | None]:
-    """Keep zero new evidence distinct from a pre-0064 snapshot with no capture proof."""
+    """Rate evidence is part of every verified snapshot; without the snapshot it is unavailable."""
     if snapshot is None:
         return _availability("UNAVAILABLE", provenance["reason_code"])
-    exists = (await db.execute(text("""
-        SELECT 1
-        FROM payroll.payrollcalculationsnapshotusedratedefinitions
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id
-          AND payrollperiodid = :period_id
-        LIMIT 1
-    """), {
-        "snapshot_id": snapshot["payrollcalculationsnapshotid"],
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).first()
-    if exists is not None or await _rate_evidence_capture_marker(snapshot, period, db):
-        return _availability("AVAILABLE")
-    return _availability("UNAVAILABLE", "LEGACY_NOT_CAPTURED")
+    return _availability("AVAILABLE")
 
 
 async def _finalized_used_rate_definitions(
     period: dict[str, Any], snapshot: dict[str, Any] | None,
     provenance: dict[str, str | None], db: AsyncConnection,
 ) -> tuple[list[dict[str, Any]], dict[str, str | None]]:
+    """The rates the snapshot used (target schedules, legacy Status rates) and its Min/Max
+    rule evidence, exactly as frozen. Pay definition labels come from the frozen period layout."""
     availability = await _finalized_rate_evidence_availability(period, snapshot, provenance, db)
     if snapshot is None or availability["state"] == "UNAVAILABLE":
         return [], availability
@@ -464,23 +315,25 @@ async def _finalized_used_rate_definitions(
         )
         SELECT d.payrollcalculationsnapshotusedratedefinitionid, d.driverassignmentid, d.driverid,
                dt.drivernamesnapshot, dt.drivernumbersnapshot,
-               d.evidencekind, d.sourcetypesnapshot, d.payitemid,
-               NULL::varchar AS payitemcode, NULL::varchar AS payitemlabel,
+               d.evidencekind, d.sourcetypesnapshot,
+               d.driverratescheduleid, d.ratedefinitionid, d.paydefinitionid,
+               d.ratecomponentdefinitionid, ppd.definitioncodesnapshot, ppd.definitionnamesnapshot,
+               ppd.unitsnapshot,
                d.ratetypeid, d.ratetypecodesnapshot, d.ratetypenamesnapshot, d.unitnamesnapshot,
-               d.driverrateid, d.driverpayruleid, d.ratebehaviorsnapshot, d.rateamountsnapshot,
+               d.driverrateid, d.rateamountsnapshot,
                d.effectivefromsnapshot, d.effectivetosnapshot, d.ratestatussnapshot,
-               d.blocksizesnapshot, d.roundingrulesnapshot, d.ruletypeSnapshot,
-               d.ruleamountsnapshot, d.rulestatussnapshot, d.definitionfingerprint,
-               u.snapshot_line_ids, u.line_use_count
+               d.definitionfingerprint, u.snapshot_line_ids, u.line_use_count
         FROM payroll.payrollcalculationsnapshotusedratedefinitions d
         JOIN usage u ON u.usedratedefinitionid = d.payrollcalculationsnapshotusedratedefinitionid
         LEFT JOIN payroll.payrollcalculationdrivertotals dt
           ON dt.payrollcalculationsnapshotid = d.payrollcalculationsnapshotid
          AND dt.companyid = d.companyid AND dt.branchid = d.branchid AND dt.driverassignmentid = d.driverassignmentid
+        LEFT JOIN payroll.payrollperioddefinitions ppd
+          ON ppd.payrollperiodid = d.payrollperiodid AND ppd.paydefinitionid = d.paydefinitionid
         WHERE d.payrollcalculationsnapshotid = :snapshot_id
           AND d.companyid = :company_id AND d.branchid = :branch_id
           AND d.payrollperiodid = :period_id
-        ORDER BY d.driverassignmentid, d.evidencekind, d.payitemid NULLS LAST,
+        ORDER BY d.driverassignmentid, d.evidencekind, d.paydefinitionid NULLS LAST,
                  d.effectivefromsnapshot NULLS LAST,
                  d.payrollcalculationsnapshotusedratedefinitionid
     """), {
@@ -507,20 +360,39 @@ async def _finalized_used_rate_definitions(
         "driver_assignment_id": int(row["driverassignmentid"]), "driver_id": int(row["driverid"]),
         "driver_name": row["drivernamesnapshot"],
         "driver_number": row["drivernumbersnapshot"], "evidence_kind": row["evidencekind"],
-        "source_type": row["sourcetypesnapshot"], "pay_item_id": row["payitemid"],
-        "pay_item_code": row["payitemcode"], "pay_item_label": row["payitemlabel"],
+        "source_type": row["sourcetypesnapshot"],
+        "driver_rate_schedule_id": row["driverratescheduleid"],
+        "rate_definition_id": row["ratedefinitionid"], "pay_definition_id": row["paydefinitionid"],
+        "rate_component_definition_id": row["ratecomponentdefinitionid"],
+        "pay_definition_code": row["definitioncodesnapshot"],
+        "pay_definition_label": row["definitionnamesnapshot"],
+        "unit_name": row["unitsnapshot"] or row["unitnamesnapshot"],
         "rate_type_id": row["ratetypeid"], "rate_type_code": row["ratetypecodesnapshot"],
-        "rate_type_name": row["ratetypenamesnapshot"], "unit_name": row["unitnamesnapshot"],
-        "driver_rate_id": row["driverrateid"], "driver_pay_rule_id": row["driverpayruleid"],
-        "rate_behavior": row["ratebehaviorsnapshot"], "rate_amount": row["rateamountsnapshot"],
+        "rate_type_name": row["ratetypenamesnapshot"],
+        "driver_rate_id": row["driverrateid"], "rate_amount": row["rateamountsnapshot"],
         "effective_from": row["effectivefromsnapshot"], "effective_to": row["effectivetosnapshot"],
-        "rate_status": row["ratestatussnapshot"], "block_size": row["blocksizesnapshot"],
-        "rounding_rule": row["roundingrulesnapshot"], "rule_type": row["ruletypesnapshot"],
-        "rule_amount": row["ruleamountsnapshot"], "rule_status": row["rulestatussnapshot"],
+        "rate_status": row["ratestatussnapshot"],
         "definition_fingerprint": row["definitionfingerprint"],
         "snapshot_line_ids": [int(value) for value in row["snapshot_line_ids"]],
         "line_use_count": int(row["line_use_count"]),
     } for row in rows]
+    # Min/Max rules: the evaluation evidence of each Driver total is their one authority.
+    for total in snapshot["content"]["DriverTotals"]:
+        evaluation = total["MinMax"]
+        for rule in evaluation["Rules"]:
+            definitions.append({
+                "used_rate_definition_id": int(rule["PayrollCalculationSnapshotMinMaxRuleID"]),
+                "driver_assignment_id": total["DriverAssignmentID"], "driver_id": total["DriverID"],
+                "driver_name": total["DriverNameSnapshot"],
+                "driver_number": total["DriverNumberSnapshot"],
+                "evidence_kind": "DriverPayRule", "source_type": "MinMaxEvaluation",
+                "driver_pay_rule_id": rule["DriverPayRuleID"], "rule_type": rule["RuleType"],
+                "rule_amount": rule["Amount"], "rule_status": rule["RuleStatus"],
+                "rule_prorated_amount": rule["ProratedAmount"],
+                "min_max_status": evaluation["Status"],
+                "effective_from": rule["EffectiveFrom"], "effective_to": rule["EffectiveTo"],
+                "snapshot_line_ids": [], "line_use_count": 0,
+            })
     return definitions, _availability("EMPTY" if not definitions else "AVAILABLE")
 
 
@@ -588,7 +460,6 @@ async def build_overview(
     *, period_id: int, company_id: int, user_id: int, db: AsyncConnection,
 ) -> dict[str, Any]:
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    require_target_payroll_evidence()
     financial_summary = await _financial_summary(period, db)
     snapshot, provenance = await _originating_snapshot(period, db)
     off_status_availability = await _finalized_off_status_availability(
@@ -646,19 +517,25 @@ async def build_finalized_report(
     if report_type not in _REPORT_TYPES:
         raise _unavailable("FINALIZED_REPORT_VIEW_UNAVAILABLE", "Unknown finalized report view.")
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    require_target_payroll_evidence()
     columns, columns_availability = await _columns(period, db)
     definition_columns = await load_financial_definition_columns(period, db)
     definition_column_ids = [c["payroll_period_definition_id"] for c in definition_columns]
-    final_lines, financial_totals = await _final_lines(period, db)
+    snapshot, provenance = await _originating_snapshot(period, db)
+    final_lines, financial_totals = _frozen_report_totals(snapshot)
     per_driver_definitions: dict[int, dict[int, Decimal]] = {}
     definition_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in definition_column_ids}
     # Period Work is operational (quantities/Status), not financial, and must
     # stay independent of the per-Pay-Item financial integrity invariant.
     if report_type != "period-work":
-        per_driver_definitions, definition_total_map = aggregate_definition_amounts(
-            final_lines, definition_column_ids)
-    snapshot, provenance = await _originating_snapshot(period, db)
+        # The line sums keep the definition-integrity check; the amounts shown are the
+        # official ones frozen once per DriverAssignment x definition.
+        aggregate_definition_amounts(final_lines, definition_column_ids)
+        for assignment_id, total in financial_totals.items():
+            amounts = dict(total.get("official_definition_amounts", {}))
+            per_driver_definitions[assignment_id] = amounts
+            for definition_id, amount in amounts.items():
+                if definition_id in definition_total_map:
+                    definition_total_map[definition_id] += amount
     frozen_drivers: dict[int, dict[str, Any]] = {}
     work_rows: list[dict[str, Any]] = []
     statuses: list[dict[str, Any]] = []
@@ -669,7 +546,7 @@ async def build_finalized_report(
     evidence_availability = _availability("UNAVAILABLE", provenance["reason_code"])
     if snapshot is not None:
         snapshot_id = int(snapshot["payrollcalculationsnapshotid"])
-        frozen_drivers, work_rows = await _snapshot_work_and_drivers(snapshot_id, period, db)
+        frozen_drivers, work_rows = frozen_operational_rows(snapshot["content"])
         evidence_available, evidence_version, evidence_hash, statuses, bonuses = await _snapshot_evidence(
             snapshot_id, period, db,
         )
@@ -705,7 +582,7 @@ async def build_finalized_report(
             item_amounts = per_driver_definitions.get(driver_assignment_id, {})
             gross_pay = Decimal(str(total["daily_pay"])) + Decimal(str(total["status_pay"]))
             pay = {
-                **total,
+                **{k: v for k, v in total.items() if k != "official_definition_amounts"},
                 "gross_pay": gross_pay,
                 # Period Work never carries per-item money: an empty list
                 # here means "not computed for this view", never a verified
@@ -854,8 +731,26 @@ async def _finalized_status_entries(
 async def _finalized_normal_work_pairs(
     period: dict[str, Any], snapshot_id: int, db: AsyncConnection,
 ) -> tuple[set[tuple[int, date]] | None, dict[str, str | None]]:
-    """Frozen normal-work classification needs target calculation evidence."""
-    return None, _availability("UNAVAILABLE", "TARGET_PAYROLL_EVIDENCE_NOT_READY")
+    """Frozen normal work: ordinary source lines of the snapshot against a definition that was
+    active in the period. Work identifies a day, never money."""
+    rows = (await db.execute(text("""
+        SELECT DISTINCT dt.driverassignmentid, sl.workdate
+        FROM payroll.payrollcalculationsnapshotlines sl
+        JOIN payroll.payrollcalculationdrivertotals dt
+          ON dt.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
+        JOIN payroll.payrollperioddefinitions ppd
+          ON ppd.payrollperioddefinitionid = sl.payrollperioddefinitionid
+         AND ppd.payrollperiodid = :period_id
+        WHERE dt.payrollcalculationsnapshotid = :snapshot_id
+          AND dt.companyid = :company_id AND dt.branchid = :branch_id
+          AND sl.sourcetype = 'DraftLine' AND sl.workdate IS NOT NULL
+          AND sl.quantity IS NOT NULL AND sl.quantity <> 0
+          AND ppd.isactiveinperiod = TRUE
+    """), {
+        "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
+        "company_id": period["companyid"], "branch_id": period["branchid"],
+    })).mappings().all()
+    return {(int(row["driverassignmentid"]), row["workdate"]) for row in rows}, _availability("AVAILABLE")
 
 
 async def build_finalized_off_drivers(
@@ -863,7 +758,6 @@ async def build_finalized_off_drivers(
 ) -> dict[str, Any]:
     """Build P6B's full-period immutable Off/Status source projection."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    require_target_payroll_evidence()
     snapshot, provenance = await _originating_snapshot(period, db)
     statuses, status_availability = await _finalized_status_entries(snapshot, period, db)
     calendar_days, calendar_availability = await _finalized_scheduled_work_days(period, db)
@@ -948,7 +842,6 @@ async def build_finalized_rates_used(
 ) -> dict[str, Any]:
     """Build P6C's immutable used-rate/rule and Bonus evidence projection."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    require_target_payroll_evidence()
     snapshot, provenance = await _originating_snapshot(period, db)
     definitions, rate_availability = await _finalized_used_rate_definitions(
         period, snapshot, provenance, db,

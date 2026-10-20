@@ -1073,8 +1073,8 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_assignment_id: int,
     ):
-        """E28: a Locked period whose FinalLines carry no snapshot provenance
-        at all must report status_evidence as UNAVAILABLE/PROVENANCE_UNAVAILABLE
+        """E28: a Locked period whose FinalLines name more than one snapshot
+        must report status_evidence as UNAVAILABLE/PROVENANCE_UNAVAILABLE
         -- never silently falling back to another snapshot or to mutable
         current state."""
         start, end = _week_2096()
@@ -1085,8 +1085,12 @@ class TestCp2dCanonicalEntryState:
                 _text("UPDATE payroll.payrollperiods SET status = 'Locked' WHERE payrollperiodid = :pid"),
                 {"pid": pid},
             )
-            await seed_finalized_evidence(
-                direct_db, period_id=pid, driver_assignment_id=ces_driver_assignment_id)
+            # Two snapshots projected into one period: the FinalLines do not name exactly one
+            # snapshot, so the evidence is unavailable rather than taken from either of them.
+            for revision in (1, 2):
+                await seed_finalized_evidence(
+                    direct_db, period_id=pid, driver_assignment_id=ces_driver_assignment_id,
+                    revision=revision)
             await direct_db.commit()
 
             r = await session_client.get(

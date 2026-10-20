@@ -925,16 +925,20 @@ class TestOffDrivers:
     async def test_locked_period_missing_snapshot_provenance_is_unavailable(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
-        """A Locked period with no Approved PeriodApproval review item bound
-        to a snapshot must report status_evidence as UNAVAILABLE/
+        """A Locked period whose FinalLines name more than one snapshot
+        must report status_evidence as UNAVAILABLE/
         PROVENANCE_UNAVAILABLE -- never silently falling back to another
         snapshot or to mutable current state."""
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "NOPROV", status="Locked")
         days = await _period_dates(direct_db, period_id)
         await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
-        await seed_finalized_evidence(
-            direct_db, period_id=period_id, driver_assignment_id=paytest_driver_assignment_id)
+        # Two snapshots projected into one period: the FinalLines do not name exactly one
+        # snapshot, so the evidence is unavailable rather than taken from either of them.
+        for revision in (1, 2):
+            await seed_finalized_evidence(
+                direct_db, period_id=period_id, driver_assignment_id=paytest_driver_assignment_id,
+                revision=revision)
         await direct_db.commit()
 
         selected = await _selected(session_client, auth_token, period_id, days[0])

@@ -32,8 +32,9 @@ Self-approval policy:
 
 Substantive PeriodApproval decisions atomically update the linked InReview
 period: Approved becomes Approved; Rejected or EditRequested becomes Returned.
-Manual PeriodApproval creation is refused. New target payroll submissions remain
-blocked by app.payroll.evidence_gate until immutable target evidence is available.
+Manual PeriodApproval creation is refused. An approval authorizes exactly the snapshot bound
+to its review item, after the snapshot's version, persisted-row hash and evidence arithmetic
+verify; it never builds a live packet and never substitutes a newer revision.
 
 All database access is raw parameterised SQL via sqlalchemy.text().
 """
@@ -63,6 +64,7 @@ from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     require_supported_calculation_version,
 )
+from app.payroll.snapshot_verification import SnapshotEvidenceError, verify_snapshot
 from app.payroll.workflow_lock import acquire_branch_workflow_lock
 from app.review.schemas import (
     _DECIDABLE_STATUSES,
@@ -72,8 +74,11 @@ from app.review.schemas import (
     ReviewItemDetail,
     ReviewItemSummary,
     ReviewPayrollSnapshot,
+    ReviewPayrollSnapshotComponent,
     ReviewPayrollSnapshotDriverTotal,
     ReviewPayrollSnapshotLine,
+    ReviewPayrollSnapshotMinMax,
+    ReviewPayrollSnapshotMinMaxRule,
 )
 
 _REVIEW_READ_PERMISSIONS = ["payroll.view", "payroll.entry", "payroll.finalize", "review.decide"]
@@ -258,8 +263,13 @@ async def _load_period_approval_context(
     review_item_row,
     lock_period: bool,
     require_snapshot: bool,
+    verify: bool = False,
 ) -> dict:
-    """Validate the period and optional immutable packet linked by one review item."""
+    """Validate the period and optional immutable packet linked by one review item.
+
+    With ``verify`` the snapshot must also pass ``verify_snapshot`` (persisted-row hash and
+    evidence arithmetic); the loaded content is returned as ``content``.
+    """
     period_id = _period_approval_id(review_item_row)
     period_lock = " FOR UPDATE" if lock_period else ""
     period_result = await db.execute(
@@ -297,7 +307,7 @@ async def _load_period_approval_context(
                     "the period before approval."
                 ),
             )
-        return {"period": period, "period_id": period_id, "snapshot": None}
+        return {"period": period, "period_id": period_id, "snapshot": None, "content": None}
 
     snapshot_result = await db.execute(
         text("""
@@ -331,7 +341,15 @@ async def _load_period_approval_context(
             status_code=422,
             detail="PeriodApproval review item snapshot does not belong to its payroll period.",
         )
-    return {"period": period, "period_id": period_id, "snapshot": snapshot}
+    content = None
+    if verify:
+        try:
+            content = await verify_snapshot(
+                db, snapshot_id=int(snapshot_id), company_id=company_id,
+                branch_id=int(review_item_row["branchid"]), period_id=period_id)
+        except SnapshotEvidenceError as exc:
+            raise exc.http() from exc
+    return {"period": period, "period_id": period_id, "snapshot": snapshot, "content": content}
 
 
 async def _require_review_read_access(
@@ -546,78 +564,106 @@ async def get_review_item_payroll_snapshot(
         review_item_row=item,
         lock_period=False,
         require_snapshot=True,
+        verify=True,
     )
-    snapshot = context["snapshot"]
-    assert snapshot is not None
-    currency = frozen_currency(snapshot["currencycode"], snapshot["currencyminorunitdigits"])
-    snapshot_id = int(snapshot["payrollcalculationsnapshotid"])
-
-    total_result = await db.execute(
-        text("""
-            SELECT driverassignmentid, driverid, drivernumbersnapshot, drivernamesnapshot,
-                   dailypay, statuspay, minimumadjustment,
-                   maximumadjustment, bonustotal, expectedpay
-            FROM payroll.payrollcalculationdrivertotals
-            WHERE payrollcalculationsnapshotid = :snapshot_id
-              AND companyid = :company_id
-              AND branchid = :branch_id
-            ORDER BY driverassignmentid
-        """),
-        {"snapshot_id": snapshot_id, "company_id": company_id, "branch_id": item["branchid"]},
-    )
-    driver_totals = [
-        ReviewPayrollSnapshotDriverTotal(
-            driver_assignment_id=row["driverassignmentid"],
-            driver_id=row["driverid"],
-            driver_number_snapshot=row["drivernumbersnapshot"],
-            driver_name_snapshot=row["drivernamesnapshot"],
-            daily_pay=row["dailypay"],
-            status_pay=row["statuspay"],
-            minimum_adjustment=row["minimumadjustment"],
-            maximum_adjustment=row["maximumadjustment"],
-            bonus_total=row["bonustotal"],
-            expected_pay=row["expectedpay"],
-        )
-        for row in total_result.mappings().all()
-    ]
-    line_result = await db.execute(
-        text("""
-            SELECT totals.driverassignmentid, lines.sourcetype, lines.linetype, lines.linescope,
-                   lines.workdate, lines.payitemid, lines.quantity,
-                   lines.resolvedrateamount, lines.calculatedamount
-            FROM payroll.payrollcalculationsnapshotlines lines
-            JOIN payroll.payrollcalculationdrivertotals totals
-              ON totals.payrollcalculationdrivertotalid = lines.payrollcalculationdrivertotalid
-            WHERE totals.payrollcalculationsnapshotid = :snapshot_id
-              AND totals.companyid = :company_id
-              AND totals.branchid = :branch_id
-            ORDER BY totals.driverassignmentid, lines.workdate NULLS LAST, lines.linescope,
-                     lines.linetype, lines.sourcetype, lines.sourceid,
-                     lines.payrollcalculationsnapshotlineid
-        """),
-        {"snapshot_id": snapshot_id, "company_id": company_id, "branch_id": item["branchid"]},
-    )
-    lines = [
-        ReviewPayrollSnapshotLine(
-            driver_assignment_id=row["driverassignmentid"],
-            source_type=row["sourcetype"],
-            line_type=row["linetype"],
-            line_scope=row["linescope"],
-            work_date=row["workdate"],
-            pay_item_id=row["payitemid"],
-            quantity=row["quantity"],
-            resolved_rate_amount=row["resolvedrateamount"],
-            calculated_amount=row["calculatedamount"],
-        )
-        for row in line_result.mappings().all()
-    ]
+    content = context["content"]
+    assert content is not None
+    currency = frozen_currency(content["CurrencyCode"], content["CurrencyMinorUnitDigits"])
+    label_field = {"ORDINARY": "DefinitionNameSnapshot", "STATUS": "StatusRateColumnNameSnapshot"}
+    driver_totals = []
+    lines = []
+    for total in content["DriverTotals"]:
+        minmax = total["MinMax"]
+        driver_totals.append(ReviewPayrollSnapshotDriverTotal(
+            driver_assignment_id=total["DriverAssignmentID"],
+            driver_id=total["DriverID"],
+            employee_id=total["EmployeeID"],
+            branch_id=total["BranchID"],
+            driver_number_snapshot=total["DriverNumberSnapshot"],
+            driver_name_snapshot=total["DriverNameSnapshot"],
+            daily_pay=total["DailyPay"],
+            status_pay=total["StatusPay"],
+            minimum_adjustment=total["MinimumAdjustment"],
+            maximum_adjustment=total["MaximumAdjustment"],
+            bonus_total=total["BonusTotal"],
+            expected_pay=total["ExpectedPay"],
+            components=[
+                ReviewPayrollSnapshotComponent(
+                    component_kind=c["ComponentKind"],
+                    label=c.get(label_field.get(c["ComponentKind"], "")),
+                    payroll_period_definition_id=c["PayrollPeriodDefinitionID"],
+                    pay_definition_id=c["PayDefinitionID"],
+                    rate_definition_id=c["RateDefinitionID"],
+                    calculation_method=c["CalculationMethod"],
+                    calculation_method_version=c["CalculationMethodVersion"],
+                    status_rate_column_id=c["StatusRateColumnID"],
+                    driver_pay_rule_id=c["DriverPayRuleID"],
+                    pre_rounding_amount=c["PreRoundingAmount"],
+                    official_amount=c["OfficialAmount"],
+                    source_count=c["SourceCount"],
+                )
+                for c in total["Components"]
+            ],
+            min_max=ReviewPayrollSnapshotMinMax(
+                status=minmax["Status"],
+                selection_date=minmax["SelectionDate"],
+                proration_version=minmax["ProrationVersion"],
+                numerator=minmax["Numerator"],
+                denominator=minmax["Denominator"],
+                base_amount=minmax["BaseAmount"],
+                base_ordinary_amount=minmax["BaseOrdinaryAmount"],
+                base_status_amount=minmax["BaseStatusAmount"],
+                excluded_bonus_amount=minmax["ExcludedBonusAmount"],
+                counted_work_dates=minmax["CountedWorkDates"],
+                rules=[
+                    ReviewPayrollSnapshotMinMaxRule(
+                        driver_pay_rule_id=r["DriverPayRuleID"],
+                        rule_type=r["RuleType"],
+                        amount=r["Amount"],
+                        rule_status=r["RuleStatus"],
+                        effective_from=r["EffectiveFrom"],
+                        effective_to=r["EffectiveTo"],
+                        prorated_amount=r["ProratedAmount"],
+                        calendar_frequency=r["CalendarFrequency"],
+                        calendar_anchor_start_date=r["CalendarAnchorStartDate"],
+                        calendar_custom_interval_days=r["CalendarCustomIntervalDays"],
+                    )
+                    for r in minmax["Rules"]
+                ],
+            ),
+        ))
+        for line in sorted(total["Lines"], key=lambda ln: (
+            ln["WorkDate"] is None, ln["WorkDate"], ln["LineType"], ln["SourceID"],
+        )):
+            lines.append(ReviewPayrollSnapshotLine(
+                driver_assignment_id=total["DriverAssignmentID"],
+                source_type=line["SourceType"],
+                source_id=line["SourceID"],
+                line_type=line["LineType"],
+                line_scope=line["LineScope"],
+                work_date=line["WorkDate"],
+                payroll_period_definition_id=line["PayrollPeriodDefinitionID"],
+                driver_rate_schedule_id=line["DriverRateScheduleID"],
+                quantity=line["Quantity"],
+                resolved_rate_amount=line["ResolvedRateAmount"],
+                calculated_amount=line["CalculatedAmount"],
+            ))
     return ReviewPayrollSnapshot(
         currency_code=currency.code, currency_minor_unit_digits=currency.minor_unit_digits,
         review_item_id=review_item_id,
         payroll_period_id=context["period_id"],
-        revision_number=snapshot["revisionnumber"],
-        captured_at_utc=snapshot["createdatutc"],
-        total_expected_pay=snapshot["totalexpectedpay"],
+        snapshot_id=content["PayrollCalculationSnapshotID"],
+        revision_number=content["RevisionNumber"],
+        snapshot_hash=content["SnapshotHash"],
+        calculation_version=content["CalculationVersion"],
+        payable_rounding_version=content["PayableRoundingVersion"],
+        min_max_proration_version=content["MinMaxProrationVersion"],
+        period_start_date=content["PeriodStartDate"],
+        period_end_date=content["PeriodEndDate"],
+        scheduled_work_dates=content["ScheduledWorkDates"],
+        warnings=content["Warnings"],
+        captured_at_utc=content["CreatedAtUtc"],
+        total_expected_pay=content["TotalExpectedPay"],
         driver_totals=driver_totals,
         lines=lines,
     )
@@ -914,6 +960,7 @@ async def decide_review_item(
             review_item_row=row,
             lock_period=True,
             require_snapshot=data.decision == "Approved",
+            verify=data.decision == "Approved",
         )
         if period_context["period"]["status"] != "InReview":
             raise HTTPException(

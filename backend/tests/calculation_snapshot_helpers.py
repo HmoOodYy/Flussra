@@ -156,3 +156,62 @@ def snapshot_table_counts(tenant, snapshot_id: int) -> dict[str, int]:
                         "WHERE payrollcalculationsnapshotid = %s",
     }
     return {name: query(tenant, sql, (snapshot_id,))[0][0] for name, sql in queries.items()}
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle: submit -> review decision -> finalize, through the real routes
+# ---------------------------------------------------------------------------
+
+def allow_self_approval(tenant) -> None:
+    """Let the submitting user decide, so one tenant user drives the whole lifecycle."""
+    query(tenant, "UPDATE core.companies SET allowselfapproval = TRUE WHERE companyid = %s",
+          (tenant.company_id,))
+
+
+async def submit(client, tenant, period, *, expect: int = 200):
+    response = await client.patch(
+        f"/payroll/periods/{period['payroll_period_id']}/status",
+        json={"status": "InReview"}, headers=tenant.admin)
+    assert response.status_code == expect, response.text
+    return response
+
+
+async def pending_review_item(tenant, period) -> int:
+    ((item_id,),) = rows(tenant, """
+        SELECT reviewitemid FROM review.managerreviewitems
+        WHERE entityschema = 'payroll' AND entityname = 'PayrollPeriods' AND entityid = %s
+          AND requesttype = 'PeriodApproval' AND status = 'Pending'
+    """, str(period["payroll_period_id"]))
+    return item_id
+
+
+async def decide(client, tenant, item_id: int, decision: str = "Approved", *, expect: int = 200):
+    response = await client.post(
+        f"/review/items/{item_id}/decide",
+        json={"decision": decision, "decision_reason": "reviewed"}, headers=tenant.admin)
+    assert response.status_code == expect, response.text
+    return response
+
+
+async def finalize(client, tenant, period, *, expect: int = 200):
+    response = await client.post(
+        f"/payroll/periods/{period['payroll_period_id']}/finalize", headers=tenant.admin)
+    assert response.status_code == expect, response.text
+    return response
+
+
+async def finalization_preview(client, tenant, period, *, expect: int = 200):
+    response = await client.get(
+        f"/payroll/periods/{period['payroll_period_id']}/finalization-preview",
+        headers=tenant.admin)
+    assert response.status_code == expect, response.text
+    return response
+
+
+async def submit_and_approve(client, tenant, period) -> int:
+    """Submit, approve and return the review item id (the period is then Approved)."""
+    allow_self_approval(tenant)
+    await submit(client, tenant, period)
+    item_id = await pending_review_item(tenant, period)
+    await decide(client, tenant, item_id)
+    return item_id

@@ -402,6 +402,8 @@ async def verify_snapshot(
     content = await load_snapshot_content(
         db, snapshot_id=snapshot_id, company_id=company_id, branch_id=branch_id,
         period_id=period_id)
+    if any(total["MinMax"] is None for total in content["DriverTotals"]):
+        raise _integrity("a Driver total has no Min/Max evaluation.")
     if calculate_snapshot_hash(content) != content["SnapshotHash"]:
         raise SnapshotEvidenceError(
             "SNAPSHOT_HASH_MISMATCH",

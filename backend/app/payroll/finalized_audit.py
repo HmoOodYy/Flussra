@@ -179,6 +179,14 @@ async def build_finalized_audit(
             "period_id": period["payrollperiodid"],
         })).mappings().all()]
 
+        # Min/Max rule evidence of the frozen evaluations is the rules' one authority.
+        for total in snapshot["content"]["DriverTotals"]:
+            rate_rows.extend({
+                "used_rate_definition_id": int(rule["PayrollCalculationSnapshotMinMaxRuleID"]),
+                "evidence_kind": "DriverPayRule", "driver_pay_rule_id": rule["DriverPayRuleID"],
+                "driver_assignment_id": total["DriverAssignmentID"],
+            } for rule in total["MinMax"]["Rules"])
+
     complete = all(value["state"] in {"AVAILABLE", "EMPTY"} for value in availability.values())
     metadata = {
         "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"],
