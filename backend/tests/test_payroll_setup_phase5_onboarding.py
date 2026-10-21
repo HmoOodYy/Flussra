@@ -509,6 +509,9 @@ async def test_branch_onboarding_policy_audit_failure_rolls_back_all_branch_effe
     actor = await _actor(db_conn, permissions=("branches.create", "payroll_setup.assign"),
                          scope="AllCompanyBranches")
     branch_code = "P5R" + marker[:7]
+    status_columns_before = (await db_conn.execute(text("""
+        SELECT COUNT(*) FROM payroll.StatusRateColumns WHERE CompanyID = :cid
+    """), {"cid": company_id})).scalar_one()
 
     original_policy_audit = payroll_policy.write_policy_audit
 
@@ -550,10 +553,10 @@ async def test_branch_onboarding_policy_audit_failure_rolls_back_all_branch_effe
             SELECT COUNT(*) FROM payroll.PayrollSetupPolicyAuditEvents
             WHERE CompanyID = :cid AND BranchID = :bid AND EventType = 'BranchAssigned'
         """), {"cid": company_id, "bid": int(branch_id)})).scalar_one() == 0
+        # Status rate columns belong to the Company: creating a Branch never touches them.
         assert (await db_conn.execute(text("""
-            SELECT COUNT(*) FROM payroll.StatusRateColumns
-            WHERE CompanyID = :cid AND BranchID = :bid
-        """), {"cid": company_id, "bid": int(branch_id)})).scalar_one() == 0
+            SELECT COUNT(*) FROM payroll.StatusRateColumns WHERE CompanyID = :cid
+        """), {"cid": company_id})).scalar_one() == status_columns_before
     finally:
         monkeypatch.undo()
         restored = await client.put("/payroll-setup/default", headers=_auth(auth_token),

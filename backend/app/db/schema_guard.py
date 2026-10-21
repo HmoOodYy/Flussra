@@ -340,6 +340,59 @@ def _check_calculation_evidence_v2(cur) -> list[str]:
     return errors
 
 
+# Company Status catalog (migration 0090): Company-owned Status keys with aliases, Branch usage
+# limits, Company-owned Status rate columns, and the objects that protect them.
+_STATUS_CATALOG_TABLES = (
+    "payrollstatuskeyaliases",
+    "payrollstatuskeybranchlimits",
+)
+_STATUS_CATALOG_COLUMNS = (
+    ("payrollstatuskeys", "normalizedkeyname"),
+    ("payrollstatuskeyaliases", "normalizedalias"),
+    ("payrollstatuskeybranchlimits", "branchid"),
+    ("driverrateschedules", "statusratecolumnid"),
+)
+_STATUS_CATALOG_RETIRED_COLUMNS = (
+    ("payrollstatuskeys", "branchid"),
+    ("payrollstatuskeys", "limitusesperperiodenabled"),
+    ("statusratecolumns", "branchid"),
+    ("statusratecolumns", "ratetypeid"),
+    ("ratedefinitions", "ownerbranchid"),
+)
+_STATUS_CATALOG_TRIGGERS = (
+    ("trg_payrollstatuskeys_name", "payrollstatuskeys"),
+    ("trg_payrollstatuskeys_semantics", "payrollstatuskeys"),
+    ("trg_payrollstatuskeyaliases_alias", "payrollstatuskeyaliases"),
+)
+_STATUS_CATALOG_FUNCTIONS = (
+    "payroll.fn_lockstatuscatalog(integer)",
+    "payroll.fn_createstatusratecolumn(integer,character varying,character varying,boolean,integer)",
+    "payroll.fn_ensuredefaultstatusratecolumn(integer)",
+)
+
+
+def _check_company_status_catalog(cur) -> list[str]:
+    errors: list[str] = []
+    for table in _STATUS_CATALOG_TABLES:
+        cur.execute("SELECT to_regclass(%s)", (f"payroll.{table}",))
+        if cur.fetchone()[0] is None:
+            errors.append(f"Missing Company Status catalog table payroll.{table}")
+    for table, column in _STATUS_CATALOG_COLUMNS:
+        if not _column_exists(cur, "payroll", table, column):
+            errors.append(f"Missing Company Status catalog column payroll.{table}.{column}")
+    for table, column in _STATUS_CATALOG_RETIRED_COLUMNS:
+        if _column_exists(cur, "payroll", table, column):
+            errors.append(f"Retired Branch-owned Status column still exists: payroll.{table}.{column}")
+    for trigger, table in _STATUS_CATALOG_TRIGGERS:
+        if not _trigger_exists_and_enabled(cur, trigger, "payroll", table):
+            errors.append(f"Missing or disabled Company Status catalog trigger {trigger}.")
+    for signature in _STATUS_CATALOG_FUNCTIONS:
+        cur.execute("SELECT to_regprocedure(%s)", (signature,))
+        if cur.fetchone()[0] is None:
+            errors.append(f"Missing Company Status catalog function {signature}.")
+    return errors
+
+
 def _check_payroll_trust(cur) -> list[str]:
     """
     Verify all payroll trust schema objects required by Phases 1–11.
@@ -759,6 +812,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
         temporal_errors.append("Missing or disabled pay-rule integrity trigger trg_DriverPayRules_BeforeUpdate.")
 
     temporal_errors.extend(_check_calculation_evidence_v2(cur))
+    temporal_errors.extend(_check_company_status_catalog(cur))
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)

@@ -155,8 +155,8 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
             ):
                 await db.execute(_text(stmt), {"ids": period_ids})
     await db.execute(
-        _text("DELETE FROM payroll.payrollstatuskeys WHERE branchid = :branch_id AND statuscode LIKE 'CP5B_%'"),
-        {"branch_id": branch_id},
+        _text("DELETE FROM payroll.payrollstatuskeys WHERE companyid = :company_id AND statuscode LIKE 'CP5B_%'"),
+        {"company_id": _COMPANY_ID},
     )
     await db.commit()
 
@@ -303,16 +303,16 @@ async def _status_key(db: AsyncConnection, branch_id: int, code: str, is_off: bo
     return int((await db.execute(
         _text("""
             INSERT INTO payroll.payrollstatuskeys
-                (companyid, branchid, statuscode, normalizedstatuscode, keyname,
-                 hoursvalue, isoffreason, isactive, displayorder)
-            VALUES (:company_id, :branch_id, :code, :code, :name, 0, :is_off, TRUE, 990)
+                (companyid, statuscode, normalizedstatuscode, keyname, normalizedkeyname,
+                 allowancecategory, hoursvalue, isoffreason, isactive, displayorder)
+            VALUES (:company_id, :code, :code, :name, :nname, 'Other', 0, :is_off, TRUE, 990)
             RETURNING statuskeyid
         """),
         {
             "company_id": _COMPANY_ID,
-            "branch_id": branch_id,
             "code": code,
             "name": f"{code} label",
+            "nname": f"{code} label".lower(),
             "is_off": is_off,
         },
     )).scalar_one())

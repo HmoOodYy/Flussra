@@ -150,17 +150,12 @@ async def test_replacing_the_value_set_overwrites_and_clears(p3c_client, tenant)
 async def test_only_scalar_pay_definition_owned_definitions_are_authorable(
     p3c_client, tenant, cur,
 ):
-    cur.execute("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'STATUS_PAY'")
-    rate_type_id = cur.fetchone()[0]
     cur.execute("""
-        INSERT INTO payroll.statusratecolumns (companyid, branchid, ratetypeid, columnname)
-        VALUES (%s, %s, %s, 'Dormant') RETURNING statusratecolumnid
-    """, (tenant.company_id, tenant.branch_a, rate_type_id))
-    column_id = cur.fetchone()[0]
-    cur.execute("""
-        INSERT INTO payroll.ratedefinitions (companyid, statusratecolumnid, ownerbranchid, shape)
-        VALUES (%s, %s, %s, 'Scalar') RETURNING ratedefinitionid
-    """, (tenant.company_id, column_id, tenant.branch_a))
+        SELECT rd.ratedefinitionid
+        FROM payroll.ratedefinitions rd
+        JOIN payroll.statusratecolumns c ON c.statusratecolumnid = rd.statusratecolumnid
+        WHERE c.companyid = %s AND c.isdefault
+    """, (tenant.company_id,))
     status_definition = cur.fetchone()[0]
     response = await p3c_client.post(
         BASE, headers=tenant.admin,

@@ -118,6 +118,18 @@ def _calculate_per_unit(
     )
 
 
+def calculate_scalar_rate(
+    resolved: ResolvedCompensation | None, quantity: Decimal,
+) -> DefinitionCalculation:
+    """Quantity times the one scalar value of the resolved schedule, through the PerUnit kernel.
+
+    The same arithmetic and the same missing/incomplete/zero semantics as a PerUnit
+    PayDefinition line; Status compensation calls it for hours against a Status rate column's
+    scalar RateDefinition.
+    """
+    return _calculate_per_unit(resolved, quantity)
+
+
 # Future methods and versions attach here, not in the consumers.
 _CALCULATORS = {
     ("PerUnit", 1): _calculate_per_unit,

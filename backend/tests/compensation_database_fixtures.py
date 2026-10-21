@@ -92,7 +92,10 @@ def make_company(cur, currency: str | None = "USD") -> int:
                                 currencycode)
         VALUES (%s, %s, %s, 'Active', FALSE, %s) RETURNING companyid
     """, (code, code, code, currency))
-    return cur.fetchone()[0]
+    company_id = cur.fetchone()[0]
+    # A Company starts with its default Status rate column and the rate definition it owns.
+    cur.execute("SELECT payroll.fn_EnsureDefaultStatusRateColumn(%s)", (company_id,))
+    return company_id
 
 
 def make_branch(cur, company_id: int, *, is_default: bool = False) -> int:

@@ -51,7 +51,10 @@ from tests.payroll_runtime_fixtures import (
     get_grid,
     query,
     rated_definition,
+    seed_status_column,
     seed_status_key,
+    seed_status_rate,
+    status_column_of,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -223,26 +226,11 @@ async def test_finalization_is_refused_for_a_snapshot_whose_lines_were_swapped(
 
 async def _two_equal_status_components(client, engine, tenant) -> dict:
     """Two Status rate columns, one entry each, paying the same."""
-    # A Branch has one Status rate column per RateType, so two columns need two RateTypes.
-    for code, default in (("PAIDA", True), ("PAIDB", False)):
-        rate_type_id = query(tenant, """
-            INSERT INTO payroll.ratetypes (ratecode, ratename, unitname)
-            VALUES (%s, %s, 'hour') RETURNING ratetypeid
-        """, (f"STATUS_{code}_{tenant.company_id}", f"Status {code}"))[0][0]
-        column_id = query(tenant, """
-            INSERT INTO payroll.statusratecolumns
-                (companyid, branchid, ratetypeid, columnname, normalizedcolumnname, isdefault, isactive)
-            VALUES (%s, %s, %s, %s, %s, %s, TRUE) RETURNING statusratecolumnid
-        """, (tenant.company_id, tenant.branch_a, rate_type_id, f"Status {code}", f"STATUS {code}",
-              default))[0][0]
+    default_column, _, _ = status_column_of(tenant)
+    for code, column_id in (("PAIDA", default_column),
+                            ("PAIDB", seed_status_column(tenant, "Status PAIDB"))):
         seed_status_key(tenant, code, off=False, hoursvalue=D("1"), statusratecolumnid=column_id)
-        query(tenant, """
-            INSERT INTO payroll.driverrates
-                (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status,
-                 createdbyuserid, approvedbyuserid, approvedatutc)
-            VALUES (%s, %s, %s, %s, 5, DATE '2000-01-01', 'Approved', %s, %s, NOW())
-        """, (tenant.company_id, tenant.branch_a, tenant.driver_a, rate_type_id,
-              tenant.owner, tenant.owner))
+        seed_status_rate(tenant, 5, column_id=column_id)
     await assign_weekly_setup(engine, tenant, tenant.branch_a, mask=0)
     period = await create_period(client, tenant, tenant.branch_a)
     await enter(client, tenant, period, 0, status_key="PAIDA")

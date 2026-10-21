@@ -23,8 +23,10 @@ from tests.payroll_runtime_fixtures import (
     query,
     rated_definition,
     seed_status_key,
+    seed_status_rate,
     set_employment,
     setup_anchor,
+    status_column_of,
 )
 
 D = Decimal
@@ -86,25 +88,11 @@ async def add_bonus(client, tenant, period, amount="2.00") -> dict:
 
 
 def status_pay_setup(tenant, rate: str) -> tuple[int, int]:
-    """A paid (non-off) Status key worth one hour, its Branch rate column and the Driver's
-    assignment-owned Status rate. Returns (column id, driver rate id)."""
-    (rate_type_id,) = query(tenant, "SELECT ratetypeid FROM payroll.ratetypes "
-                                    "WHERE ratecode = 'STATUS_PAY'")[0]
-    column_id = query(tenant, """
-        INSERT INTO payroll.statusratecolumns
-            (companyid, branchid, ratetypeid, columnname, normalizedcolumnname, isdefault, isactive)
-        VALUES (%s, %s, %s, %s, %s, TRUE, TRUE) RETURNING statusratecolumnid
-    """, (tenant.company_id, tenant.branch_a, rate_type_id, "Status pay", "STATUS PAY"))[0][0]
+    """A paid (non-off) Status key worth one hour bound to the Company default Status rate
+    column, and the Driver's Status rate schedule. Returns (column id, schedule id)."""
+    column_id, _, _ = status_column_of(tenant)
     seed_status_key(tenant, "PAID", off=False, hoursvalue=D("1"), statusratecolumnid=column_id)
-    driver_rate_id = query(tenant, """
-        INSERT INTO payroll.driverrates
-            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status,
-             createdbyuserid, approvedbyuserid, approvedatutc)
-        VALUES (%s, %s, %s, %s, %s, DATE '2000-01-01', 'Approved', %s, %s, NOW())
-        RETURNING driverrateid
-    """, (tenant.company_id, tenant.branch_a, tenant.driver_a, rate_type_id, D(rate),
-          tenant.owner, tenant.owner))[0][0]
-    return column_id, driver_rate_id
+    return column_id, seed_status_rate(tenant, D(rate))
 
 
 async def build_packet(engine, tenant, period):

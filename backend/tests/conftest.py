@@ -151,6 +151,11 @@ _SEED_STMTS = [
     INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended, currencycode)
     VALUES ('DEMO', 'Demo Logistics', 'Demo Logistics Ltd', 'Active', FALSE, 'USD')
     """,
+    # Every Company starts with its default Status rate column (and the rate definition it owns).
+    """
+    SELECT payroll.fn_EnsureDefaultStatusRateColumn(companyid)
+    FROM core.companies WHERE companycode = 'DEMO'
+    """,
     """
     INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
     SELECT companyid, 'HQ', 'Headquarters', 'Active', TRUE, 'America/New_York'

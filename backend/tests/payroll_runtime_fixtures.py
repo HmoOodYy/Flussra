@@ -15,6 +15,7 @@ import httpx
 import psycopg2
 from sqlalchemy import text
 
+from app.settings.status_names import normalize_status_name
 from tests.compensation_api_fixtures import (
     PERMISSIONS,
     Tenant,
@@ -272,20 +273,96 @@ async def get_grid(
 
 def seed_status_key(
     tenant: Tenant, code: str, *, branch_id: int | None = None, off: bool = True,
-    active: bool = True, **limits,
+    active: bool = True, category: str = "Other", aliases: tuple[str, ...] = (), **columns,
 ) -> int:
-    """A Branch PayrollStatusKey (``limits`` are the LimitUses* column values)."""
-    columns = ["companyid", "branchid", "statuscode", "normalizedstatuscode", "keyname",
-               "isoffreason", "isactive"]
-    values = [tenant.company_id, branch_id or tenant.branch_a, code, code.upper(), code,
-              off, active]
-    for column, value in limits.items():
-        columns.append(column)
+    """A Company Status key named ``code`` (its code is ``code`` upper-cased).
+
+    ``columns`` are PayrollStatusKeys column values (``hoursvalue``, ``statusratecolumnid``)
+    except the ``limituses*`` ones, which become the usage-limit row of the Status in
+    ``branch_id`` (default: the Tenant's first Branch).
+    """
+    limits = {k: v for k, v in columns.items() if k.startswith("limituses")}
+    key_columns = {k: v for k, v in columns.items() if k not in limits}
+    names = ["companyid", "statuscode", "normalizedstatuscode", "keyname", "normalizedkeyname",
+             "allowancecategory", "isoffreason", "isactive"]
+    values = [tenant.company_id, code, code.upper(), code, normalize_status_name(code),
+              category, off, active]
+    for column, value in key_columns.items():
+        names.append(column)
         values.append(value)
-    return _sql(tenant, f"""
-        INSERT INTO payroll.payrollstatuskeys ({", ".join(columns)})
+    key_id = _sql(tenant, f"""
+        INSERT INTO payroll.payrollstatuskeys ({", ".join(names)})
         VALUES ({", ".join(["%s"] * len(values))}) RETURNING statuskeyid
     """, values)[0][0]
+    for alias in aliases:
+        _sql(tenant, """
+            INSERT INTO payroll.payrollstatuskeyaliases
+                (companyid, statuskeyid, isactive, aliastext, normalizedalias)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (tenant.company_id, key_id, active, alias, normalize_status_name(alias)))
+    if limits:
+        _sql(tenant, f"""
+            INSERT INTO payroll.payrollstatuskeybranchlimits
+                (branchid, statuskeyid, companyid, {", ".join(limits)})
+            VALUES (%s, %s, %s, {", ".join(["%s"] * len(limits))})
+        """, (branch_id or tenant.branch_a, key_id, tenant.company_id, *limits.values()))
+    return key_id
+
+
+def status_column_of(tenant: Tenant, column_id: int | None = None) -> tuple[int, int, int]:
+    """(Status rate column, its RateDefinition, its scalar component): the Company default
+    column unless ``column_id`` names another."""
+    return _sql(tenant, """
+        SELECT c.statusratecolumnid, rd.ratedefinitionid, comp.ratecomponentdefinitionid
+        FROM payroll.statusratecolumns c
+        JOIN payroll.ratedefinitions rd ON rd.statusratecolumnid = c.statusratecolumnid
+        JOIN payroll.ratecomponentdefinitions comp ON comp.ratedefinitionid = rd.ratedefinitionid
+        WHERE c.companyid = %s AND (c.statusratecolumnid = %s OR (%s IS NULL AND c.isdefault AND c.isactive))
+    """, (tenant.company_id, column_id, column_id))[0]
+
+
+def seed_status_column(tenant: Tenant, name: str, *, is_default: bool = False) -> int:
+    """A further Company Status rate column (with its RateDefinition); returns its id."""
+    return _sql(tenant, "SELECT payroll.fn_CreateStatusRateColumn(%s, %s, %s, %s, NULL)",
+                (tenant.company_id, name, normalize_status_name(name), is_default))[0][0]
+
+
+def seed_status_rate(
+    tenant: Tenant, amount, *, driver_id: int | None = None, column_id: int | None = None,
+    effective_from: str = "2000-01-01", effective_to: str | None = None,
+    approve: bool = True, superseded: bool = False,
+) -> int:
+    """A Driver's Status rate: a schedule of the Status rate column's RateDefinition with its one
+    value, Approved unless ``approve`` is False (left Pending). Returns the schedule id.
+
+    ``amount`` None leaves the value missing (an incomplete schedule stays Pending).
+    ``superseded`` closes an approved schedule that has an end date (a successor follows).
+    """
+    column, rate_definition_id, component_id = status_column_of(tenant, column_id)
+    driver = driver_id if driver_id is not None else tenant.driver_a_id
+    schedule_id = _sql(tenant, """
+        INSERT INTO payroll.driverrateschedules
+            (companyid, driverid, statusratecolumnid, ratedefinitionid, effectivefrom, effectiveto,
+             createdbyuserid)
+        VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING driverratescheduleid
+    """, (tenant.company_id, driver, column, rate_definition_id, effective_from, effective_to,
+          tenant.owner))[0][0]
+    if amount is not None:
+        _sql(tenant, """
+            INSERT INTO payroll.driverrateschedulevalues
+                (driverratescheduleid, ratedefinitionid, ratecomponentdefinitionid, amount)
+            VALUES (%s, %s, %s, %s)
+        """, (schedule_id, rate_definition_id, component_id, amount))
+    if approve and amount is not None:
+        _sql(tenant, """
+            UPDATE payroll.driverrateschedules
+               SET status = 'Approved', approvedbyuserid = %s, approvedatutc = NOW()
+             WHERE driverratescheduleid = %s
+        """, (tenant.owner, schedule_id))
+        if superseded:
+            _sql(tenant, "UPDATE payroll.driverrateschedules SET status = 'Superseded' "
+                         "WHERE driverratescheduleid = %s", (schedule_id,))
+    return schedule_id
 
 
 def make_driver_self_user(tenant: Tenant, permissions: list[str]) -> dict[str, str]:

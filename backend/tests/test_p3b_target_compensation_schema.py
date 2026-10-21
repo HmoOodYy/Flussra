@@ -6,6 +6,7 @@ import json
 import pytest
 from psycopg2 import errors
 
+from tests.builders.status import make_status_column
 from tests.compensation_database_fixtures import (
     Ordinal,
     Scalar,
@@ -100,8 +101,12 @@ def test_company_is_valid_with_zero_pay_definitions(cur):
     company_id = make_company(cur)
     cur.execute("SELECT count(*) FROM payroll.paydefinitions WHERE companyid = %s", (company_id,))
     assert cur.fetchone()[0] == 0
-    cur.execute("SELECT count(*) FROM payroll.ratedefinitions WHERE companyid = %s", (company_id,))
-    assert cur.fetchone()[0] == 0
+    # The Company's only rate definition is the one its default Status rate column owns.
+    cur.execute("""
+        SELECT count(*) FILTER (WHERE paydefinitionid IS NOT NULL),
+               count(*) FILTER (WHERE statusratecolumnid IS NOT NULL)
+        FROM payroll.ratedefinitions WHERE companyid = %s""", (company_id,))
+    assert cur.fetchone() == (0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -235,49 +240,42 @@ def test_rate_definition_has_exactly_one_owner(cur):
         make_rate_definition(cur, fx.pay_definition_id)
 
 
-def _status_rate_column(cur, company_id: int, branch_id: int) -> int:
-    cur.execute("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'STATUS_PAY'")
-    rate_type_id = cur.fetchone()[0]
-    cur.execute("""
-        INSERT INTO payroll.statusratecolumns (companyid, branchid, ratetypeid, columnname)
-        VALUES (%s, %s, %s, 'Dormant') RETURNING statusratecolumnid
-    """, (company_id, branch_id, rate_type_id))
-    return cur.fetchone()[0]
-
-
-def test_dormant_status_owner_keeps_branch_and_scalar_integrity_and_is_never_scheduled(cur):
+def test_status_owner_is_company_owned_scalar_and_schedulable_only_by_its_column(cur):
     fx = Scalar(cur)
-    other_branch = make_branch(cur, fx.company_id)
-    column_id = _status_rate_column(cur, fx.company_id, fx.branch_id)
-
-    with rejected(errors.ForeignKeyViolation):  # owner branch must match the column's branch
-        cur.execute("""
-            INSERT INTO payroll.ratedefinitions
-                (companyid, statusratecolumnid, ownerbranchid, shape)
-            VALUES (%s, %s, %s, 'Scalar')
-        """, (fx.company_id, column_id, other_branch))
-    with rejected(errors.CheckViolation):  # Status-owned definitions are scalar
-        cur.execute("""
-            INSERT INTO payroll.ratedefinitions
-                (companyid, statusratecolumnid, ownerbranchid, shape)
-            VALUES (%s, %s, %s, 'OrdinalTierSchedule')
-        """, (fx.company_id, column_id, fx.branch_id))
-
-    cur.execute("""
-        INSERT INTO payroll.ratedefinitions
-            (companyid, statusratecolumnid, ownerbranchid, shape)
-        VALUES (%s, %s, %s, 'Scalar') RETURNING ratedefinitionid
-    """, (fx.company_id, column_id, fx.branch_id))
+    cur.execute("SELECT payroll.fn_EnsureDefaultStatusRateColumn(%s)", (fx.company_id,))
+    column_id = cur.fetchone()[0]
+    cur.execute("SELECT ratedefinitionid FROM payroll.ratedefinitions WHERE statusratecolumnid = %s",
+                (column_id,))
     status_rate_definition = cur.fetchone()[0]
 
-    # A status-owned definition has no PayDefinition, so it can never have a Driver schedule.
-    for pay_definition_id in (fx.pay_definition_id, None):
-        with rejected((errors.ForeignKeyViolation, errors.NotNullViolation)):
-            cur.execute("""
-                INSERT INTO payroll.driverrateschedules
-                    (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom)
-                VALUES (%s, %s, %s, %s, '2026-01-01')
-            """, (fx.company_id, fx.driver_id, pay_definition_id, status_rate_definition))
+    with rejected(errors.UniqueViolation):  # one definition per column
+        cur.execute("""
+            INSERT INTO payroll.ratedefinitions (companyid, statusratecolumnid, shape)
+            VALUES (%s, %s, 'Scalar')
+        """, (fx.company_id, column_id))
+    with rejected(errors.CheckViolation):  # Status-owned definitions are scalar
+        cur.execute("""
+            INSERT INTO payroll.ratedefinitions (companyid, statusratecolumnid, shape)
+            VALUES (%s, %s, 'OrdinalTierSchedule')
+        """, (fx.company_id, make_status_column(cur, fx.company_id).status_rate_column_id))
+    with rejected(errors.CheckViolation):  # exactly one owner
+        cur.execute("""
+            INSERT INTO payroll.ratedefinitions (companyid, paydefinitionid, statusratecolumnid, shape)
+            VALUES (%s, %s, %s, 'Scalar')
+        """, (fx.company_id, fx.pay_definition_id, column_id))
+
+    # A PayDefinition cannot own a schedule of a Status-owned definition.
+    with rejected(errors.ForeignKeyViolation):
+        cur.execute("""
+            INSERT INTO payroll.driverrateschedules
+                (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom)
+            VALUES (%s, %s, %s, %s, '2026-01-01')
+        """, (fx.company_id, fx.driver_id, fx.pay_definition_id, status_rate_definition))
+    cur.execute("""
+        INSERT INTO payroll.driverrateschedules
+            (companyid, driverid, statusratecolumnid, ratedefinitionid, effectivefrom)
+        VALUES (%s, %s, %s, %s, '2026-01-01')
+    """, (fx.company_id, fx.driver_id, column_id, status_rate_definition))
 
 
 # ---------------------------------------------------------------------------

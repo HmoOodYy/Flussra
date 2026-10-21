@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import ast
 import re
-from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -227,6 +227,28 @@ async def replica_replication_role(conn) -> AsyncIterator[None]:
     except BaseException as exc:
         restoration_errors.append(exc)
     _raise_with_restoration_errors(body_error, restoration_errors)
+
+
+@contextmanager
+def replica_replication_role_sync(cursor) -> Iterator[None]:
+    """psycopg2 form of ``replica_replication_role`` for disposable-database tests that seed rows
+    whose foreign keys they cannot reasonably build (evidence of a whole frozen calculation).
+
+    Suppresses FK and ordinary triggers for the body and restores the prior role on exit.
+    """
+    cursor.execute("SHOW session_replication_role")
+    previous = cursor.fetchone()[0]
+    try:
+        cursor.execute("SET session_replication_role = replica")
+        yield
+    finally:
+        cursor.execute(f"SET session_replication_role = {previous}")
+        cursor.execute("SHOW session_replication_role")
+        observed = cursor.fetchone()[0]
+        if observed != previous:
+            raise AssertionError(
+                f"session_replication_role restoration mismatch: expected {previous!r}, got {observed!r}"
+            )
 
 
 async def _read_guarded_session_state(conn) -> dict[str, str | None]:

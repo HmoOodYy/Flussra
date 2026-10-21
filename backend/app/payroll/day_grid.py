@@ -10,8 +10,8 @@ Owns one REST resource end to end, GET and POST on
   - save_day_grid      batch write orchestrator: validates the whole payload before
                        any DML (all-or-nothing), then acquires locks, drives source-line
                        mutation, writes its own DailyStatus/DailyNote rows, upserts
-                       canonical entry state, syncs Status Payment, and returns
-                       get_day_grid's refreshed response.
+                       canonical entry state, and returns get_day_grid's refreshed
+                       response.
   - _parse_quantity    save-payload quantity parser; raises 422 before any DB write so
                        the batch stays atomic.
 
@@ -46,7 +46,7 @@ from app.payroll import status_evidence
 from app.payroll.day_entry_state import (
     _enforce_status_key_limits,
     _upsert_entry_state,
-    _validate_status_key,
+    lock_selected_status_keys,
 )
 from app.payroll.definition_calculation import is_method_operational, quantity_error
 from app.payroll.draft_line_mutation import (
@@ -81,7 +81,7 @@ from app.payroll.schemas import (
     DraftLineCreate,
     DraftLineUpdate,
 )
-from app.payroll.status_payment_sync import _sync_status_payment_for_entry_state
+from app.settings.status_keys import resolve_status_input
 
 # ===========================================================================
 # CP-1 — Day Grid
@@ -128,7 +128,7 @@ async def get_day_grid(
       - period.start_date otherwise
 
     - Columns: active Daily-scope pay items for the branch.
-    - Status keys: active PayrollStatusKeys for the branch.
+    - Status keys: the Company's active Statuses (names and aliases), shared by every Branch.
     - Rows: all eligible active drivers; populated with existing draft lines.
     """
     await require_non_driver_subject(company_id, user_id, db)
@@ -171,17 +171,19 @@ async def get_day_grid(
         for d in period_definitions
     ]
 
-    # ── Load status keys for the branch ──────────────────────────────────── #
+    # ── Load the Company's active Statuses (one catalog for every Branch) ── #
     sk_result = await db.execute(
         text("""
-            SELECT statuskeyid, statuscode, keyname, isoffreason, hoursvalue
-            FROM   payroll.payrollstatuskeys
+            SELECT statuskeyid, statuscode, keyname, isoffreason, hoursvalue,
+                   COALESCE((SELECT array_agg(a.aliastext ORDER BY a.statuskeyaliasid)
+                             FROM payroll.payrollstatuskeyaliases a
+                             WHERE a.statuskeyid = k.statuskeyid), ARRAY[]::varchar[]) AS aliases
+            FROM   payroll.payrollstatuskeys k
             WHERE  companyid = :cid
-              AND  branchid  = :bid
               AND  isactive  = TRUE
             ORDER BY displayorder, keyname
         """),
-        {"cid": company_id, "bid": branch_id},
+        {"cid": company_id},
     )
     status_keys: list[DayGridStatusKey] = []
     status_key_map: dict[str, DayGridStatusKey] = {}  # statuscode -> key
@@ -192,6 +194,7 @@ async def get_day_grid(
             label=row["keyname"] or row["statuscode"],
             is_off_reason=bool(row["isoffreason"]),
             hours_value=row["hoursvalue"],
+            aliases=list(row["aliases"]),
         )
         status_keys.append(sk)
         status_key_map[row["statuscode"]] = sk
@@ -630,7 +633,7 @@ async def save_day_grid(
     # ── Permission: payroll.entry ─────────────────────────────────────────── #
     await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
     branch_id = period.branch_id
 
     # ── Active definitions: the only identities a save may name ──────────── #
@@ -699,33 +702,31 @@ async def save_day_grid(
                         status_code=422, detail=f"{definition.name}: {problem}")
             parsed_values[definition.payroll_period_definition_id] = quantity
 
-        # P1 #3: validate status key — raises 422 for invalid/inactive.
-        # Returns the full key row (with limit fields) or None when clearing.
-        # CP-2D1: if the submitted code matches the existing DraftLine value,
-        # the user is not changing the status — allow saves of deactivated keys
-        # that were applied before the key was deactivated.
-        allow_deactivated = False
-        if save_row.status_key:
-            existing_sk_q = await db.execute(
-                text("""
-                    SELECT notes FROM payroll.payrolldraftlines
-                    WHERE  payrollperiodid = :pid AND workdate = :dt AND driverassignmentid = :did
-                      AND  linetype = 'DailyStatus' AND status != 'Void'
-                    LIMIT 1
-                """),
-                {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
-            )
-            existing_sk_row = existing_sk_q.mappings().first()
-            if (
-                existing_sk_row is not None
-                and existing_sk_row["notes"] == save_row.status_key.strip()
-            ):
-                allow_deactivated = True
-        key_row = await _validate_status_key(
-            save_row.status_key, company_id, branch_id, db,
-            allow_deactivated=allow_deactivated,
-        )
-        validated_status_key = save_row.status_key  # None/blank = clear
+        # The typed Status text (name, alias or code) resolves Company-wide to exactly one
+        # Status, or the whole batch is rejected before any write (422). Re-saving the
+        # selection a day already holds is allowed even when its Status was deactivated since,
+        # but only when the text still names that same Status.
+        key_row = None
+        if save_row.status_key and save_row.status_key.strip():
+            try:
+                key_row = await resolve_status_input(company_id, save_row.status_key, db)
+            except HTTPException:
+                existing_key_id = (await db.execute(
+                    text("""
+                        SELECT statuskeyid FROM payroll.payrollperioddriverdayentrystate
+                        WHERE  payrollperiodid = :pid AND workdate = :dt
+                          AND  driverassignmentid = :did AND isvoided = FALSE
+                    """),
+                    {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
+                )).scalar_one_or_none()
+                if existing_key_id is None:
+                    raise
+                key_row = await resolve_status_input(
+                    company_id, save_row.status_key, db,
+                    allow_deactivated=True, key_id=existing_key_id,
+                )
+        # The legacy DailyStatus duplicate row carries the canonical technical code.
+        validated_status_key = key_row["statuscode"] if key_row is not None else None
 
         parsed_rows.append((save_row, driver_assignment_id, parsed_values, validated_status_key, key_row))
 
@@ -744,6 +745,16 @@ async def save_day_grid(
     for save_row in data.rows:
         await _assert_row_eligible(save_row.driver_assignment_id)
 
+    # The Statuses this batch selects are locked FOR SHARE until the transaction ends, so a
+    # concurrent catalog edit of their hours, off-day semantic, Category or rate column either
+    # committed before this save (and is seen) or waits and is then refused as in use. A Status
+    # deactivated since it was resolved cannot be newly selected.
+    await lock_selected_status_keys(
+        [(row["statuskeyid"], bool(row["isactive"])) for _, _, _, _, row in parsed_rows
+         if row is not None],
+        company_id, db,
+    )
+
     # ── Status key usage limit enforcement (under the Period lock) ─────── #
     # All existence/active checks passed. Enforce configured usage limits
     # batch-wide so that intra-batch writes that would collectively exceed a
@@ -751,20 +762,17 @@ async def save_day_grid(
     # The counts must be read only after the Period lock is held, so a
     # concurrent Status save for this Period has already committed or waits.
     all_batch_pairs: list[tuple] = [(r.driver_assignment_id, work_date) for r in data.rows]
-    batch_by_code: dict[str, list[int]] = {}
-    for _, drv_id, _, vsk, _ in parsed_rows:
-        if vsk:
-            batch_by_code.setdefault(vsk, []).append(drv_id)
+    batch_by_key: dict[int, list[int]] = {}
+    key_by_id: dict[int, dict] = {}
+    for _, drv_id, _, _, krow in parsed_rows:
+        if krow is not None:
+            batch_by_key.setdefault(krow["statuskeyid"], []).append(drv_id)
+            key_by_id[krow["statuskeyid"]] = krow
 
-    for status_code, batch_driver_assignment_ids in batch_by_code.items():
-        code_key_row = next(
-            krow
-            for _, _, _, vsk, krow in parsed_rows
-            if vsk == status_code and krow is not None
-        )
+    for status_key_id, batch_driver_assignment_ids in batch_by_key.items():
         await _enforce_status_key_limits(
-            status_code=status_code,
-            key_row=code_key_row,
+            key_row=key_by_id[status_key_id],
+            branch_id=branch_id,
             period_id=period_id,
             company_id=company_id,
             work_date=work_date,
@@ -1027,22 +1035,6 @@ async def save_day_grid(
             company_id, branch_id, period_id, driver_assignment_id, work_date, user_id, db,
             status_key_id=key_row["statuskeyid"] if key_row else None,
             note_text=notes_val if notes_val else None,
-        )
-
-        # CP-2D2: sync STATUS_PAYMENT draft line from the updated entry state.
-        # CP-2F: Draft (Prepared) is source-only — skip money derivation.
-        if period.status == "Draft":
-            continue
-        await _sync_status_payment_for_entry_state(
-            company_id=company_id,
-            branch_id=branch_id,
-            period_id=period_id,
-            driver_assignment_id=driver_assignment_id,
-            work_date=work_date,
-            status_key_id=key_row["statuskeyid"] if key_row else None,
-            user_id=user_id,
-            db=db,
-            currency=currency,
         )
 
     # Return the refreshed grid

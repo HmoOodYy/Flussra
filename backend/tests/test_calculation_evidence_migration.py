@@ -53,9 +53,10 @@ def pre_0089_database(pg_instance):
 
 
 @pytest.fixture(scope="module")
-def head_database(pg_instance):
+def evidence_database(pg_instance):
+    """A disposable database at 0089, the schema this migration produces."""
     with _disposable_database(pg_instance, "ev89head") as (env, dsn):
-        result = _alembic(env, "upgrade", "head")
+        result = _alembic(env, "upgrade", "0089")
         assert result.returncode == 0, result.stderr
         yield env, dsn
 
@@ -120,7 +121,7 @@ def test_0089_refuses_pre_existing_evidence_before_any_ddl(pre_0089_database, ki
         else:
             _seed_period(cursor, status="Locked")
 
-    result = _alembic(env, "upgrade", "head")
+    result = _alembic(env, "upgrade", "0089")
 
     assert result.returncode != 0
     assert "IMMUTABLE_EVIDENCE_REBUILD_REQUIRED" in result.stderr + result.stdout
@@ -140,20 +141,20 @@ def test_0089_applies_over_periods_that_carry_no_evidence(pre_0089_database):
     env, dsn = pre_0089_database
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         _seed_period(cursor, status="Open")
-    result = _alembic(env, "upgrade", "head")
+    result = _alembic(env, "upgrade", "0089")
     assert result.returncode == 0, result.stderr
     assert _version(dsn) == "0089"
 
 
-def test_0089_is_irreversible(head_database):
-    env, _ = head_database
+def test_0089_is_irreversible(evidence_database):
+    env, _ = evidence_database
     result = _alembic(env, "downgrade", "0088")
     assert result.returncode != 0
     assert "irreversible" in (result.stderr + result.stdout)
 
 
-def test_fresh_upgrade_reaches_the_immutable_evidence_shape(head_database):
-    _, dsn = head_database
+def test_fresh_upgrade_reaches_the_immutable_evidence_shape(evidence_database):
+    _, dsn = evidence_database
     assert _version(dsn) == "0089"
     assert {"payrollcalculationsnapshotcomponents", "payrollcalculationsnapshotminmaxevaluations",
             "payrollcalculationsnapshotminmaxrules"} <= _tables(dsn)
