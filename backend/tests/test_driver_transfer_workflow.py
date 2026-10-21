@@ -29,7 +29,6 @@ Note: the tests share a session-scoped DB + app (via conftest fixtures) but
 each test creates its OWN distinct driver/request so they are fully isolated.
 """
 import datetime
-import random
 import uuid
 
 import httpx
@@ -64,7 +63,13 @@ def auth(token: str) -> dict:
 
 
 def _rnd() -> str:
-    return f"{random.randint(10000, 99999)}"
+    """A suffix that is unique for the test session, for every uniqueness-constrained field.
+
+    The database is shared by the whole session and a company's DriverNumber, like a username,
+    must be unique, so a small random number range eventually collides. Twelve hex digits of a
+    random UUID are 48 random bits, which makes a collision across a session unrealistic.
+    """
+    return uuid.uuid4().hex[:12]
 
 
 async def _create_provisioned_user(
