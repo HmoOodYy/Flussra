@@ -297,7 +297,7 @@ async def test_a_viewer_reads_status_schedules_but_cannot_change_them(p3c_client
 
 
 # ---------------------------------------------------------------------------
-# The default column heals itself
+# The default column heals in the write paths only
 # ---------------------------------------------------------------------------
 
 def _remove_every_column(tenant) -> None:
@@ -336,18 +336,37 @@ def _default_columns(tenant) -> list[tuple]:
     """, (tenant.company_id,))
 
 
-async def test_listing_the_status_rate_columns_creates_the_missing_default(p3c_client, tenant):
+def _column_row_count(tenant) -> int:
+    return query(tenant, "SELECT count(*) FROM payroll.statusratecolumns WHERE companyid = %s",
+                 (tenant.company_id,))[0][0]
+
+
+async def test_reading_the_status_settings_never_creates_the_default_column(
+    p3c_client, tenant,
+):
+    """A read never writes: with no default column the column list is empty, and the Status and
+    limits listings change nothing either."""
+    seed_status_key(tenant, "Existing")
     _remove_every_column(tenant)
-    listing = await p3c_client.get("/settings/status-rate-columns", headers=tenant.admin)
-    assert listing.status_code == 200, listing.text
-    columns = listing.json()
-    assert [c["is_default"] for c in columns] == [True]
-    assert columns[0]["rate_definition_id"] and columns[0]["rate_component_definition_id"]
-    assert len(_default_columns(tenant)) == 1
-    # Idempotent: listing again creates nothing new.
-    again = await p3c_client.get("/settings/status-rate-columns", headers=tenant.admin)
-    assert [c["status_rate_column_id"] for c in again.json()] \
-        == [c["status_rate_column_id"] for c in columns]
+    counts_before = (_column_row_count(tenant), query(
+        tenant, "SELECT count(*) FROM payroll.ratedefinitions WHERE companyid = %s",
+        (tenant.company_id,))[0][0])
+
+    columns = await p3c_client.get("/settings/status-rate-columns", headers=tenant.admin)
+    assert columns.status_code == 200 and columns.json() == []
+    everything = await p3c_client.get(
+        "/settings/status-rate-columns", params={"include_inactive": "true"}, headers=tenant.admin)
+    assert everything.status_code == 200 and everything.json() == []
+    keys = await p3c_client.get("/settings/status-keys", headers=tenant.admin)
+    assert keys.status_code == 200 and [k["key_name"] for k in keys.json()] == ["Existing"]
+    limits = await p3c_client.get(
+        f"/settings/branches/{tenant.branch_a}/status-key-limits", headers=tenant.admin)
+    assert limits.status_code == 200, limits.text
+
+    assert (_column_row_count(tenant), query(
+        tenant, "SELECT count(*) FROM payroll.ratedefinitions WHERE companyid = %s",
+        (tenant.company_id,))[0][0]) == counts_before
+    assert _column_row_count(tenant) == 0
 
 
 async def test_creating_a_column_in_a_company_without_one_keeps_exactly_one_default(

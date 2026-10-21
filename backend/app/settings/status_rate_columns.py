@@ -78,8 +78,8 @@ async def list_status_rate_columns(
 ) -> list[StatusRateColumn]:
     """Every Status rate column of the Company (any user with access to the Company)."""
     await check_branch_access(company_id, user_id, db)
-    # A Company always has its default column: one inserted without it heals here.
-    await ensure_default_status_rate_column(company_id, db)
+    # A read never writes: a Company without its default column lists no columns until a
+    # writer (column create, Status create) heals it.
     where = "WHERE src.companyid = :cid" + (" AND src.isactive" if active_only else "")
     result = await db.execute(
         text(f"{_COLUMN_SELECT} {where} ORDER BY src.isdefault DESC, src.statusratecolumnid"),
