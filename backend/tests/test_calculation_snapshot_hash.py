@@ -47,8 +47,8 @@ def _line(source_id, amount, *, component_id, work_date=date(2040, 1, 2), kind="
         "LineType": {"DraftLine": "ORDINARY", "BonusEvent": "BONUS"}[kind], "LineScope": "Daily",
         "WorkDate": work_date, "PayrollPeriodDefinitionID": 11, "PayDefinitionID": 21,
         "RateDefinitionID": 31, "DriverRateScheduleID": 41, "CalculationStatus": "Calculated",
-        "CalculationVersion": "per-unit-v1", "StatusRateColumnID": None, "RateTypeID": None,
-        "DriverRateID": None, "BonusEventID": None, "Quantity": D("2"),
+        "CalculationVersion": "per-unit-v1", "StatusRateColumnID": None,
+        "BonusEventID": None, "Quantity": D("2"),
         "ResolvedRateAmount": D("1.5"), "CalculatedAmount": D(amount), "SourceEvidenceJSONB": {},
     }
 
@@ -210,8 +210,8 @@ def test_canonical_serialization_rejects_floats_and_unknown_types():
 
 def test_only_the_current_calculation_version_is_supported():
     require_supported_calculation_version(CURRENT_PAYROLL_CALCULATION_VERSION)
-    assert CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v2"
-    for version in ("payroll-calculation-v1", "payroll-calculation-v3", None, ""):
+    assert CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v3"
+    for version in ("payroll-calculation-v1", "payroll-calculation-v2", None, ""):
         with pytest.raises(UnsupportedCalculationVersionError):
             require_supported_calculation_version(version)
 

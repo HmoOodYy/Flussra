@@ -346,8 +346,9 @@ def test_frozen_status_evidence_also_locks_the_semantics(cur, company):
             INSERT INTO payroll.payrollcalculationsnapshotstatusentries
                 (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
                  driverassignmentid, workdate, payrollperioddriverdayentrystateid, statuskeyid,
-                 statuscodesnapshot, statuslabelsnapshot, statusisoffreasonsnapshot, driverid)
-            VALUES (1, %s, 1, 1, 1, DATE '2040-01-02', 1, %s, 'SK_X', 'X', TRUE, 1)
+                 statuscodesnapshot, statuslabelsnapshot, statusisoffreasonsnapshot, driverid,
+                     statushoursvaluesnapshot, statuscategorysnapshot)
+            VALUES (1, %s, 1, 1, 1, DATE '2040-01-02', 1, %s, 'SK_X', 'X', TRUE, 1, 8, 'Other')
         """, (company, key))
     _refused(cur, "UPDATE payroll.payrollstatuskeys SET hoursvalue = 3 WHERE statuskeyid = %s",
              (key,), contains="STATUS_KEY_IN_USE")

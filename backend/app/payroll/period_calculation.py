@@ -191,8 +191,6 @@ class _CalculationPacketLine:
     definition_name: str | None = None
     calculation_status: str | None = None
     rate_column_id: int | None = None
-    rate_type_id: int | None = None
-    driver_rate_id: int | None = None
     bonus_event_id: int | None = None
     source_evidence: dict[str, Any] | None = None
     snapshot_source_type: str | None = None
@@ -200,7 +198,7 @@ class _CalculationPacketLine:
     snapshot_calculated_amount: Decimal | None = None
     # The rate an ordinary line used, as resolved for its WorkDate: the target definition,
     # the whole schedule, the schedule value and its status and window. ``resolved_rate_amount``
-    # is the rate amount itself. Status lines keep rate_type_id / driver_rate_id instead.
+    # is the rate amount itself. A Status line carries its Status rate column in ``rate_column_id``.
     rate_definition_id: int | None = None
     driver_rate_schedule_id: int | None = None
     rate_component_definition_id: int | None = None

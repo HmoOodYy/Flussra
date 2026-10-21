@@ -227,7 +227,7 @@ async def test_an_unsupported_calculation_version_is_refused_by_every_frozen_rea
     await submit_and_approve(p3c_client, tenant, period)
     pid = period["payroll_period_id"]
     monkeypatch.setattr(
-        snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v3")
+        snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v4")
 
     for view in LIVE_REPORT_VIEWS:
         response = await p3c_client.get(f"/payroll/periods/{pid}/reports/{view}", headers=tenant.admin)
@@ -236,7 +236,7 @@ async def test_an_unsupported_calculation_version_is_refused_by_every_frozen_rea
     monkeypatch.undo()
     await finalize(p3c_client, tenant, period)
     monkeypatch.setattr(
-        snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v3")
+        snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v4")
     for view in ("overview", "reports/drivers", "rates-used", "audit"):
         response = await p3c_client.get(f"/payroll/finalized/{pid}/{view}", headers=tenant.admin)
         assert response.status_code == 422, (view, response.status_code, response.text[:300])

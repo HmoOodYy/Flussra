@@ -228,7 +228,7 @@ _EVIDENCE_TAMPERING = {
         "SNAPSHOT_HASH_MISMATCH"),
     "Status used-rate amount": (
         "UPDATE payroll.payrollcalculationsnapshotusedratedefinitions SET rateamountsnapshot = 999 "
-        "WHERE payrollcalculationsnapshotid = :snapshot AND evidencekind = 'StatusDriverRate'",
+        "WHERE payrollcalculationsnapshotid = :snapshot AND sourcetypesnapshot = 'StatusEntryState'",
         "SNAPSHOT_HASH_MISMATCH"),
     "Bonus report amount": (
         "UPDATE payroll.payrollcalculationsnapshotbonusevents SET amount = 999 "

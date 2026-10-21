@@ -24,8 +24,8 @@ from typing import Any
 # meaning or set of canonical hashed components, or the source/provenance
 # semantics inside the hash. New rates, company setup, wording and report
 # formatting do not bump it.
-CURRENT_PAYROLL_CALCULATION_VERSION = "payroll-calculation-v2"
-CURRENT_REPORT_EVIDENCE_VERSION = 2
+CURRENT_PAYROLL_CALCULATION_VERSION = "payroll-calculation-v3"
+CURRENT_REPORT_EVIDENCE_VERSION = 3
 
 # The label of the source/configuration packet hashed into SourceConfigHash.
 SOURCE_CONFIG_PACKET_CONTRACT = "payroll-source-config-v2"
@@ -130,8 +130,6 @@ _LINE_FIELDS = (
     "CalculationStatus",
     "CalculationVersion",
     "StatusRateColumnID",
-    "RateTypeID",
-    "DriverRateID",
     "BonusEventID",
     "Quantity",
     "ResolvedRateAmount",
@@ -150,11 +148,7 @@ _USED_RATE_FIELDS = (
     "RateDefinitionID",
     "PayDefinitionID",
     "RateComponentDefinitionID",
-    "RateTypeID",
-    "DriverRateID",
-    "RateTypeCodeSnapshot",
-    "RateTypeNameSnapshot",
-    "UnitNameSnapshot",
+    "StatusRateColumnID",
     "RateAmount",
     "EffectiveFrom",
     "EffectiveTo",
@@ -276,6 +270,8 @@ _STATUS_EVIDENCE_FIELDS = (
     "StatusCodeSnapshot",
     "StatusLabelSnapshot",
     "StatusIsOffReasonSnapshot",
+    "StatusHoursValueSnapshot",
+    "StatusCategorySnapshot",
 )
 _BONUS_EVIDENCE_FIELDS = (
     "PayrollBonusEventID",

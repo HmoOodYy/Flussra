@@ -201,8 +201,9 @@ class FinalizedOffDriversResponse(BaseModel):
 class FinalizedUsedRateDefinition(BaseModel):
     """A rate the finalized snapshot used, or a Min/Max rule it evaluated, as frozen.
 
-    ``evidence_kind`` is DriverRateSchedule (a target ordinary rate), StatusDriverRate (the
-    legacy Status rate) or DriverPayRule (a Min/Max rule of the frozen evaluation). For a rule
+    ``evidence_kind`` is DriverRateSchedule (a target schedule: ``source_type`` DraftLine for an
+    ordinary PayDefinition rate, StatusEntryState for a Status rate column rate) or DriverPayRule
+    (a Min/Max rule of the frozen evaluation). For a rule
     ``used_rate_definition_id`` is the id of its evidence row.
     """
     __module__ = "app.payroll.schemas"
@@ -219,11 +220,9 @@ class FinalizedUsedRateDefinition(BaseModel):
     rate_component_definition_id: int | None = None
     pay_definition_code: str | None = None
     pay_definition_label: str | None = None
-    rate_type_id: int | None = None
-    rate_type_code: str | None = None
-    rate_type_name: str | None = None
+    status_rate_column_id: int | None = None
+    status_rate_column_name: str | None = None
     unit_name: str | None = None
-    driver_rate_id: int | None = None
     driver_pay_rule_id: int | None = None
     rate_amount: Decimal | None = None
     effective_from: date | None = None

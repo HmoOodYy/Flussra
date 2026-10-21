@@ -23,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll.calculation.payable_rounding import PAYABLE_ROUNDING_VERSION, round_payable
+from app.payroll.calculation.per_unit import PerUnitInput, calculate_per_unit
 from app.payroll.snapshot_hash import (
     CURRENT_REPORT_EVIDENCE_VERSION,
     UnsupportedCalculationVersionError,
@@ -32,6 +33,7 @@ from app.payroll.snapshot_hash import (
     strict_json_equal,
     used_rate_fingerprint,
 )
+from app.settings.status_names import STATUS_CATEGORIES
 
 ZERO = Decimal("0")
 
@@ -138,7 +140,7 @@ async def load_snapshot_content(
                sl.payrollcalculationsnapshotcomponentid, sl.sourcetype, sl.sourceid, sl.linetype,
                sl.linescope, sl.workdate, sl.payrollperioddefinitionid, sl.paydefinitionid,
                sl.ratedefinitionid, sl.driverratescheduleid, sl.calculationstatus,
-               sl.calculationversion, sl.statusratecolumnid, sl.ratetypeid, sl.driverrateid,
+               sl.calculationversion, sl.statusratecolumnid,
                sl.bonuseventid, sl.quantity, sl.resolvedrateamount, sl.calculatedamount,
                sl.sourceevidencejsonb, sl.usedratedefinitionid,
                ur.definitionfingerprint AS usedratefingerprint
@@ -154,8 +156,7 @@ async def load_snapshot_content(
         SELECT payrollcalculationsnapshotusedratedefinitionid, companyid, branchid,
                payrollperiodid, driverassignmentid, driverid, definitionfingerprint,
                evidencekind, sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
-               paydefinitionid, ratecomponentdefinitionid, ratetypeid, driverrateid,
-               ratetypecodesnapshot, ratetypenamesnapshot, unitnamesnapshot,
+               paydefinitionid, statusratecolumnid, ratecomponentdefinitionid,
                rateamountsnapshot, effectivefromsnapshot, effectivetosnapshot,
                ratestatussnapshot, currencycodesnapshot, currencyminorunitdigitssnapshot
         FROM payroll.payrollcalculationsnapshotusedratedefinitions
@@ -165,7 +166,8 @@ async def load_snapshot_content(
     status_entries = (await db.execute(text("""
         SELECT payrollperioddriverdayentrystateid, companyid, branchid, payrollperiodid,
                driverassignmentid, driverid, workdate, statuskeyid, statuscodesnapshot,
-               statuslabelsnapshot, statusisoffreasonsnapshot
+               statuslabelsnapshot, statusisoffreasonsnapshot, statushoursvaluesnapshot,
+               statuscategorysnapshot
         FROM payroll.payrollcalculationsnapshotstatusentries
         WHERE payrollcalculationsnapshotid = :snapshot_id
         ORDER BY driverassignmentid, workdate, payrollperioddriverdayentrystateid
@@ -255,8 +257,6 @@ async def load_snapshot_content(
             "CalculationStatus": row["calculationstatus"],
             "CalculationVersion": row["calculationversion"],
             "StatusRateColumnID": row["statusratecolumnid"],
-            "RateTypeID": row["ratetypeid"],
-            "DriverRateID": row["driverrateid"],
             "BonusEventID": row["bonuseventid"],
             "Quantity": _optional_decimal(row["quantity"]),
             "ResolvedRateAmount": _optional_decimal(row["resolvedrateamount"]),
@@ -278,12 +278,8 @@ async def load_snapshot_content(
         "DriverRateScheduleID": row["driverratescheduleid"],
         "RateDefinitionID": row["ratedefinitionid"],
         "PayDefinitionID": row["paydefinitionid"],
+        "StatusRateColumnID": row["statusratecolumnid"],
         "RateComponentDefinitionID": row["ratecomponentdefinitionid"],
-        "RateTypeID": row["ratetypeid"],
-        "DriverRateID": row["driverrateid"],
-        "RateTypeCodeSnapshot": row["ratetypecodesnapshot"],
-        "RateTypeNameSnapshot": row["ratetypenamesnapshot"],
-        "UnitNameSnapshot": row["unitnamesnapshot"],
         "RateAmount": _optional_decimal(row["rateamountsnapshot"]),
         "EffectiveFrom": row["effectivefromsnapshot"],
         "EffectiveTo": row["effectivetosnapshot"],
@@ -303,6 +299,8 @@ async def load_snapshot_content(
         "StatusCodeSnapshot": row["statuscodesnapshot"],
         "StatusLabelSnapshot": row["statuslabelsnapshot"],
         "StatusIsOffReasonSnapshot": bool(row["statusisoffreasonsnapshot"]),
+        "StatusHoursValueSnapshot": _decimal(row["statushoursvaluesnapshot"]),
+        "StatusCategorySnapshot": row["statuscategorysnapshot"],
     } for row in status_entries]
     report_bonus_events = [{
         "PayrollBonusEventID": int(row["payrollbonuseventid"]),
@@ -547,8 +545,10 @@ def reconcile_used_rate_evidence(content: dict[str, Any]) -> None:
       belong to the snapshot scope, currency and a Driver total of the snapshot;
     * every ordinary line links to a schedule row of its own DriverAssignment that agrees on
       the schedule, the rate definition, the pay definition and the resolved rate amount;
-    * every Status line links to a Status DriverRate row that agrees on the DriverRate, the
-      RateType and the rate amount; a Bonus line links to no rate;
+    * every Status line links to a schedule row of its own DriverAssignment owned by its Status
+      rate column that agrees on the schedule, the rate definition, the Status rate column and
+      the resolved rate amount; a Bonus line links to no rate;
+    * a schedule row has exactly one owner, a PayDefinition (ordinary) or a Status rate column;
     * every row is used by at least one line (no orphans).
     """
     used_rates = content.get("UsedRates", [])
@@ -567,6 +567,8 @@ def reconcile_used_rate_evidence(content: dict[str, Any]) -> None:
             or drivers.get(rate["DriverAssignmentID"]) != rate["DriverID"]
         ):
             raise _used_rate_error("a used-rate row is outside the snapshot scope.")
+        if (rate["PayDefinitionID"] is None) == (rate["StatusRateColumnID"] is None):
+            raise _used_rate_error("a used-rate row does not have exactly one owner.")
 
     used: set[str] = set()
     for total in content["DriverTotals"]:
@@ -587,14 +589,17 @@ def reconcile_used_rate_evidence(content: dict[str, Any]) -> None:
                     and rate["DriverRateScheduleID"] == line["DriverRateScheduleID"]
                     and rate["RateDefinitionID"] == line["RateDefinitionID"]
                     and rate["PayDefinitionID"] == line["PayDefinitionID"]
+                    and rate["StatusRateColumnID"] is None
                     and rate["RateAmount"] == line["ResolvedRateAmount"]
                 )
             elif source_type == "StatusEntryState":
                 agrees = (
-                    rate["EvidenceKind"] == "StatusDriverRate"
+                    rate["EvidenceKind"] == "DriverRateSchedule"
                     and rate["SourceType"] == "StatusEntryState"
-                    and rate["DriverRateID"] == line["DriverRateID"]
-                    and rate["RateTypeID"] == line["RateTypeID"]
+                    and rate["DriverRateScheduleID"] == line["DriverRateScheduleID"]
+                    and rate["RateDefinitionID"] == line["RateDefinitionID"]
+                    and rate["StatusRateColumnID"] == line["StatusRateColumnID"]
+                    and rate["PayDefinitionID"] is None
                     and rate["RateAmount"] == line["ResolvedRateAmount"]
                 )
             else:
@@ -631,7 +636,9 @@ def reconcile_report_evidence(content: dict[str, Any]) -> None:
     * the Bonus events equal the BONUS lines one to one (event, DriverAssignment, Driver,
       amount) and carry the snapshot currency;
     * each STATUS line's entry state is a Status entry of the same DriverAssignment, WorkDate
-      and Status key;
+      and Status key, its quantity is the hours frozen on that entry, and its amount is the
+      per-unit calculation of those hours at its resolved rate;
+    * every Status entry freezes hours within a day and a Category of the fixed set;
     * no work date counted by a Min/Max evaluation is an off-reason Status entry of that Driver;
     * every Driver named by the evidence is the Driver of that DriverAssignment's total.
     """
@@ -697,6 +704,28 @@ def reconcile_report_evidence(content: dict[str, Any]) -> None:
                 raise _report_error(
                     "REPORT_EVIDENCE_INTEGRITY_ERROR",
                     "a Status line is not a Status entry of the report evidence.")
+            if line["Quantity"] != entry["StatusHoursValueSnapshot"]:
+                raise _report_error(
+                    "REPORT_EVIDENCE_INTEGRITY_ERROR",
+                    "a Status line quantity is not the hours frozen on its Status entry.")
+            if (
+                line["ResolvedRateAmount"] is None
+                or calculate_per_unit(PerUnitInput(
+                    quantity=entry["StatusHoursValueSnapshot"],
+                    rate_amount=line["ResolvedRateAmount"],
+                )).calculated_amount != line["CalculatedAmount"]
+            ):
+                raise _report_error(
+                    "REPORT_EVIDENCE_INTEGRITY_ERROR",
+                    "a Status line amount is not its frozen hours times its resolved rate.")
+    if any(
+        not (ZERO <= entry["StatusHoursValueSnapshot"] <= Decimal("24"))
+        or entry["StatusCategorySnapshot"] not in STATUS_CATEGORIES
+        for entry in statuses
+    ):
+        raise _report_error(
+            "REPORT_EVIDENCE_INTEGRITY_ERROR",
+            "a Status entry freezes hours or a Category outside the allowed values.")
     off_days = {
         (entry["DriverAssignmentID"], entry["WorkDate"])
         for entry in statuses if entry["StatusIsOffReasonSnapshot"]

@@ -42,7 +42,7 @@ def _content(**overrides):
     total.update(overrides)
     return {
         "CompanyID": 1, "BranchID": 1, "PayrollPeriodID": 1,
-        "CalculationVersion": "payroll-calculation-v2", "SourceConfigHash": "0" * 64,
+        "CalculationVersion": "payroll-calculation-v3", "SourceConfigHash": "0" * 64,
         "DriverTotals": [total],
     }
 
@@ -90,11 +90,11 @@ def test_profile_addressed_routes_were_replaced_by_assignment_routes():
     # Ordinary compensation belongs to the permanent Driver (Durable Driver Stage 2).
     assert "GET /compensation/drivers/{driver_id}/pay-rates" in mounted
     assert "GET /compensation/driver-assignments/{driver_assignment_id}/pay-rates" not in mounted
-    assert "GET /payroll/driver-assignments/{driver_assignment_id}/rate-matrix" in mounted
-    # Pay rules belong to the permanent Driver; only status rates stay assignment-addressed.
+    # Status rates are Driver-owned schedules too: no rate route is assignment-addressed.
+    assert not [r for r in mounted if "driver-assignments" in r and "rate" in r]
+    # Pay rules belong to the permanent Driver.
     assert "GET /payroll/drivers/{driver_id}/pay-rules" in mounted
     assert "GET /payroll/driver-assignments/{driver_assignment_id}/pay-rules" not in mounted
-    assert "GET /payroll/driver-assignments/rates-summary" in mounted
     # No compensation route is addressed by an assignment id: those are the permanent
     # Driver's. Of the payroll routes only pay rules take a {driver_id}.
     payroll_like = [r for r in mounted if " /payroll" in r]

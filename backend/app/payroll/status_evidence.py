@@ -17,9 +17,9 @@ def status_entries_from_content(content: dict[str, Any]) -> list[dict[str, Any]]
     """The Status report evidence of a verified snapshot.
 
     One dict per captured entry, using exactly the fields the evidence captures (no note text,
-    no hours value, no void state):
+    no void state):
         {driver_assignment_id, driver_id, work_date, status_key_id, status_code, status_label,
-         is_off_reason}
+         is_off_reason, hours_value, category}
 
     The content comes from ``verify_snapshot``: the report evidence is verified there (version,
     its own hash and its overlaps with the financial evidence), so a reader never queries the
@@ -33,6 +33,8 @@ def status_entries_from_content(content: dict[str, Any]) -> list[dict[str, Any]]
         "status_code": entry["StatusCodeSnapshot"],
         "status_label": entry["StatusLabelSnapshot"],
         "is_off_reason": entry["StatusIsOffReasonSnapshot"],
+        "hours_value": entry["StatusHoursValueSnapshot"],
+        "category": entry["StatusCategorySnapshot"],
     } for entry in content["ReportEvidence"]["StatusEntries"]]
 
 
@@ -109,6 +111,7 @@ def report_evidence_from_content(
         "driver_assignment_id": row["driver_assignment_id"], "driver_id": row["driver_id"],
         "work_date": row["work_date"], "status_key_id": row["status_key_id"],
         "code": row["status_code"], "label": row["status_label"], "is_off": row["is_off_reason"],
+        "hours_value": row["hours_value"], "category": row["category"],
     } for row in status_entries_from_content(content)]
     bonuses = [{
         "bonus_event_id": event["PayrollBonusEventID"],

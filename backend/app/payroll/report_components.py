@@ -74,10 +74,13 @@ def aggregate_definition_amounts(
 
 
 def summarize_status_entries(statuses: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
-    grouped: dict[int, dict[tuple[str, str, bool], int]] = defaultdict(lambda: defaultdict(int))
+    grouped: dict[int, dict[tuple, int]] = defaultdict(lambda: defaultdict(int))
     for status in statuses:
-        grouped[status["driver_assignment_id"]][(status["code"], status["label"], status["is_off"])] += 1
-    return {driver_assignment_id: [{"code": key[0], "label": key[1], "is_off": key[2], "count": count}
+        grouped[status["driver_assignment_id"]][(
+            status["code"], status["label"], status["is_off"],
+            status["hours_value"], status["category"])] += 1
+    return {driver_assignment_id: [{"code": key[0], "label": key[1], "is_off": key[2],
+                                    "hours_value": key[3], "category": key[4], "count": count}
                         for key, count in values.items()] for driver_assignment_id, values in grouped.items()}
 
 

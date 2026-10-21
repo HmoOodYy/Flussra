@@ -77,6 +77,12 @@ DRIVER_COMPENSATION_CONTEXT_TRIGGERS = tuple(
     TriggerIdentity("payroll", table, "trg_drivercompensationcontextwritable")
     for table in ("driverrateschedules", "driverpayrules")
 )
+# An Approved Driver rate schedule and its values are history: the delete guards refuse to
+# remove them. A test that seeded one only as evidence scaffolding retires it with exactly these.
+DRIVER_RATE_SCHEDULE_HISTORY_TRIGGERS = (
+    TriggerIdentity("payroll", "driverrateschedules", "trg_driverrateschedules_beforedelete"),
+    TriggerIdentity("payroll", "driverrateschedulevalues", "trg_driverrateschedulevalues_pendingonly"),
+)
 # The pair historically suspended to retire finalized history or force a status.
 FINALIZED_HISTORY_TRIGGERS = (FINAL_LINE_IMMUTABLE_TRIGGER, PERIOD_STATUS_REVERT_TRIGGER)
 

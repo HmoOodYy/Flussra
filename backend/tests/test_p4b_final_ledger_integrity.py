@@ -7,7 +7,6 @@ controlled finalization path writes them (through the insert-guard setting).
 """
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 
 import psycopg2
@@ -262,48 +261,3 @@ async def test_finalized_period_discovery_is_minimal_and_scoped(
     assert (await p3c_client.get(
         "/payroll/finalized", headers=make_driver_self_user(tenant, ["ledger.view"])
     )).status_code == 403
-
-
-# ---------------------------------------------------------------------------
-# A DriverRate referenced by the final ledger is protected (Status rates still use them)
-# ---------------------------------------------------------------------------
-
-def _driver_rate(tenant, driver_assignment_id: int) -> int:
-    rate_type_id = query(tenant, "SELECT ratetypeid FROM payroll.ratetypes "
-                                 "WHERE companyid IS NULL ORDER BY ratetypeid LIMIT 1")[0][0]
-    return query(tenant, """
-        INSERT INTO payroll.driverrates
-            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom)
-        VALUES (%s, %s, %s, %s, 15, DATE '2000-01-01') RETURNING driverrateid
-    """, (tenant.company_id, tenant.branch_a, driver_assignment_id, rate_type_id))[0][0]
-
-
-async def test_a_driver_rate_used_by_a_final_line_cannot_be_voided_changed_or_deleted(
-    p3c_client, p3c_engine, tenant,
-):
-    period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
-    period_id = period["payroll_period_id"]
-    used, unused = _driver_rate(tenant, tenant.driver_a), _driver_rate(tenant, tenant.driver_a2)
-    force_status(tenant, period_id, "Approved")
-    # The finalized snapshot records the Status rate its line used (the used-rate evidence).
-    await _insert_final_line(
-        p3c_engine, tenant, period_id, amount=Decimal("15"), work_date=date(2000, 1, 5),
-        driver_rate_id=used)
-
-    with pytest.raises(psycopg2.errors.RestrictViolation, match="driverrate_void_guard"):
-        query(tenant, "UPDATE payroll.driverrates SET status = 'Voided' WHERE driverrateid = %s",
-              (used,))
-    with pytest.raises(psycopg2.errors.RestrictViolation):
-        query(tenant, "UPDATE payroll.driverrates SET amount = 99 WHERE driverrateid = %s",
-              (used,))
-    with pytest.raises(psycopg2.errors.RestrictViolation):
-        query(tenant, "DELETE FROM payroll.driverrates WHERE driverrateid = %s", (used,))
-    assert query(tenant, "SELECT amount FROM payroll.driverrates WHERE driverrateid = %s",
-                 (used,)) == [(Decimal("15"),)]
-
-    # An unreferenced rate stays fully mutable.
-    query(tenant, "UPDATE payroll.driverrates SET amount = 20 WHERE driverrateid = %s", (unused,))
-    query(tenant, "UPDATE payroll.driverrates SET status = 'Voided' WHERE driverrateid = %s",
-          (unused,))
-    assert query(tenant, "SELECT status FROM payroll.driverrates WHERE driverrateid = %s",
-                 (unused,)) == [("Voided",)]

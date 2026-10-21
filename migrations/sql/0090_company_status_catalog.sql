@@ -5,7 +5,9 @@
 -- shared by every Branch. Usage limits move to a Branch x Status key table. A Status rate
 -- column is owned by the Company and owns one scalar RateDefinition, so a Driver's Status rate
 -- values are Driver-owned rate schedules like any other earning, and a permanent transfer needs
--- no copy.
+-- no copy. Status calculation evidence follows (calculation contract v3): a Status line freezes
+-- the target rate provenance (Status rate column, RateDefinition, exact Driver schedule) with
+-- the hours as its quantity, and Status report entries freeze the hours and Category in force.
 --
 -- This pre-production cutover keeps no Branch-owned Status model: the migration refuses to run
 -- while a Status key, a Status selection, a calculation snapshot, a final line or a
@@ -729,3 +731,269 @@ BEGIN
     END LOOP;
 END
 $company_defaults$;
+
+-- ---------------------------------------------------------------------------
+-- 11. Full-day-off integrity backstop
+-- ---------------------------------------------------------------------------
+--
+-- A Status that counts as a full day off (IsOffReason) cannot coexist, for one DriverAssignment
+-- and WorkDate, with a nonzero ordinary daily quantity (a non-void draft line with a
+-- PayrollPeriodDefinitionID and Quantity > 0). The application refuses it first, under the
+-- Period mutation lock, in every writer of either side. These triggers repeat the rule for a
+-- writer that bypasses the application: each write takes an advisory lock on the
+-- (period, assignment, date) slot and then reads the other side, so two transactions that would
+-- together create the conflict serialize and the second sees the first one's committed row.
+
+CREATE FUNCTION payroll.fn_guard_status_off_work()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_Period INTEGER;
+    v_Assignment INTEGER;
+    v_Date DATE;
+BEGIN
+    IF TG_TABLE_NAME = 'payrolldraftlines' THEN
+        IF NEW.PayrollPeriodDefinitionID IS NULL OR NEW.Status = 'Void' OR NEW.Quantity <= 0 THEN
+            RETURN NULL;
+        END IF;
+    ELSE
+        IF NEW.StatusKeyID IS NULL OR NEW.IsVoided THEN
+            RETURN NULL;
+        END IF;
+    END IF;
+    v_Period := NEW.PayrollPeriodID;
+    v_Assignment := NEW.DriverAssignmentID;
+    v_Date := NEW.WorkDate;
+
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended('flussra.status-day.' || v_Period::TEXT || '.' || v_Assignment::TEXT
+                         || '.' || v_Date::TEXT, 0));
+
+    IF EXISTS (
+        SELECT 1
+          FROM payroll.PayrollPeriodDriverDayEntryState e
+          JOIN payroll.PayrollStatusKeys k
+            ON k.StatusKeyID = e.StatusKeyID AND k.CompanyID = e.CompanyID
+         WHERE e.PayrollPeriodID = v_Period AND e.DriverAssignmentID = v_Assignment
+           AND e.WorkDate = v_Date AND NOT e.IsVoided AND k.IsOffReason
+    ) AND EXISTS (
+        SELECT 1
+          FROM payroll.PayrollDraftLines d
+         WHERE d.PayrollPeriodID = v_Period AND d.DriverAssignmentID = v_Assignment
+           AND d.WorkDate = v_Date AND d.Status <> 'Void'
+           AND d.PayrollPeriodDefinitionID IS NOT NULL AND d.Quantity > 0
+    ) THEN
+        RAISE EXCEPTION 'STATUS_OFF_WORK_CONFLICT: a full-day-off Status and ordinary work cannot share a day.'
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NULL;
+END
+$function$;
+
+CREATE TRIGGER trg_PayrollDraftLines_StatusOffWork
+    AFTER INSERT OR UPDATE OF Quantity, Status, PayrollPeriodDefinitionID
+    ON payroll.PayrollDraftLines
+    FOR EACH ROW EXECUTE FUNCTION payroll.fn_guard_status_off_work();
+
+CREATE TRIGGER trg_PayrollPeriodDriverDayEntryState_StatusOffWork
+    AFTER INSERT OR UPDATE OF StatusKeyID, IsVoided
+    ON payroll.PayrollPeriodDriverDayEntryState
+    FOR EACH ROW EXECUTE FUNCTION payroll.fn_guard_status_off_work();
+
+-- ---------------------------------------------------------------------------
+-- 12. The STATUS_PAYMENT projection is retired
+-- ---------------------------------------------------------------------------
+
+DROP INDEX payroll.ux_draftlines_statuspayment_slot;
+
+-- ---------------------------------------------------------------------------
+-- 13. Calculation contract v3: Status lines carry target rate provenance
+-- ---------------------------------------------------------------------------
+--
+-- Status pay is hours x the Driver's schedule of the Status rate column's RateDefinition, so a
+-- Status line freezes (StatusRateColumnID, RateDefinitionID, DriverRateScheduleID) like an
+-- ordinary line freezes its definition and schedule, with the hours as the quantity. The
+-- legacy RateTypeID / DriverRateID identity of a Status rate, and the StatusDriverRate evidence
+-- kind, are gone. The report evidence entries freeze the hours and Category of the Status
+-- beside its canonical label and off semantic. The snapshot version names the new contract.
+
+ALTER TABLE payroll.PayrollCalculationSnapshots
+    DROP CONSTRAINT ck_PayrollCalculationSnapshots_CalculationVersion;
+ALTER TABLE payroll.PayrollCalculationSnapshots
+    ADD CONSTRAINT ck_PayrollCalculationSnapshots_CalculationVersion
+        CHECK (CalculationVersion = 'payroll-calculation-v3');
+
+ALTER TABLE payroll.PayrollCalculationSnapshotLines
+    DROP CONSTRAINT ck_PayrollCalculationSnapshotLines_Source;
+ALTER TABLE payroll.PayrollCalculationSnapshotLines
+    DROP COLUMN RateTypeID,
+    DROP COLUMN DriverRateID;
+
+ALTER TABLE payroll.PayrollCalculationSnapshotLines
+    ADD CONSTRAINT fk_PayrollCalculationSnapshotLines_StatusRateDefinition
+        FOREIGN KEY (RateDefinitionID, StatusRateColumnID)
+        REFERENCES payroll.RateDefinitions (RateDefinitionID, StatusRateColumnID),
+    ADD CONSTRAINT ck_PayrollCalculationSnapshotLines_Source
+        CHECK (
+            (SourceType = 'DraftLine' AND LineType = 'ORDINARY' AND LineScope = 'Daily'
+                AND SourceID IS NOT NULL AND WorkDate IS NOT NULL AND Quantity IS NOT NULL
+                AND PayrollPeriodDefinitionID IS NOT NULL AND PayDefinitionID IS NOT NULL
+                AND RateDefinitionID IS NOT NULL AND DriverRateScheduleID IS NOT NULL
+                AND CalculationStatus = 'Calculated' AND CalculationVersion IS NOT NULL
+                AND ResolvedRateAmount IS NOT NULL AND UsedRateDefinitionID IS NOT NULL
+                AND StatusRateColumnID IS NULL AND BonusEventID IS NULL)
+         OR (SourceType = 'StatusEntryState' AND LineType = 'STATUS' AND LineScope = 'Daily'
+                AND SourceID IS NOT NULL AND WorkDate IS NOT NULL AND Quantity IS NOT NULL
+                AND StatusRateColumnID IS NOT NULL AND RateDefinitionID IS NOT NULL
+                AND DriverRateScheduleID IS NOT NULL
+                AND CalculationStatus = 'Calculated' AND CalculationVersion IS NOT NULL
+                AND ResolvedRateAmount IS NOT NULL AND UsedRateDefinitionID IS NOT NULL
+                AND PayrollPeriodDefinitionID IS NULL AND PayDefinitionID IS NULL
+                AND BonusEventID IS NULL)
+         OR (SourceType = 'BonusEvent' AND LineType = 'BONUS' AND LineScope = 'Period'
+                AND SourceID IS NOT NULL AND BonusEventID IS NOT NULL AND WorkDate IS NULL
+                AND Quantity IS NULL AND ResolvedRateAmount IS NULL
+                AND UsedRateDefinitionID IS NULL
+                AND PayrollPeriodDefinitionID IS NULL AND PayDefinitionID IS NULL
+                AND RateDefinitionID IS NULL AND DriverRateScheduleID IS NULL
+                AND CalculationStatus IS NULL AND CalculationVersion IS NULL
+                AND StatusRateColumnID IS NULL)
+        );
+
+-- Used-rate evidence: one kind, the Driver rate schedule, owned by a PayDefinition (ordinary
+-- lines) or a Status rate column (Status lines).
+ALTER TABLE payroll.PayrollCalculationSnapshotUsedRateDefinitions
+    DROP CONSTRAINT ck_PayrollCalculationSnapshotUsedRateDefinitions_Kind;
+ALTER TABLE payroll.PayrollCalculationSnapshotUsedRateDefinitions
+    DROP COLUMN RateTypeID,
+    DROP COLUMN DriverRateID,
+    DROP COLUMN RateTypeCodeSnapshot,
+    DROP COLUMN RateTypeNameSnapshot,
+    DROP COLUMN UnitNameSnapshot,
+    ADD COLUMN StatusRateColumnID INTEGER;
+
+ALTER TABLE payroll.PayrollCalculationSnapshotUsedRateDefinitions
+    ADD CONSTRAINT fk_PayrollCalculationSnapshotUsedRateDefinitions_StatusRateDefinition
+        FOREIGN KEY (RateDefinitionID, StatusRateColumnID)
+        REFERENCES payroll.RateDefinitions (RateDefinitionID, StatusRateColumnID),
+    ADD CONSTRAINT ck_PayrollCalculationSnapshotUsedRateDefinitions_Kind
+        CHECK (EvidenceKind = 'DriverRateSchedule'
+               AND DriverRateScheduleID IS NOT NULL AND RateDefinitionID IS NOT NULL
+               AND RateComponentDefinitionID IS NOT NULL AND RateAmountSnapshot IS NOT NULL
+               AND EffectiveFromSnapshot IS NOT NULL AND RateStatusSnapshot IS NOT NULL
+               AND num_nonnulls(PayDefinitionID, StatusRateColumnID) = 1
+               AND ((SourceTypeSnapshot = 'DraftLine' AND PayDefinitionID IS NOT NULL)
+                    OR (SourceTypeSnapshot = 'StatusEntryState' AND StatusRateColumnID IS NOT NULL)));
+
+CREATE OR REPLACE FUNCTION payroll.fn_guard_used_rate_definition_scope()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_company_id INTEGER;
+    v_branch_id INTEGER;
+    v_period_id INTEGER;
+    v_driver_id INTEGER;
+    v_rate_definition_id INTEGER;
+BEGIN
+    SELECT companyid, branchid, payrollperiodid
+    INTO v_company_id, v_branch_id, v_period_id
+    FROM payroll.payrollcalculationsnapshots
+    WHERE payrollcalculationsnapshotid = NEW.payrollcalculationsnapshotid;
+
+    IF v_company_id IS DISTINCT FROM NEW.companyid
+       OR v_branch_id IS DISTINCT FROM NEW.branchid
+       OR v_period_id IS DISTINCT FROM NEW.payrollperiodid THEN
+        RAISE EXCEPTION
+            'used_rate_definition_scope: snapshot scope does not match definition scope'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    -- A rate schedule belongs to the permanent Driver, so it is in scope for any assignment of
+    -- that Driver whatever Branch the work was attributed to.
+    SELECT companyid, driverid, ratedefinitionid
+    INTO v_company_id, v_driver_id, v_rate_definition_id
+    FROM payroll.driverrateschedules
+    WHERE driverratescheduleid = NEW.driverratescheduleid;
+
+    IF v_company_id IS DISTINCT FROM NEW.companyid
+       OR v_driver_id IS DISTINCT FROM NEW.driverid
+       OR v_rate_definition_id IS DISTINCT FROM NEW.ratedefinitionid THEN
+        RAISE EXCEPTION
+            'used_rate_definition_scope: driver rate schedule does not match definition scope'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION payroll.fn_guard_snapshot_line_used_rate_definition_scope()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_line_snapshot_id BIGINT;
+    v_line_assignment_id INTEGER;
+    v_definition RECORD;
+BEGIN
+    SELECT payrollcalculationsnapshotid, driverassignmentid
+    INTO v_line_snapshot_id, v_line_assignment_id
+    FROM payroll.payrollcalculationdrivertotals
+    WHERE payrollcalculationdrivertotalid = NEW.payrollcalculationdrivertotalid;
+
+    IF NEW.usedratedefinitionid IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT * INTO v_definition
+    FROM payroll.payrollcalculationsnapshotusedratedefinitions
+    WHERE payrollcalculationsnapshotusedratedefinitionid = NEW.usedratedefinitionid;
+
+    IF v_line_snapshot_id IS DISTINCT FROM v_definition.payrollcalculationsnapshotid THEN
+        RAISE EXCEPTION
+            'snapshot_line_used_rate_definition_scope: definition belongs to another snapshot'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    -- The evidence row names the same assignment, the same schedule and definition, the same
+    -- owner (ordinary: the source type and PayDefinition, Status: the Status rate column) and
+    -- the rate amount the line recorded.
+    IF v_line_assignment_id IS DISTINCT FROM v_definition.driverassignmentid
+       OR v_definition.rateamountsnapshot IS DISTINCT FROM NEW.resolvedrateamount
+       OR v_definition.evidencekind IS DISTINCT FROM 'DriverRateSchedule'
+       OR v_definition.sourcetypesnapshot IS DISTINCT FROM NEW.sourcetype
+       OR v_definition.driverratescheduleid IS DISTINCT FROM NEW.driverratescheduleid
+       OR v_definition.ratedefinitionid IS DISTINCT FROM NEW.ratedefinitionid
+       OR v_definition.paydefinitionid IS DISTINCT FROM NEW.paydefinitionid
+       OR v_definition.statusratecolumnid IS DISTINCT FROM NEW.statusratecolumnid THEN
+        RAISE EXCEPTION
+            'snapshot_line_used_rate_definition_scope: definition does not describe the line rate'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$function$;
+
+-- The frozen evidence no longer names a legacy DriverRate, so none is used in finalized payroll
+-- (the legacy rate tables and their guards go with the other legacy rate structures).
+CREATE OR REPLACE FUNCTION payroll.fn_DriverRateUsedInFinalizedPayroll(p_DriverRateID BIGINT)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+AS $$
+    SELECT FALSE
+$$;
+
+-- Report evidence of a Status entry also freezes the hours and the Category in force.
+ALTER TABLE payroll.PayrollCalculationSnapshotStatusEntries
+    ADD COLUMN StatusHoursValueSnapshot NUMERIC(5,2) NOT NULL,
+    ADD COLUMN StatusCategorySnapshot   VARCHAR(50)  NOT NULL;
+ALTER TABLE payroll.PayrollCalculationSnapshotStatusEntries
+    ADD CONSTRAINT ck_PayrollCalculationSnapshotStatusEntries_Hours
+        CHECK (StatusHoursValueSnapshot >= 0 AND StatusHoursValueSnapshot <= 24),
+    ADD CONSTRAINT ck_PayrollCalculationSnapshotStatusEntries_Category
+        CHECK (StatusCategorySnapshot IN ('Vacation', 'Sick', 'Bereavement', 'Jury Duty',
+                                          'Personal', 'Holiday', 'Unpaid', 'Other'));

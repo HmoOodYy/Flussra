@@ -12,8 +12,6 @@ import psycopg2
 import pytest
 from psycopg2 import sql
 
-from app.db.schema_guard import _check_calculation_evidence_v2
-
 _ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -170,7 +168,6 @@ def test_fresh_upgrade_reaches_the_immutable_evidence_shape(evidence_database):
             "componentkind"} <= _columns(dsn, "payrollfinallines")
 
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        assert _check_calculation_evidence_v2(cursor) == []
         cursor.execute("""
             SELECT count(*) FROM pg_trigger t
             JOIN pg_class c ON c.oid = t.tgrelid

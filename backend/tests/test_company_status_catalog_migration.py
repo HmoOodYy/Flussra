@@ -12,7 +12,7 @@ import psycopg2
 import pytest
 from psycopg2 import sql
 
-from app.db.schema_guard import _check_company_status_catalog
+from app.db.schema_guard import _check_calculation_evidence, _check_company_status_catalog
 from tests.db_state import replica_replication_role_sync
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -272,6 +272,7 @@ def test_fresh_upgrade_reaches_the_company_status_catalog_shape(head_database):
     assert {"paydefinitionid", "statusratecolumnid"} <= _columns(dsn, "driverrateschedules")
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         assert _check_company_status_catalog(cursor) == []
+        assert _check_calculation_evidence(cursor) == []
         cursor.execute("""
             SELECT is_nullable FROM information_schema.columns
             WHERE table_schema = 'payroll' AND table_name = 'driverrateschedules'

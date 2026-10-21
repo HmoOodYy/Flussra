@@ -314,10 +314,9 @@ async def _finalized_used_rate_definitions(
                dt.drivernamesnapshot, dt.drivernumbersnapshot,
                d.evidencekind, d.sourcetypesnapshot,
                d.driverratescheduleid, d.ratedefinitionid, d.paydefinitionid,
+               d.statusratecolumnid,
                d.ratecomponentdefinitionid, ppd.definitioncodesnapshot, ppd.definitionnamesnapshot,
-               ppd.unitsnapshot,
-               d.ratetypeid, d.ratetypecodesnapshot, d.ratetypenamesnapshot, d.unitnamesnapshot,
-               d.driverrateid, d.rateamountsnapshot,
+               ppd.unitsnapshot, d.rateamountsnapshot,
                d.effectivefromsnapshot, d.effectivetosnapshot, d.ratestatussnapshot,
                d.definitionfingerprint, u.snapshot_line_ids, u.line_use_count
         FROM payroll.payrollcalculationsnapshotusedratedefinitions d
@@ -352,6 +351,14 @@ async def _finalized_used_rate_definitions(
     # A definition not linked from a financial snapshot line cannot be truthfully called used.
     if int(count) != len(rows):
         return [], _availability("UNAVAILABLE", "RATE_EVIDENCE_LINKAGE_UNAVAILABLE")
+    # Status rate columns are labelled by the name frozen on the Status component, never by the
+    # live column.
+    column_names = {
+        (total["DriverAssignmentID"], component["StatusRateColumnID"]):
+            component["StatusRateColumnNameSnapshot"]
+        for total in snapshot["content"]["DriverTotals"]
+        for component in total["Components"] if component["ComponentKind"] == "STATUS"
+    }
     definitions = [{
         "used_rate_definition_id": int(row["payrollcalculationsnapshotusedratedefinitionid"]),
         "driver_assignment_id": int(row["driverassignmentid"]), "driver_id": int(row["driverid"]),
@@ -363,10 +370,11 @@ async def _finalized_used_rate_definitions(
         "rate_component_definition_id": row["ratecomponentdefinitionid"],
         "pay_definition_code": row["definitioncodesnapshot"],
         "pay_definition_label": row["definitionnamesnapshot"],
-        "unit_name": row["unitsnapshot"] or row["unitnamesnapshot"],
-        "rate_type_id": row["ratetypeid"], "rate_type_code": row["ratetypecodesnapshot"],
-        "rate_type_name": row["ratetypenamesnapshot"],
-        "driver_rate_id": row["driverrateid"], "rate_amount": row["rateamountsnapshot"],
+        "status_rate_column_id": row["statusratecolumnid"],
+        "status_rate_column_name": column_names.get(
+            (int(row["driverassignmentid"]), row["statusratecolumnid"])),
+        "unit_name": row["unitsnapshot"],
+        "rate_amount": row["rateamountsnapshot"],
         "effective_from": row["effectivefromsnapshot"], "effective_to": row["effectivetosnapshot"],
         "rate_status": row["ratestatussnapshot"],
         "definition_fingerprint": row["definitionfingerprint"],

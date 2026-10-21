@@ -120,7 +120,7 @@ async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tupl
 async def _live_statuses(period: dict[str, Any], db: AsyncConnection) -> list[dict[str, Any]]:
     rows = (await db.execute(text("""
         SELECT es.driverassignmentid, es.workdate, es.statuskeyid, sk.statuscode, sk.keyname,
-               sk.isoffreason
+               sk.isoffreason, sk.hoursvalue, sk.allowancecategory
         FROM payroll.payrollperioddriverdayentrystate es
         JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = es.statuskeyid
         WHERE es.payrollperiodid = :period_id AND es.companyid = :company_id
@@ -131,7 +131,9 @@ async def _live_statuses(period: dict[str, Any], db: AsyncConnection) -> list[di
           "branch_id": period["branchid"]})).mappings().all()
     return [{"driver_assignment_id": int(r["driverassignmentid"]), "work_date": r["workdate"],
              "status_key_id": int(r["statuskeyid"]), "code": r["statuscode"],
-             "label": r["keyname"], "is_off": bool(r["isoffreason"])} for r in rows]
+             "label": r["keyname"], "is_off": bool(r["isoffreason"]),
+             "hours_value": Decimal(str(r["hoursvalue"])), "category": r["allowancecategory"]}
+            for r in rows]
 
 
 async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnection, frozen: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], list[str], list[str], bool, int | None, str | None]:

@@ -25,6 +25,8 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from tests.db_state import (
+    DRIVER_COMPENSATION_CONTEXT_TRIGGERS,
+    DRIVER_RATE_SCHEDULE_HISTORY_TRIGGERS,
     PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS,
     allow_final_line_insert,
     suspended_test_triggers,
@@ -46,40 +48,43 @@ _SCOPE = """
            (SELECT COALESCE(MAX(s.revisionnumber), 0) + 1
             FROM payroll.payrollcalculationsnapshots s
             WHERE s.payrollperiodid = p.payrollperiodid) AS next_revision,
-           (SELECT rt.ratetypeid FROM payroll.ratetypes rt
-            WHERE rt.ratecode = 'STATUS_PAY' ORDER BY rt.ratetypeid LIMIT 1) AS status_rate_type
+           0 AS unused
     FROM payroll.payrollperiods p
     JOIN core.driverassignments a ON a.driverassignmentid = {assignment}
     WHERE p.payrollperiodid = {period}
 """
 
 _STATUS_COLUMN = """
-    SELECT statusratecolumnid FROM payroll.statusratecolumns
-    WHERE companyid = {company} AND branchid = {branch} AND ratetypeid = {rate_type} AND isactive
-    ORDER BY statusratecolumnid LIMIT 1
+    SELECT c.statusratecolumnid, rd.ratedefinitionid, comp.ratecomponentdefinitionid
+    FROM payroll.statusratecolumns c
+    JOIN payroll.ratedefinitions rd ON rd.statusratecolumnid = c.statusratecolumnid
+    JOIN payroll.ratecomponentdefinitions comp ON comp.ratedefinitionid = rd.ratedefinitionid
+    WHERE c.companyid = {company} AND c.isdefault AND c.isactive
 """
 
-_STATUS_COLUMN_INSERT = """
-    INSERT INTO payroll.statusratecolumns
-        (companyid, branchid, ratetypeid, columnname, normalizedcolumnname, isdefault, isactive)
-    VALUES ({company}, {branch}, {rate_type}, 'Evidence status', {normalized}, FALSE, TRUE)
-    RETURNING statusratecolumnid
+_SCHEDULE = """
+    SELECT driverratescheduleid FROM payroll.driverrateschedules
+    WHERE driverid = {driver} AND ratedefinitionid = {rate_definition} AND status = 'Approved'
+    ORDER BY driverratescheduleid LIMIT 1
 """
 
-_DRIVER_RATE = """
-    SELECT driverrateid FROM payroll.driverrates
-    WHERE driverassignmentid = {assignment} AND ratetypeid = {rate_type} AND status = 'Approved'
-      AND amount = {amount} AND effectiveto IS NULL
-    ORDER BY driverrateid LIMIT 1
+_SCHEDULE_INSERT = """
+    INSERT INTO payroll.driverrateschedules
+        (companyid, driverid, statusratecolumnid, ratedefinitionid, effectivefrom, createdbyuserid)
+    VALUES ({company}, {driver}, {status_column}, {rate_definition}, CURRENT_DATE, {user})
+    RETURNING driverratescheduleid
 """
 
-_DRIVER_RATE_INSERT = """
-    INSERT INTO payroll.driverrates
-        (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status,
-         createdbyuserid, approvedbyuserid, approvedatutc)
-    VALUES ({company}, {branch}, {assignment}, {rate_type}, {amount}, DATE '2000-01-01', 'Approved',
-            {user}, {user}, NOW())
-    RETURNING driverrateid
+_SCHEDULE_VALUE = """
+    INSERT INTO payroll.driverrateschedulevalues
+        (driverratescheduleid, ratedefinitionid, ratecomponentdefinitionid, amount)
+    VALUES ({schedule}, {rate_definition}, {rate_component}, {rate_amount})
+"""
+
+_SCHEDULE_APPROVE = """
+    UPDATE payroll.driverrateschedules
+       SET status = 'Approved', approvedbyuserid = {user}, approvedatutc = NOW()
+     WHERE driverratescheduleid = {schedule}
 """
 
 _SNAPSHOT = """
@@ -89,7 +94,7 @@ _SNAPSHOT = """
          reportevidenceversion, reportevidencehash, currencycode, currencyminorunitdigits,
          periodstartdate, periodenddate, payableroundingversion, minmaxprorationversion,
          scheduledworkdates, warnings)
-    VALUES ({company}, {branch}, {period}, {revision}, 'payroll-calculation-v2',
+    VALUES ({company}, {branch}, {period}, {revision}, 'payroll-calculation-v3',
             {source_hash}, {snapshot_hash}, {user}, {amount},
             {evidence_version}, {evidence_hash}, {currency}, {digits},
             {start}, {end}, 'payable-rounding-v1', 'minmax-proration-v1', '{{}}', '{{}}')
@@ -120,24 +125,27 @@ _COMPONENT = """
 _USED_RATE = """
     INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions
         (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid, driverassignmentid,
-         driverid, definitionfingerprint, evidencekind, sourcetypesnapshot, ratetypeid,
-         driverrateid, rateamountsnapshot, effectivefromsnapshot, ratestatussnapshot,
-         currencycodesnapshot, currencyminorunitdigitssnapshot)
+         driverid, definitionfingerprint, evidencekind, sourcetypesnapshot, driverratescheduleid,
+         ratedefinitionid, statusratecolumnid, ratecomponentdefinitionid, rateamountsnapshot,
+         effectivefromsnapshot, ratestatussnapshot, currencycodesnapshot,
+         currencyminorunitdigitssnapshot)
     VALUES ({snapshot}, {company}, {branch}, {period}, {assignment}, {driver}, {fingerprint},
-            'StatusDriverRate', 'StatusEntryState', {line_rate_type}, {driver_rate}, {rate_amount},
-            DATE '2000-01-01', 'Approved', {currency}, {digits})
+            'DriverRateSchedule', 'StatusEntryState', {schedule}, {rate_definition},
+            {status_column}, {rate_component}, {rate_amount},
+            CURRENT_DATE, 'Approved', {currency}, {digits})
     RETURNING payrollcalculationsnapshotusedratedefinitionid
 """
 
 _LINE = """
     INSERT INTO payroll.payrollcalculationsnapshotlines
         (payrollcalculationdrivertotalid, payrollcalculationsnapshotcomponentid, sourcetype,
-         sourceid, linetype, linescope, workdate, statusratecolumnid, ratetypeid, driverrateid,
+         sourceid, linetype, linescope, workdate, statusratecolumnid, ratedefinitionid,
+         driverratescheduleid, calculationstatus, calculationversion,
          quantity, resolvedrateamount, calculatedamount, sourceevidencejsonb,
          usedratedefinitionid)
     VALUES ({total}, {component}, 'StatusEntryState', {source_id}, 'STATUS', 'Daily', {work_date},
-            {status_column}, {line_rate_type}, {driver_rate}, 1, {rate_amount}, {amount}, '{{}}'::jsonb,
-            {used_rate})
+            {status_column}, {rate_definition}, {schedule}, 'Calculated', 'cp4a-per-unit-v1',
+            1, {rate_amount}, {amount}, '{{}}'::jsonb, {used_rate})
 """
 
 _FINAL_LINE = """
@@ -157,8 +165,8 @@ _NAMES = [
     "user", "amount", "evidence_version", "evidence_hash", "currency", "digits", "start", "end",
     "driver", "employee", "snapshot", "total", "component", "source_id", "source_snapshot",
     "kind", "line_type", "status_column", "status_column_name", "status_pay", "bonus",
-    "rate_type", "driver_rate", "normalized", "fingerprint", "used_rate", "work_date",
-    "line_rate_type", "rate_amount",
+    "rate_definition", "rate_component", "schedule", "fingerprint", "used_rate", "work_date",
+    "rate_amount",
 ]
 
 
@@ -225,13 +233,12 @@ async def seed_snapshot_component(
     db, *, period_id: int, driver_assignment_id: int, amount: Decimal = _AMOUNT,
     snapshot_hash: str = _HEX, revision: int | None = None,
     report_evidence: tuple[int, str] | None = None, work_date: date | None = None,
-    driver_rate_id: int | None = None,
 ) -> Chain:
     """Snapshot, Driver total and component for one DriverAssignment of a period.
 
     A ``work_date`` makes the component a Status component with one source line on that day,
-    using the Approved Status rate of the assignment (or the given ``driver_rate_id``, whose
-    amount the line records).
+    using the Approved Status rate schedule of the permanent Driver (one is created when the
+    Driver has none). The line records ``amount`` as its rate at one hour.
     """
     scope = (await db.execute(
         text(_SCOPE.format(assignment=":assignment", period=":period")),
@@ -242,28 +249,27 @@ async def seed_snapshot_component(
         revision=scope["next_revision"] if revision is None else revision,
         snapshot_hash=snapshot_hash, amount=amount, evidence=report_evidence, kind=kind)
     if work_date is not None:
-        params["rate_type"] = scope["status_rate_type"]
-        params["normalized"] = "EVIDENCE " + uuid4().hex[:12].upper()
-        column = (await db.execute(
-            text(_sql(_STATUS_COLUMN, "sqlalchemy")), params)).scalar_one_or_none()
-        if column is None:
-            column = (await db.execute(
-                text(_sql(_STATUS_COLUMN_INSERT, "sqlalchemy")), params)).scalar_one()
-        if driver_rate_id is not None:
-            rate = driver_rate_id
-            line_rate_type, rate_amount = (await db.execute(
-                text("SELECT ratetypeid, amount FROM payroll.driverrates WHERE driverrateid = :id"),
-                {"id": rate})).one()
-        else:
-            rate = (await db.execute(
-                text(_sql(_DRIVER_RATE, "sqlalchemy")), params)).scalar_one_or_none()
-            if rate is None:
-                rate = (await db.execute(
-                    text(_sql(_DRIVER_RATE_INSERT, "sqlalchemy")), params)).scalar_one()
-            line_rate_type, rate_amount = params["rate_type"], amount
+        await db.execute(
+            text("SELECT payroll.fn_EnsureDefaultStatusRateColumn(:company)"),
+            {"company": scope["companyid"]})
+        column, rate_definition, rate_component = (await db.execute(
+            text(_sql(_STATUS_COLUMN, "sqlalchemy")), params)).one()
         params.update(status_column=column, status_column_name="Evidence status",
-                      driver_rate=rate, work_date=work_date, fingerprint=uuid4().hex * 2,
-                      line_rate_type=line_rate_type, rate_amount=rate_amount)
+                      rate_definition=rate_definition, rate_component=rate_component,
+                      rate_amount=amount, work_date=work_date, fingerprint=uuid4().hex * 2)
+        schedule = (await db.execute(
+            text(_sql(_SCHEDULE, "sqlalchemy")), params)).scalar_one_or_none()
+        if schedule is None:
+            # The seeded Driver may have no home tenure on the schedule date: the context guard
+            # of Driver-owned compensation is not what these evidence tests probe.
+            async with suspended_test_triggers(db, DRIVER_COMPENSATION_CONTEXT_TRIGGERS):
+                schedule = (await db.execute(
+                    text(_sql(_SCHEDULE_INSERT, "sqlalchemy")), params)).scalar_one()
+                params["schedule"] = schedule
+                await db.execute(text(_sql(_SCHEDULE_VALUE, "sqlalchemy")), params)
+                await db.execute(text(_sql(_SCHEDULE_APPROVE, "sqlalchemy")), params)
+                params["created_schedule"] = schedule
+        params["schedule"] = schedule
     snapshot = int((await db.execute(text(_sql(_SNAPSHOT, "sqlalchemy")), params)).scalar_one())
     total = int((await db.execute(
         text(_sql(_TOTAL, "sqlalchemy")), {**params, "snapshot": snapshot})).scalar_one())
@@ -314,3 +320,12 @@ async def discard_chain(db, chain: Chain) -> None:
             "WHERE payrollcalculationsnapshotid = :snapshot",
         ):
             await db.execute(text(statement), {"snapshot": chain.snapshot_id})
+    created = chain.params.get("created_schedule")
+    if created is not None:
+        async with suspended_test_triggers(db, DRIVER_RATE_SCHEDULE_HISTORY_TRIGGERS):
+            await db.execute(text(
+                "DELETE FROM payroll.driverrateschedulevalues WHERE driverratescheduleid = :id"),
+                {"id": created})
+            await db.execute(text(
+                "DELETE FROM payroll.driverrateschedules WHERE driverratescheduleid = :id"),
+                {"id": created})
