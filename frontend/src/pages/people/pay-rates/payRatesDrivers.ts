@@ -2,11 +2,10 @@ import type { DriverAssignmentRosterRow } from '../../../types/core.ts';
 import type { CompensationAccess, DriverPayRateRow } from '../../../types/compensation.ts';
 
 /**
- * Pay Rates is Driver-centric: ordinary rates and Min/Max pay rules belong to the permanent
- * Driver, so the roster shows one row per Driver the user can read. The rows are derived from
- * the assignment roster (GET /core/driver-assignments) by grouping on driver_id; the
- * assignments themselves are still needed for Status pay rates, which stay owned by a Branch
- * tenure.
+ * Pay Rates is Driver-centric: every rate (Pay Item and Status) and the Min/Max pay rules belong
+ * to the permanent Driver, so the roster shows one row per Driver the user can read. The rows
+ * are derived from the assignment roster (GET /core/driver-assignments) by grouping on
+ * driver_id.
  */
 
 export interface PayRateDriver {
@@ -132,19 +131,6 @@ export type PayRateTab = 'current' | 'pending' | 'history' | 'pay-rules';
 export function visibleTabs(access: CompensationAccess | null): PayRateTab[] {
   const tabs: PayRateTab[] = ['current', 'pending', 'history', 'pay-rules'];
   return access?.full_history ? tabs : tabs.filter((tab) => tab !== 'pending');
-}
-
-/** The tenure whose Status pay rates are shown first: current, else upcoming, else the latest ended. */
-export function defaultStatusAssignment(d: PayRateDriver | null): DriverAssignmentRosterRow | null {
-  return d?.home ?? null;
-}
-
-/** Status rates are owned by one assignment: only a current or upcoming one is writable. */
-export function canEditStatusRates(
-  assignment: DriverAssignmentRosterRow | null,
-  canEditAtBranch: (branchId: number) => boolean,
-): boolean {
-  return assignment != null && assignment.state !== 'ended' && canEditAtBranch(assignment.branch_id);
 }
 
 export const NOT_APPLICABLE_FLAG = 'Not used in this Branch on that date';

@@ -89,11 +89,10 @@ export function BranchOverview({
             <div className={styles.tableWrap}>
               <table className={styles.table}>
                 <colgroup>
-                  <col style={{ width: '26%' }} />
+                  <col style={{ width: '33%' }} />
                   <col style={{ width: '10%' }} />
                   <col style={{ width: '10%' }} />
                   <col style={{ width: '14%' }} />
-                  <col style={{ width: '7%'  }} />
                   <col style={{ width: '7%'  }} />
                   <col style={{ width: '7%'  }} />
                   <col style={{ width: '13%' }} />
@@ -105,7 +104,6 @@ export function BranchOverview({
                     <th>Status</th>
                     <th>Default</th>
                     <th>Payroll Status</th>
-                    <th className={styles.thCenter}>Keys</th>
                     <th className={styles.thCenter}>Drivers</th>
                     <th className={styles.thCenter}>Approvals</th>
                     <th>Location</th>
@@ -178,7 +176,6 @@ export function BranchOverview({
                           <Link to={scheduleHref} className={styles.scheduleLink}>View payroll schedule</Link>
                         )}
                       </td>
-                      <td className={styles.tdCenter}>{b.status_keys_count ?? '—'}</td>
                       <td className={styles.tdCenter}>{b.active_drivers_count ?? '—'}</td>
                       <td className={styles.tdCenter}>
                         {(b.pending_approvals_count ?? 0) > 0

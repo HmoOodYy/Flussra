@@ -1,6 +1,7 @@
 import type {
   DriverPayRateRow,
   DriverRateSummaryItem,
+  RateOwnerKind,
   ScheduleBrief,
   ScheduleSummary,
 } from '../../../types/compensation.ts';
@@ -17,6 +18,8 @@ import { historyDefinitionName, isRetiredDefinition } from './payRatesHistory.ts
 export interface PendingScheduleRow {
   scheduleId: number;
   rateDefinitionId: number;
+  /** A PayDefinition rate or a Status rate column rate. */
+  kind: RateOwnerKind;
   definitionName: string;
   definitionCode: string | null;
   unit: string | null;
@@ -47,6 +50,7 @@ export function buildPendingScheduleRows(
       rows.push({
         scheduleId: schedule.driver_rate_schedule_id,
         rateDefinitionId: item.rate_definition_id,
+        kind: item.kind,
         definitionName: inMatrix?.definition_name ?? historyDefinitionName(item),
         definitionCode: inMatrix?.definition_code ?? item.definition_code,
         unit: inMatrix?.unit ?? item.unit,

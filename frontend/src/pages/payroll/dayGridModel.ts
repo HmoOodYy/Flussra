@@ -6,9 +6,11 @@
  * that id (as a string), never by a code or a name. Code and label are display metadata
  * and have no behavior here.
  */
+import { displayedStatusText, type StatusCatalogEntry } from '../../lib/statusInput.ts';
 import type {
   DayGridColumn,
   DayGridResponse,
+  DayGridRow,
   DayGridSaveRow,
   DayGridSummary,
 } from '../../types/payroll/entry';
@@ -65,4 +67,39 @@ export function buildSaveRowFromGrid(grid: DayGridResponse | null, driverAssignm
     status_key: row?.status_key ?? null,
     notes: row?.notes ?? null,
   };
+}
+
+/**
+ * The text a Status cell shows. An untouched row shows the canonical primary name the server
+ * returned; a row whose Status was edited shows the canonical name of whatever the typed text
+ * resolves to in the catalog (name, alias or code), else the text as typed.
+ */
+export function statusCellText(
+  row: Pick<DayGridRow, 'status_key' | 'status_label'>,
+  dirty: Pick<DayGridSaveRow, 'status_key'> | undefined,
+  statusKeys: readonly StatusCatalogEntry[],
+): string {
+  if (dirty === undefined || dirty.status_key === row.status_key) return row.status_label ?? '';
+  return displayedStatusText(dirty.status_key, statusKeys);
+}
+
+/**
+ * The message of a failed Day Grid save: the server's coded errors carry their own message
+ * ({code, message}), validation errors a list, older errors a plain string.
+ */
+export function daySaveErrorMessage(error: unknown, fallback = 'Save failed.'): string {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    const joined = detail
+      .map((item) => (item && typeof item === 'object' && 'msg' in item ? String((item as { msg: unknown }).msg) : ''))
+      .filter(Boolean)
+      .join(' ');
+    return joined || fallback;
+  }
+  if (detail && typeof detail === 'object' && 'message' in detail) {
+    const message = (detail as { message: unknown }).message;
+    if (typeof message === 'string' && message.trim()) return message;
+  }
+  return fallback;
 }

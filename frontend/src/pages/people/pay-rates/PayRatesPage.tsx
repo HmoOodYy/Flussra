@@ -6,9 +6,10 @@
  *  Right: selected driver panel with tabs
  *         Current Rates | Pending Changes | History | Pay Rules
  *
- * Ordinary PayDefinition rates (Driver rate schedules) and Min/Max pay rules belong to the
- * permanent Driver and are addressed by driver_id. Status pay rates are the one exception:
- * they stay owned by a Branch assignment, so their pane keeps an assignment picker.
+ * Every rate is a schedule owned by the permanent Driver and addressed by driver_id: Pay Item
+ * rates (PayDefinitions) and Status pay rates (Company Status rate columns) are authored with
+ * the same compensation schedule routes, and Min/Max pay rules are the Driver's too. Nothing is
+ * tied to a Branch assignment, so the rates follow the Driver across a transfer.
  */
 import { useEffect } from 'react';
 import { Link } from 'react-router-dom';
@@ -18,12 +19,10 @@ import styles from './PayRatesPage.module.css';
 import { usePayRateDriverContext } from './usePayRateDriverContext';
 import { usePayRateReads } from './usePayRateReads';
 import { useTargetRateEditing } from './useTargetRateEditing';
-import { useStatusRateEditing } from './useStatusRateEditing';
 import { useRateScheduleActions } from './useRateScheduleActions';
 import { useDriverPayRules } from './useDriverPayRules';
 import { PayRateDriverList } from './PayRateDriverList';
 import { TargetRateSection } from './TargetRateSection';
-import { StatusRateSection } from './StatusRateSection';
 import { PendingRateChanges } from './PendingRateChanges';
 import { RateHistoryTab, VoidRateDialog } from './RateHistoryTab';
 import { DriverPayRulesTab } from './DriverPayRulesTab';
@@ -33,7 +32,6 @@ import {
   canDiscardPendingRates,
   canEditDriverCompensation,
   isPastBranchView,
-  canEditStatusRates,
   driverBranchSummary,
   visibleTabs,
 } from './payRatesDrivers';
@@ -43,33 +41,25 @@ export function PayRatesPage() {
   const driver = usePayRateDriverContext(user);
   const selectedDriverId = driver.selectedDriverId;
   const selectedDriver = driver.selectedDriver;
-  const statusAssignment = driver.statusAssignment;
-  const statusAssignmentId = statusAssignment?.driver_assignment_id ?? null;
-  const reads = usePayRateReads(selectedDriverId, statusAssignmentId);
+  const reads = usePayRateReads(selectedDriverId);
 
-  // Edit controls follow the backend's authority: the Driver's current Branch for Driver-owned
-  // data, the viewed assignment for Status rates. The backend stays authoritative.
+  // Edit controls follow the backend's authority over the Driver (the current Branch).
+  // The backend stays authoritative.
   const canEditAtBranch = (branchId: number) => (user ? canEditPayRates(user, branchId) : false);
   const canEditDriver = canEditDriverCompensation(selectedDriver, reads.access, canEditAtBranch);
   const canDiscardDriver = canDiscardPendingRates(reads.access);
-  const canEditStatus = canEditStatusRates(statusAssignment, canEditAtBranch);
   const authorityBranchId = (selectedDriver?.current ?? selectedDriver?.pending ?? selectedDriver?.home)?.branch_id;
   const businessDateOf = (branchId: number | undefined) =>
     driver.branches.find((b) => b.branch_id === branchId)?.business_date;
   const driverReferenceDate = businessDateOf(authorityBranchId);
-  const statusReferenceDate = reads.statusMatrix?.driver_assignment_id === statusAssignmentId
-    ? reads.statusMatrix.as_of
-    : businessDateOf(statusAssignment?.branch_id);
 
   const target = useTargetRateEditing(selectedDriverId, reads.refreshTargetRows, driverReferenceDate);
-  const status = useStatusRateEditing(statusAssignmentId, reads.statusMatrix, reads.loadStatus, statusReferenceDate);
   const actions = useRateScheduleActions(selectedDriverId, reads.reloadAll);
   const rules = useDriverPayRules(selectedDriverId, reads.loadPayRules, reads.setPayRulesError);
   const { activeTab } = driver;
-  const { loadingRows, historyLoaded, loadingHistory, payRulesLoaded, loadingPayRules, setHistoryRows, setHistoryLoaded, setPayRules, setPayRulesLoaded, setPayRulesError, loadRates, loadStatus, loadHistory, loadPayRules } = reads;
+  const { loadingRows, historyLoaded, loadingHistory, payRulesLoaded, loadingPayRules, setHistoryRows, setHistoryLoaded, setPayRules, setPayRulesLoaded, setPayRulesError, loadRates, loadHistory, loadPayRules } = reads;
   const { setPendingActionError } = actions;
   const { setTargetDrafts, setTargetErrors } = target;
-  const { setStatusEditMode, setStatusDrafts, setStatusOriginal, setStatusSaveError } = status;
   const { setRuleForm, setRuleFormError } = rules;
 
   // ── When the selected driver changes: reset Driver-owned state + load ─────
@@ -93,21 +83,6 @@ export function PayRatesPage() {
     return () => { cancelled = true; };
   }, [selectedDriverId, loadRates, setHistoryRows, setHistoryLoaded, setPendingActionError, setTargetDrafts, setTargetErrors, setPayRules, setPayRulesLoaded, setPayRulesError, setRuleForm, setRuleFormError]);
 
-  // ── When the Status assignment changes: reset Status edits + load its matrix ──
-  useEffect(() => {
-    if (statusAssignmentId == null) return;
-    let cancelled = false;
-    void (async () => {
-      if (cancelled) return;
-      setStatusEditMode(false);
-      setStatusDrafts({});
-      setStatusOriginal({});
-      setStatusSaveError('');
-      await loadStatus(statusAssignmentId);
-    })();
-    return () => { cancelled = true; };
-  }, [statusAssignmentId, loadStatus, setStatusEditMode, setStatusDrafts, setStatusOriginal, setStatusSaveError]);
-
   // ── Lazy tabs ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (activeTab !== 'history' || selectedDriverId == null || historyLoaded || loadingHistory || loadingRows) return;
@@ -124,20 +99,18 @@ export function PayRatesPage() {
   function cancelAllEdits() {
     setTargetDrafts({});
     setTargetErrors({});
-    setStatusEditMode(false);
-    setStatusDrafts({});
-    setStatusOriginal({});
-    setStatusSaveError('');
   }
 
   const currencyCode = user?.currency_code ?? null;
   const currencyDigits = user?.currency_minor_unit_digits ?? null;
-  const missingCount = reads.rows.filter((r) => r.current === null).length;
+  const payItemRows = reads.rows.filter((r) => r.kind === 'PayDefinition');
+  const statusRows = reads.rows.filter((r) => r.kind === 'StatusRateColumn');
+  // A Status rate column nobody uses is not a gap, so only Pay Item rates count as missing.
+  const missingCount = payItemRows.filter((r) => r.current === null).length;
   // Pending schedules come from the schedule summary and history, not the Active-only matrix.
   const pendingRows = buildPendingScheduleRows(
     reads.pendingSource.summary, reads.pendingSource.historyByDefinition, reads.rows);
-  const statusPending = (reads.statusMatrix?.groups ?? []).filter((g) => g.pending_rate !== null);
-  const pendingCount = pendingRows.length + statusPending.length;
+  const pendingCount = pendingRows.length;
   const futureCount = reads.rows.filter((r) => r.future !== null).length;
   const tabs = visibleTabs(reads.access);
   const tab = tabs.includes(activeTab) ? activeTab : 'current';
@@ -195,7 +168,7 @@ export function PayRatesPage() {
                 </div>
               </div>
             )
-          ) : reads.loadingRows && reads.rows.length === 0 && !reads.statusMatrix ? (
+          ) : reads.loadingRows && reads.rows.length === 0 ? (
             <div className={styles.loading}>Loading rates...</div>
           ) : reads.rowsError ? (
             <div className={styles.detail}><div className={styles.errBanner}>{reads.rowsError}</div></div>
@@ -230,17 +203,21 @@ export function PayRatesPage() {
 
               <div className={styles.tabPanel}>
                 {tab === 'current' && <>
-                  <TargetRateSection rows={reads.rows} canEditMatrix={canEditDriver} referenceDate={driverReferenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
+                  <TargetRateSection title="Pay Item Rates" rowHeader="Pay Item" empty={<>
+                      <p>No pay items are available to rate yet.</p>
+                      <p className={styles.emptySectionHint}>Pay items are created and activated per branch under <strong>Settings &gt; Pay Items</strong>.</p>
+                    </>}
+                    rows={payItemRows} canEditMatrix={canEditDriver} referenceDate={driverReferenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
                     targetDrafts={target.targetDrafts} targetErrors={target.targetErrors} targetSavingId={target.targetSavingId}
                     setTargetField={target.setTargetField} saveTargetRow={target.saveTargetRow} cancelTargetEdit={target.cancelTargetEdit} startTargetEdit={target.startTargetEdit} />
-                  <StatusRateSection assignments={selectedDriver.tenures} selectedAssignmentId={statusAssignmentId} selectAssignment={driver.selectStatusAssignment}
-                    statusMatrix={reads.statusMatrix} canEditMatrix={canEditStatus} referenceDate={statusReferenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
-                    statusEditMode={status.statusEditMode} statusDrafts={status.statusDrafts} statusSaving={status.statusSaving} statusSaveError={status.statusSaveError}
-                    dirtyStatusKeys={status.dirtyStatusKeys} statusKey={status.statusKey} startStatusEdit={status.startStatusEdit} setStatusField={status.setStatusField}
-                    isStatusDirty={status.isStatusDirty} saveStatusRates={status.saveStatusRates} cancelStatusEdit={status.cancelStatusEdit} />
+                  <TargetRateSection title="Status Pay Rates" rowHeader="Status rate" note="A paid Status earns its hours times the driver's rate for its Status rate column. The rate belongs to the driver and follows them if they move Branch."
+                    empty={<p>No Status rate columns are available yet. They are managed under <strong>Settings &gt; Status Keys</strong>.</p>}
+                    rows={statusRows} canEditMatrix={canEditDriver} referenceDate={driverReferenceDate} currencyCode={currencyCode} currencyDigits={currencyDigits}
+                    targetDrafts={target.targetDrafts} targetErrors={target.targetErrors} targetSavingId={target.targetSavingId}
+                    setTargetField={target.setTargetField} saveTargetRow={target.saveTargetRow} cancelTargetEdit={target.cancelTargetEdit} startTargetEdit={target.startTargetEdit} />
                 </>}
-                {tab === 'pending' && <PendingRateChanges pendingRows={pendingRows} statusPending={statusPending} pendingCount={pendingCount}
-                  canEditDriver={canEditDriver} canDiscardDriver={canDiscardDriver} canEditStatus={canEditStatus} actioningId={actions.actioningId} pendingActionError={actions.pendingActionError}
+                {tab === 'pending' && <PendingRateChanges pendingRows={pendingRows} pendingCount={pendingCount}
+                  canEditDriver={canEditDriver} canDiscardDriver={canDiscardDriver} actioningId={actions.actioningId} pendingActionError={actions.pendingActionError}
                   currencyCode={currencyCode} currencyDigits={currencyDigits} runPendingAction={actions.runPendingAction} />}
                 {tab === 'history' && <RateHistoryTab historyRows={reads.historyRows} loadingHistory={reads.loadingHistory} canEditMatrix={canEditDriver}
                   currencyCode={currencyCode} currencyDigits={currencyDigits} setVoidTarget={actions.setVoidTarget} setVoidReason={actions.setVoidReason} setVoidError={actions.setVoidError} />}

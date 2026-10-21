@@ -1,41 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import type { DriverAssignmentRosterRow } from '../src/types/core.ts';
-import {
-  assignmentLabel,
-  assignmentWindow,
-} from '../src/pages/people/pay-rates/payRatesAssignments.ts';
-
-function row(id: number, state: DriverAssignmentRosterRow['state'], overrides: Partial<DriverAssignmentRosterRow> = {}): DriverAssignmentRosterRow {
-  return {
-    driver_assignment_id: id,
-    driver_id: 9,
-    branch_id: 3,
-    branch_name: 'North',
-    effective_from_at: '2026-01-02T00:00:00Z',
-    effective_to_at: null,
-    end_reason: null,
-    state,
-    driver_number: 'D-0009',
-    driver_status: 'Active',
-    full_name: 'Casey Driver',
-    preferred_name: null,
-    ...overrides,
-  };
-}
-
-const ended = row(10, 'ended', { effective_to_at: '2026-03-03T00:00:00Z', end_reason: 'Transferred' });
-const current = row(11, 'current', { branch_id: 4, branch_name: 'South', effective_from_at: '2026-03-03T00:00:00Z' });
-const pending = row(12, 'pending', { branch_id: 5, branch_name: 'East', effective_from_at: '2027-01-01T00:00:00Z' });
-
-test('assignment labels carry Branch, window and end reason; open windows read "present"', () => {
-  assert.equal(assignmentLabel(ended), 'North · Jan 2, 2026 – Mar 3, 2026 (Transferred)');
-  assert.equal(assignmentLabel(current), 'South · Mar 3, 2026 – present');
-  assert.equal(assignmentLabel(pending), 'Upcoming · East · Jan 1, 2027 – present');
-  assert.equal(assignmentWindow(ended), 'Jan 2, 2026 – Mar 3, 2026 (Transferred)');
-});
-
 const read = (name: string) => readFileSync(
   new URL(`../src/pages/people/pay-rates/${name}`, import.meta.url), 'utf8');
 
@@ -50,11 +15,11 @@ test('the Pay Rates roster is built from the assignment roster grouped by Driver
   assert.match(context, /idParam\('driverAssignmentId'\)/);
   assert.match(context, /roster\.find\(\(row\) => row\.driver_assignment_id === linkedAssignmentId\)/);
   assert.match(context, /linkedAssignment\?\.driver_id/);
-  assert.match(context, /tenureById\(linkedAssignmentId\)/); // the linked assignment is preselected for Status rates
+  assert.doesNotMatch(context, /tenureById|statusAssignment|selectStatusAssignment/); // no rate is tied to an assignment
   assert.match(context, /has_driver: boolean; driver_id: number \| null/);
 });
 
-test('ordinary rates and pay rules are read and written by driver_id; Status rates by assignment', () => {
+test('every rate and the pay rules are read and written by driver_id; Status rates are rate column schedules', () => {
   const reads = read('usePayRateReads.ts');
   assert.match(reads, /listDriverPayRates\(driverId\)/);
   // History is discovered from the Driver's schedule summary, never from the Active-only matrix.
@@ -64,21 +29,23 @@ test('ordinary rates and pay rules are read and written by driver_id; Status rat
   assert.doesNotMatch(reads.slice(reads.indexOf('const loadHistory')), /listDriverPayRates|current\.map/);
   assert.match(reads, /getDriverPayRules\(driverId\)/);
   assert.match(reads, /getCompensationAccess\(driverId\)/);
-  assert.match(reads, /getStatusRateMatrix\(driverAssignmentId\)/);
+  assert.doesNotMatch(reads, /getStatusRateMatrix|statusAssignmentId|statusMatrix/);
   assert.match(read('useTargetRateEditing.ts'), /createSchedule\(\{\s*driver_id: driverId/);
   assert.match(read('useDriverPayRules.ts'), /driver_id: selectedDriverId/);
-  // The Status pane keeps its assignment picker and its own save path.
-  const section = read('StatusRateSection.tsx');
-  assert.match(section, /Branch Status Pay Rates/);
-  assert.match(section, /selectAssignment\(Number\(e\.target\.value\)\)/);
-  assert.match(read('statusRatesApi.ts'), /\/payroll\/driver-assignments\/\$\{driverAssignmentId\}\/rate-matrix/);
-  assert.match(read('statusRatesApi.ts'), /\/payroll\/driver-assignments\/\$\{driverAssignmentId\}\/rates\/batch/);
+  // Status rates are rows of the same listing (kind StatusRateColumn), edited by the same row
+  // editor and the same compensation schedule routes as Pay Item rates.
+  const page = read('PayRatesPage.tsx');
+  assert.match(page, /r\.kind === 'StatusRateColumn'/);
+  assert.match(page, /title="Status Pay Rates"/);
+  assert.match(page, /title="Pay Item Rates"/);
+  assert.equal((page.match(/<TargetRateSection /g) ?? []).length, 2);
+  assert.doesNotMatch(page, /StatusRateSection|useStatusRateEditing|statusRatesApi/);
 });
 
 test('the page gates edits on Driver authority and shows the read-only banner for a past Branch', () => {
   const page = read('PayRatesPage.tsx');
   assert.match(page, /canEditDriverCompensation\(selectedDriver, reads\.access, canEditAtBranch\)/);
-  assert.match(page, /canEditStatusRates\(statusAssignment, canEditAtBranch\)/);
+  assert.doesNotMatch(page, /canEditStatusRates/);
   assert.match(page, /pastBranchView && <p className=\{styles\.readOnlyBanner\}>\{PAST_BRANCH_BANNER\}/);
   assert.match(page, /isPastBranchView\(reads\.access\)/);
   assert.match(page, /canDiscardPendingRates\(reads\.access\)/);

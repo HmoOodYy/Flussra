@@ -4,7 +4,7 @@ import { canEntryPayroll } from '../../lib/permissions';
 import { addIsoDays, formatIsoShort, weekdayOfIso } from '../../lib/isoDate';
 import type { UserProfile } from '../../store/authStore';
 import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/payroll/entry';
-import { buildSaveRowFromGrid } from './dayGridModel';
+import { buildSaveRowFromGrid, statusCellText } from './dayGridModel';
 
 const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
 
@@ -120,10 +120,9 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
     return row.values[key]?.quantity ?? '';
   }
 
-  function getStatusValue(row: DayGridRow): string {
-    const dirty = dirtyRows.get(row.driver_assignment_id);
-    if (dirty) return dirty.status_key ?? '';
-    return row.status_key ?? '';
+  /** The canonical name the Status cell shows (the typed text resolved through the catalog). */
+  function getStatusText(row: DayGridRow): string {
+    return statusCellText(row, dirtyRows.get(row.driver_assignment_id), grid?.status_keys ?? []);
   }
 
   function getNotesValue(row: DayGridRow): string {
@@ -154,7 +153,7 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
     handleStatusChange,
     handleNotesChange,
     getCellValue,
-    getStatusValue,
+    getStatusText,
     getNotesValue,
   };
 }

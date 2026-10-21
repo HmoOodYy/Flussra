@@ -147,11 +147,10 @@ export interface FinalizedUsedRateDefinition {
   rate_component_definition_id: number | null;
   pay_definition_code: string | null;
   pay_definition_label: string | null;
-  rate_type_id: number | null;
-  rate_type_code: string | null;
-  rate_type_name: string | null;
+  /** The Status rate column a Status rate was paid through (frozen name), else null. */
+  status_rate_column_id: number | null;
+  status_rate_column_name: string | null;
   unit_name: string | null;
-  driver_rate_id: number | null;
   driver_pay_rule_id: number | null;
   rate_amount: string | null;
   effective_from: string | null;

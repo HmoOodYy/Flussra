@@ -7,15 +7,13 @@
 import { useEffect } from 'react';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { useAuth } from '../../store/authStore';
-import { columnKey, quantityInputProps, quantityTotalViews } from './dayGridModel';
+import { columnKey, daySaveErrorMessage, quantityInputProps, quantityTotalViews } from './dayGridModel';
+import { StatusCellInput } from './StatusCellInput';
 import { formatDayLabel, useDailyEntryController } from './useDailyEntryController';
 import { formatGrossTotal } from './grossDisplay';
 import styles from './PayrollEntryDialog.module.css';
 
-function dialogSaveError(e: unknown): string {
-  return (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-    'Save failed.';
-}
+const dialogSaveError = daySaveErrorMessage;
 
 // ---------------------------------------------------------------------------
 // Props
@@ -37,7 +35,7 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
     selectedDate, grid, loading, error, dirtyRows, saving, saveError,
     notesOpenDriverAssignmentId, setNotesOpenDriverAssignmentId, fetchGrid, atStart, atEnd, prevDay, nextDay,
     isEditable, canEdit, handleSave, handleCellChange, handleStatusChange, handleNotesChange,
-    getCellValue, getStatusValue, getNotesValue,
+    getCellValue, getStatusText, getNotesValue,
   } = useDailyEntryController({ periodId, user, formatSaveError: dialogSaveError });
 
   useEffect(() => {
@@ -208,19 +206,13 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
                           {isDirty && <span className={styles.dirtyDot}>●</span>}
                         </td>
                         <td>
-                          <select
+                          <StatusCellInput
                             className={styles.statusSelect}
-                            value={getStatusValue(row)}
+                            shownText={getStatusText(row)}
+                            statusKeys={grid.status_keys}
                             disabled={!canEdit}
-                            onChange={(e) => handleStatusChange(row.driver_assignment_id, e.target.value || null)}
-                          >
-                            <option value="">—</option>
-                            {grid.status_keys.map((sk) => (
-                              <option key={sk.key_code} value={sk.key_code}>
-                                {sk.label}
-                              </option>
-                            ))}
-                          </select>
+                            onCommit={(text) => handleStatusChange(row.driver_assignment_id, text)}
+                          />
                         </td>
                         {grid.columns.map((col) => {
                           const key = columnKey(col);

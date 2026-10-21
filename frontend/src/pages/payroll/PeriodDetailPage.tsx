@@ -9,7 +9,8 @@ import { useParams, Link } from 'react-router-dom';
 import { useEffect } from 'react';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
 import { useAuth } from '../../store/authStore';
-import { columnKey, quantityInputProps, quantityTotalViews } from './dayGridModel';
+import { columnKey, daySaveErrorMessage, quantityInputProps, quantityTotalViews } from './dayGridModel';
+import { StatusCellInput } from './StatusCellInput';
 import { formatDayLabel, useDailyEntryController } from './useDailyEntryController';
 import { formatGrossTotal } from './grossDisplay';
 import styles from './PeriodDetailPage.module.css';
@@ -25,19 +26,7 @@ const FINALIZED_STATUSES = new Set(['Locked', 'Archived']);
 // Main page
 // ---------------------------------------------------------------------------
 
-function pageSaveError(e: unknown): string {
-  const detail = (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-  let msg = 'Save failed.';
-  if (typeof detail === 'string' && detail.trim()) {
-    msg = detail;
-  } else if (Array.isArray(detail)) {
-    msg = (detail as Array<{ msg?: string }>)
-      .map((i) => i.msg ?? String(i))
-      .filter(Boolean)
-      .join(' ');
-  }
-  return msg;
-}
+const pageSaveError = daySaveErrorMessage;
 
 export function PeriodDetailPage() {
   const { periodId } = useParams<{ periodId: string }>();
@@ -49,7 +38,7 @@ export function PeriodDetailPage() {
     selectedDate, grid, loading, error, dirtyRows, saving, saveError,
     notesOpenDriverAssignmentId, setNotesOpenDriverAssignmentId, fetchGrid, atStart, atEnd, prevDay, nextDay,
     isEditable, canEdit, handleSave, handleCellChange, handleStatusChange, handleNotesChange,
-    getCellValue, getStatusValue, getNotesValue,
+    getCellValue, getStatusText, getNotesValue,
   } = useDailyEntryController({ periodId: numericPeriodId, user, formatSaveError: pageSaveError });
 
   useEffect(() => {
@@ -228,17 +217,13 @@ export function PeriodDetailPage() {
                           </span>
                         )
                       ) : (
-                        <select
+                        <StatusCellInput
                           className={styles.statusSelect}
-                          value={getStatusValue(row)}
+                          shownText={getStatusText(row)}
+                          statusKeys={status_keys}
                           disabled={!canEdit}
-                          onChange={(e) => handleStatusChange(row.driver_assignment_id, e.target.value || null)}
-                        >
-                          <option value="">—</option>
-                          {status_keys.map((sk) => (
-                            <option key={sk.key_code} value={sk.key_code}>{sk.label}</option>
-                          ))}
-                        </select>
+                          onCommit={(text) => handleStatusChange(row.driver_assignment_id, text)}
+                        />
                       )}
                     </td>
                     {columns.map((col) => {

@@ -24,6 +24,8 @@ export interface DayGridStatusKey {
   label: string;
   is_off_reason: boolean;
   hours_value: number | null;
+  /** Input shortcuts of the Status; `label` is its canonical primary name. */
+  aliases: string[];
 }
 
 export interface DayGridLineValue {

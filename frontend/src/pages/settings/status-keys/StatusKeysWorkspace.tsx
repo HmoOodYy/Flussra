@@ -1,19 +1,21 @@
 import type { Dispatch, SetStateAction } from 'react';
-import type { StatusKey } from '../../../types/settings';
-import type { KeysLoadAction } from './statusKeysModel';
+import type { StatusKey, StatusRateColumn } from '../../../types/settings';
+import { statusColumnName, type KeyFilter, type KeysLoadAction } from './statusKeysModel';
 import { StatusKeyDetail } from './StatusKeyDetail';
 import { AlertIcon, KeyIcon, PlusIcon, SkeletonBlock } from './StatusKeysDisplay';
 import styles from './StatusKeysPage.module.css';
 
 export function StatusKeysWorkspace({
-  statusKeys, keysLoading, keysError, keyStatusFilter, setKeyStatusFilter, canEdit, openCreateKey,
+  statusKeys, visibleKeys, columns, keysLoading, keysError, keyStatusFilter, setKeyStatusFilter, canEdit, openCreateKey,
   selectedKeyId, dispatchKeys, selectedKey, deactivating, openEditKey, requestDeactivate, requestReactivate,
 }: {
   statusKeys: StatusKey[];
+  visibleKeys: StatusKey[];
+  columns: readonly StatusRateColumn[];
   keysLoading: boolean;
   keysError: string;
-  keyStatusFilter: 'Active' | 'Inactive';
-  setKeyStatusFilter: Dispatch<SetStateAction<'Active' | 'Inactive'>>;
+  keyStatusFilter: KeyFilter;
+  setKeyStatusFilter: Dispatch<SetStateAction<KeyFilter>>;
   canEdit: boolean;
   openCreateKey: () => void;
   selectedKeyId: number | null;
@@ -30,11 +32,10 @@ export function StatusKeysWorkspace({
         {/* Header row */}
         <div className={styles.sectionHeader}>
           <div className={styles.sectionLeft}>
-            <h2 className={styles.sectionTitle}>Status Keys</h2>
-            {!keysLoading && statusKeys.length > 0 && (
-              <span className={styles.countChip}>{statusKeys.length}</span>
+            <h2 className={styles.sectionTitle}>Statuses</h2>
+            {!keysLoading && visibleKeys.length > 0 && (
+              <span className={styles.countChip}>{visibleKeys.length}</span>
             )}
-            {/* Segmented status filter replaces the old checkbox */}
             <div className={styles.segGroup}>
               {(['Active', 'Inactive'] as const).map(f => (
                 <button
@@ -49,7 +50,7 @@ export function StatusKeysWorkspace({
           </div>
           {canEdit && (
             <button className={styles.btnPrimary} onClick={openCreateKey}>
-              <PlusIcon /> Add Status Key
+              <PlusIcon /> Add Status
             </button>
           )}
         </div>
@@ -63,24 +64,24 @@ export function StatusKeysWorkspace({
               <div className={styles.errorAlert}><AlertIcon /> {keysError}</div>
             ) : keysLoading ? (
               <div className={styles.loadingCard}><SkeletonBlock /></div>
-            ) : statusKeys.length === 0 ? (
+            ) : visibleKeys.length === 0 ? (
               <div className={styles.emptyCard}>
                 <KeyIcon />
                 <span className={styles.emptyTitle}>
-                  {keyStatusFilter === 'Inactive' ? 'No inactive status keys' : 'No status keys yet'}
+                  {keyStatusFilter === 'Inactive' ? 'No inactive Statuses' : 'No Statuses yet'}
                 </span>
                 <span className={styles.emptyDesc}>
                   {keyStatusFilter === 'Inactive'
-                    ? 'There are no deactivated status keys for this branch.'
-                    : 'Status keys define payroll entry types such as Vacation, Sick Day, or On Leave.'}
+                    ? 'There are no deactivated Statuses.'
+                    : 'Statuses are the entries a day can be marked with in payroll entry, such as Vacation, Sick Day or On Leave. They are shared by every Branch.'}
                 </span>
-                {canEdit && keyStatusFilter === 'Active' && (
+                {canEdit && keyStatusFilter === 'Active' && statusKeys.length === 0 && (
                   <button
                     className={styles.btnPrimary}
                     onClick={openCreateKey}
                     style={{ marginTop: '1.25rem' }}
                   >
-                    <PlusIcon /> Add First Status Key
+                    <PlusIcon /> Add First Status
                   </button>
                 )}
               </div>
@@ -89,28 +90,38 @@ export function StatusKeysWorkspace({
                 <table className={styles.table}>
                   <thead>
                     <tr>
-                      <th>Key Name</th>
+                      <th>Name</th>
+                      <th>Category</th>
                       <th className={styles.numTh}>Hours</th>
-                      <th>Leave/Off</th>
-                      <th>Status</th>
+                      <th>Full day off</th>
+                      <th>Paid through</th>
+                      <th>State</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {statusKeys.map(k => {
+                    {visibleKeys.map(k => {
                       const isSelected = k.status_key_id === selectedKeyId;
+                      const column = statusColumnName(columns, k.status_rate_column_id);
                       return (
                         <tr
                           key={k.status_key_id}
                           className={`${styles.tableRow}${isSelected ? ` ${styles.tableRowSelected}` : ''}${!k.is_active ? ` ${styles.rowInactive}` : ''}`}
                           onClick={() => dispatchKeys({ type: 'SELECT', id: k.status_key_id })}
                         >
-                          <td><span className={styles.statusCodeLabel}>{k.key_name}</span></td>
-                          <td className={styles.numCell}>{k.hours_value}h</td>
+                          <td>
+                            <span className={styles.statusCodeLabel}>{k.key_name}</span>
+                            {k.aliases.length > 0 && (
+                              <small className={styles.aliasLine}>{k.aliases.join(', ')}</small>
+                            )}
+                          </td>
+                          <td>{k.category}</td>
+                          <td className={styles.numCell}>{Number(k.hours_value)}h</td>
                           <td>
                             {k.is_off_reason
                               ? <span className={`${styles.badge} ${styles.badgeBlue}`}>Yes</span>
                               : <span className={`${styles.badge} ${styles.badgeGray}`}>No</span>}
                           </td>
+                          <td>{column ?? <span className={styles.mutedText}>Not paid</span>}</td>
                           <td>
                             {k.is_active
                               ? <span className={`${styles.badge} ${styles.badgeGreen}`}>Active</span>
@@ -130,14 +141,15 @@ export function StatusKeysWorkspace({
             {!selectedKey ? (
               <div className={styles.keysDetailEmpty}>
                 <KeyIcon />
-                <p className={styles.keysDetailEmptyTitle}>Choose a status key to show details</p>
+                <p className={styles.keysDetailEmptyTitle}>Choose a Status to show details</p>
                 <p className={styles.keysDetailEmptyText}>
-                  Select a key from the list to view its configuration and settings.
+                  Select a Status from the list to view its configuration.
                 </p>
               </div>
             ) : (
               <StatusKeyDetail
                 statusKey={selectedKey}
+                columns={columns}
                 canEdit={canEdit}
                 isDeactivating={deactivating === selectedKey.status_key_id}
                 onEdit={() => openEditKey(selectedKey)}

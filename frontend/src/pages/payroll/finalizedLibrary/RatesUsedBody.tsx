@@ -4,8 +4,9 @@ import { AvailabilityBadge, EvidenceSectionMessage, StateMessage } from './Evide
 import styles from '../FinalizedPayrollLibraryDialog.module.css';
 
 function rateDefinitionLabel(definition: FinalizedRatesUsedResponse['used_rate_definitions'][number]): string {
-  if (definition.evidence_kind === 'DriverRateSchedule') return 'Driver rate schedule';
-  if (definition.evidence_kind === 'StatusDriverRate') return 'Status rate';
+  if (definition.evidence_kind === 'DriverRateSchedule') {
+    return definition.status_rate_column_id == null ? 'Driver rate schedule' : 'Driver Status rate schedule';
+  }
   if (definition.evidence_kind === 'DriverPayRule') return 'Driver pay rule';
   return definition.evidence_kind;
 }
@@ -15,13 +16,12 @@ function RateDefinitionTable({ response }: { response: FinalizedRatesUsedRespons
   return (
     <div className={styles.tableWrap}>
       <table className={styles.table}>
-        <thead><tr><th>Driver</th><th>Pay definition</th><th>Definition</th><th>Rate / behavior</th><th>Rule metadata</th><th>Effective</th><th>Used</th></tr></thead>
+        <thead><tr><th>Driver</th><th>Pay definition / Status column</th><th>Definition</th><th>Rate / behavior</th><th>Rule metadata</th><th>Effective</th><th>Used</th></tr></thead>
         <tbody>
           {response.used_rate_definitions.map((definition) => {
             const driver = definition.driver_name || 'Unnamed driver';
-            const payDefinition = definition.pay_definition_label || definition.pay_definition_code || (definition.pay_definition_id == null ? 'Not applicable' : `PayDefinition #${definition.pay_definition_id}`);
-            const rateType = definition.rate_type_name || definition.rate_type_code;
-            const rateDetails = [rateType, definition.unit_name, definition.rate_status].filter(Boolean).join(' · ');
+            const payDefinition = definition.status_rate_column_name || definition.pay_definition_label || definition.pay_definition_code || (definition.pay_definition_id == null ? 'Not applicable' : `PayDefinition #${definition.pay_definition_id}`);
+            const rateDetails = [definition.unit_name, definition.rate_status].filter(Boolean).join(' · ');
             const ruleDetails = [definition.rule_type, definition.rule_amount == null ? null : `Amount ${formatMoney(definition.rule_amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}`, definition.rule_prorated_amount == null ? null : `Prorated ${formatMoney(definition.rule_prorated_amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}`, definition.min_max_status, definition.rule_status].filter(Boolean).join(' · ');
             const effective = definition.effective_from || definition.effective_to
               ? `${definition.effective_from ?? 'Open'} to ${definition.effective_to ?? 'Open'}`
@@ -29,7 +29,7 @@ function RateDefinitionTable({ response }: { response: FinalizedRatesUsedRespons
             return (
               <tr key={`${definition.evidence_kind}-${definition.used_rate_definition_id}`}>
                 <td>{driver}<small>{definition.driver_number ?? '—'}</small></td>
-                <td>{payDefinition}<small>{definition.pay_definition_id == null ? 'No definition' : `ID ${definition.pay_definition_id}`}</small></td>
+                <td>{payDefinition}<small>{definition.status_rate_column_id != null ? `Status rate column ${definition.status_rate_column_id}` : definition.pay_definition_id == null ? 'No definition' : `ID ${definition.pay_definition_id}`}</small></td>
                 <td>{rateDefinitionLabel(definition)}<small>{definition.source_type}</small></td>
                 <td>{definition.rate_amount == null ? 'Not provided' : formatMoney(definition.rate_amount, response.metadata.currency_code, response.metadata.currency_minor_unit_digits)}<small>{rateDetails || 'Details not provided'}</small></td>
                 <td>{ruleDetails || 'Not provided'}</td>
