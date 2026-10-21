@@ -17,6 +17,7 @@ from app.settings import audit as settings_audit
 from app.settings import company
 from app.settings import security as settings_security
 from app.settings.schemas import CompanyUpdate
+from tests.builders.final_evidence import insert_final_line, seed_snapshot_component
 from tests.builders.pay_rules import insert_pay_rule
 
 
@@ -132,24 +133,12 @@ async def test_each_durable_monetary_state_locks_company_currency(
                     RETURNING draftlineid
                 """), {**params, "status": status})).scalar_one())
             elif state_kind == "snapshot":
-                row_id = int((await db.execute(text("""
-                    INSERT INTO payroll.payrollcalculationsnapshots
-                        (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-                         sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay,
-                         currencycode, currencyminorunitdigits)
-                    VALUES (:cid,:bid,:pid,1,'payroll-calculation-v1',:hash,:hash,1,10,'USD',2)
-                    RETURNING payrollcalculationsnapshotid
-                """), params)).scalar_one())
+                row_id = (await seed_snapshot_component(
+                    db, period_id=params["pid"], driver_assignment_id=params["did"])).snapshot_id
             elif state_kind == "final_line":
-                await db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert','true',true)"))
-                row_id = int((await db.execute(text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, linetype, linescope,
-                         finalamount, sourcetype, approvedbyuserid, approvedatutc, currencycode,
-                         currencyminorunitdigits)
-                    VALUES (:cid,:bid,:pid,:did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did),'OTHER','Period',10,'P3a',1,NOW(),'USD',2)
-                    RETURNING finallineid
-                """), params)).scalar_one())
+                chain = await seed_snapshot_component(
+                    db, period_id=params["pid"], driver_assignment_id=params["did"])
+                row_id = await insert_final_line(db, chain)
 
             with pytest.raises(HTTPException) as blocked:
                 await company.update_company_profile(

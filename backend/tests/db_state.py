@@ -80,7 +80,7 @@ DRIVER_COMPENSATION_CONTEXT_TRIGGERS = tuple(
 # The pair historically suspended to retire finalized history or force a status.
 FINALIZED_HISTORY_TRIGGERS = (FINAL_LINE_IMMUTABLE_TRIGGER, PERIOD_STATUS_REVERT_TRIGGER)
 
-# Immutable-evidence guards (migrations 0035/0061-0065), each suspended by exact name,
+# Immutable-evidence guards (migrations 0035/0061-0065/0089), each suspended by exact name,
 # never DISABLE TRIGGER ALL (which would also suspend unrelated cascades), when a
 # test retires a whole evidenced period leaf-to-root.
 PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS = (
@@ -91,6 +91,9 @@ PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS = (
     TriggerIdentity("payroll", "payrollperiodauditevidencecoverage", "trg_payrollperiodauditevidencecoverage_immutable"),
     TriggerIdentity("payroll", "payrollcalculationsnapshotusedratedefinitions", "trg_payrollcalculationsnapshotusedratedefinitions_immutable"),
     TriggerIdentity("payroll", "payrollcalculationdrivertotals", "trg_payrollcalculationdrivertotals_immutable"),
+    TriggerIdentity("payroll", "payrollcalculationsnapshotcomponents", "trg_payrollcalculationsnapshotcomponents_immutable"),
+    TriggerIdentity("payroll", "payrollcalculationsnapshotminmaxevaluations", "trg_payrollcalculationsnapshotminmaxevaluations_immutable"),
+    TriggerIdentity("payroll", "payrollcalculationsnapshotminmaxrules", "trg_payrollcalculationsnapshotminmaxrules_immutable"),
     TriggerIdentity("payroll", "payrollcalculationsnapshotstatusentries", "trg_payrollcalculationsnapshotstatusentries_immutable"),
     TriggerIdentity("payroll", "payrollcalculationsnapshotbonusevents", "trg_payrollcalculationsnapshotbonusevents_immutable"),
     TriggerIdentity("payroll", "payrollperiodworkflowactionevidence", "trg_payrollperiodworkflowactionevidence_immutable"),

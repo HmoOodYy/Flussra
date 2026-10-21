@@ -24,12 +24,6 @@ function fmt(v: string | number | null | undefined, code?: string | null, digits
   return formatCurrencyMoney(v, code, digits);
 }
 
-function fmtQty(v: string | null | undefined): string {
-  if (v == null) return '-';
-  const n = Number(v);
-  return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: 4 }) : String(v);
-}
-
 // Display-only grouping of immutable FinalLines. Financial authority remains
 // the persisted FinalLine rows and period aggregates returned by the backend.
 interface DriverTotal {
@@ -44,21 +38,24 @@ interface DriverTotal {
 }
 
 function isSystemAdjustmentLine(line: FinalLineSummary): boolean {
-  return line.line_type === 'SYS_MIN_TOPUP' || line.line_type === 'SYS_MAX_CAP';
+  return line.component_kind === 'MINIMUM_ADJUSTMENT' || line.component_kind === 'MAXIMUM_ADJUSTMENT';
 }
 
 function isBonusEventLine(line: FinalLineSummary): boolean {
-  return line.source_type === 'BonusEvent';
+  return line.component_kind === 'BONUS';
 }
 
-// Explicit canonical classification only. A line that matches no supported
-// component is never folded into a subtotal; it is surfaced as an integrity error.
+// Classification is the backend's component kind, never the display line type. A line of
+// an unknown kind is never folded into a subtotal; it is surfaced as an integrity error.
 function lineComponent(line: FinalLineSummary): 'sys_adjustment' | 'bonus' | 'status' | 'daily' | null {
-  if (isSystemAdjustmentLine(line)) return 'sys_adjustment';
-  if (isBonusEventLine(line)) return 'bonus';
-  if (line.source_type === 'StatusEntryState') return 'status';
-  if (line.source_type === 'DraftLine' && line.line_scope === 'Daily') return 'daily';
-  return null;
+  switch (line.component_kind) {
+    case 'MINIMUM_ADJUSTMENT':
+    case 'MAXIMUM_ADJUSTMENT': return 'sys_adjustment';
+    case 'BONUS': return 'bonus';
+    case 'STATUS': return 'status';
+    case 'ORDINARY': return 'daily';
+    default: return null;
+  }
 }
 
 function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
@@ -93,11 +90,14 @@ function buildDriverTotals(lines: FinalLineSummary[]): DriverTotal[] {
 }
 
 function lineLabel(line: FinalLineSummary): string {
-  if (line.line_type === 'SYS_MIN_TOPUP') return 'Minimum top-up';
-  if (line.line_type === 'SYS_MAX_CAP') return 'Maximum cap';
-  if (line.source_type === 'StatusEntryState') return 'Status payment';
-  if (line.source_type === 'BonusEvent') return 'Bonus event';
-  return line.line_type;
+  switch (line.component_kind) {
+    case 'MINIMUM_ADJUSTMENT': return 'Minimum top-up';
+    case 'MAXIMUM_ADJUSTMENT': return 'Maximum cap';
+    case 'STATUS': return line.component_label ?? 'Status payment';
+    case 'BONUS': return 'Bonus';
+    case 'ORDINARY': return line.component_label ?? 'Ordinary pay';
+    default: return line.line_type;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -191,8 +191,8 @@ function SysAdjTable({ lines }: { lines: FinalLineSummary[] }) {
           <tr key={l.final_line_id}>
             <td className={styles.nameCell}>{l.driver_name}</td>
             <td>
-              <span className={`${styles.typePill} ${l.line_type === 'SYS_MIN_TOPUP' ? styles.topupPill : styles.capPill}`}>
-                {l.line_type === 'SYS_MIN_TOPUP' ? 'Min Top-Up' : 'Max Cap'}
+              <span className={`${styles.typePill} ${l.component_kind === 'MINIMUM_ADJUSTMENT' ? styles.topupPill : styles.capPill}`}>
+                {l.component_kind === 'MINIMUM_ADJUSTMENT' ? 'Min Top-Up' : 'Max Cap'}
               </span>
             </td>
             <td className={`${styles.numCol} ${styles.adjCell}`}>{fmt(l.final_amount, l.currency_code, l.currency_minor_unit_digits)}</td>
@@ -232,35 +232,22 @@ function BonusEventsTable({ lines }: { lines: FinalLineSummary[] }) {
 }
 
 function LineDetailsTable({ lines }: { lines: FinalLineSummary[] }) {
-  const dailyLines = lines.filter((l) => l.line_scope === 'Daily' && !isSystemAdjustmentLine(l));
-  if (dailyLines.length === 0) return <div className={styles.emptyMsg}>No daily lines.</div>;
+  const payLines = lines.filter((l) => l.component_kind === 'ORDINARY' || l.component_kind === 'STATUS');
+  if (payLines.length === 0) return <div className={styles.emptyMsg}>No pay components.</div>;
   return (
     <table className={styles.table}>
       <thead>
         <tr>
           <th>Driver</th>
-          <th>Date</th>
           <th>Type</th>
-          <th className={styles.numCol}>Qty</th>
-          <th className={styles.numCol}>Rate</th>
           <th className={styles.numCol}>Final</th>
         </tr>
       </thead>
       <tbody>
-        {dailyLines.map((l) => (
+        {payLines.map((l) => (
           <tr key={l.final_line_id}>
             <td className={styles.nameCell}>{l.driver_name}</td>
-            <td className={styles.dateCell}>{l.work_date ?? '-'}</td>
-            <td>
-              {lineLabel(l)}
-              {l.rate_behavior && (
-                <span style={{ fontSize: '0.7rem', color: '#64748b', marginLeft: 4 }}>
-                  ({l.rate_behavior})
-                </span>
-              )}
-            </td>
-            <td className={styles.numCol}>{fmtQty(l.quantity)}</td>
-            <td className={styles.numCol}>{fmt(l.resolved_rate_amount ?? l.rate_amount, l.currency_code, l.currency_minor_unit_digits)}</td>
+            <td>{lineLabel(l)}</td>
             <td className={`${styles.numCol} ${styles.finalPayCell}`}>{fmt(l.final_amount, l.currency_code, l.currency_minor_unit_digits)}</td>
           </tr>
         ))}
@@ -321,7 +308,7 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
   const unclassifiedCount = lines.filter((l) => lineComponent(l) === null).length;
   const sysCount = lines.filter(isSystemAdjustmentLine).length;
   const bonusCount = lines.filter(isBonusEventLine).length;
-  const dailyCount = lines.filter((l) => l.line_scope === 'Daily' && !isSystemAdjustmentLine(l)).length;
+  const dailyCount = lines.filter((l) => l.component_kind === 'ORDINARY' || l.component_kind === 'STATUS').length;
 
   return (
     <div className={styles.backdrop} onClick={onClose}>
@@ -415,9 +402,9 @@ export function FinalSummaryDialog({ period, onClose }: FinalSummaryDialogProps)
                 <SysAdjTable lines={lines} />
               </Section>
 
-              {/* ── Daily Line Details ───────────────────────── */}
+              {/* ── Pay components ───────────────────────────── */}
               <Section
-                title="Daily Line Details"
+                title="Pay Components"
                 badge={dailyCount}
                 defaultOpen={false}
               >

@@ -647,8 +647,8 @@ async def assert_assignment_payroll_covered(
             SELECT PayrollPeriodID, WorkDate FROM payroll.PayrollPeriodDriverDayEntryState
             WHERE CompanyID = :company_id AND DriverAssignmentID = :aid AND IsVoided = FALSE
             UNION
-            SELECT PayrollPeriodID, WorkDate FROM payroll.PayrollFinalLines
-            WHERE CompanyID = :company_id AND DriverAssignmentID = :aid AND WorkDate IS NOT NULL
+            SELECT PayrollPeriodID, WorkDate FROM payroll.vw_FinalizedWorkDates
+            WHERE CompanyID = :company_id AND DriverAssignmentID = :aid
         )
         SELECT 1
         FROM facts f

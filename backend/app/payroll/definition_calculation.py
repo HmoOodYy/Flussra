@@ -23,6 +23,7 @@ Missing, zero and invalid are distinct:
 """
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 
@@ -63,13 +64,22 @@ class DefinitionCalculation:
     """The outcome of one calculation.
 
     ``amount`` is set only when ``status`` is CALCULATED. ``driver_rate_schedule_id``
-    identifies the whole schedule that was used (None when none applied).
+    identifies the whole schedule that was used (None when none applied). When
+    CALCULATED, ``rate_amount`` is the rate the method actually used and
+    ``rate_component_definition_id`` the schedule value it came from, with the schedule's
+    status and effective window as resolved; they describe the calculation and never
+    change it.
     """
 
     status: CalculationStatus
     amount: Decimal | None = None
     calculation_version: str | None = None
     driver_rate_schedule_id: int | None = None
+    rate_amount: Decimal | None = None
+    rate_component_definition_id: int | None = None
+    schedule_status: str | None = None
+    schedule_effective_from: date | None = None
+    schedule_effective_to: date | None = None
 
     @property
     def is_calculated(self) -> bool:
@@ -89,7 +99,8 @@ def _calculate_per_unit(
     if resolved.rate_shape != "Scalar" or len(resolved.components) != 1:
         return DefinitionCalculation(
             CalculationStatus.INCOMPLETE_RATE, driver_rate_schedule_id=schedule_id)
-    amount = resolved.components[0].amount
+    component = resolved.components[0]
+    amount = component.amount
     if amount is None or amount < 0:
         return DefinitionCalculation(
             CalculationStatus.INCOMPLETE_RATE, driver_rate_schedule_id=schedule_id)
@@ -99,6 +110,11 @@ def _calculate_per_unit(
         amount=result.calculated_amount,
         calculation_version=PER_UNIT_CALCULATION_VERSION,
         driver_rate_schedule_id=schedule_id,
+        rate_amount=amount,
+        rate_component_definition_id=component.rate_component_definition_id,
+        schedule_status=resolved.schedule_status,
+        schedule_effective_from=resolved.effective_from,
+        schedule_effective_to=resolved.effective_to,
     )
 
 

@@ -30,7 +30,9 @@ export interface PeriodSummary {
   draft_lines_needing_attention: number;
   final_lines: number;
   // Ledger aggregates (migration 0024 — non-zero only for Locked/Archived)
-  final_gross: string;
+  final_gross: string | null;
+  financial_authority?: string | null;
+  financial_authority_reason?: string | null;
   final_driver_count: number;
 }
 

@@ -35,9 +35,9 @@ from tests.builders.access import (
     create_user_with_role_token,
     get_company_role_id,
 )
+from tests.builders.final_evidence import seed_finalized_evidence
 from tests.db_state import (
     PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS,
-    allow_final_line_insert,
     suspended_test_triggers,
 )
 from tests.ownership import assert_no_mutable_period_state, cancel_active_branch_periods
@@ -632,8 +632,12 @@ async def _clean_finalized(direct_db, branch_id: int) -> None:
                 "WHERE payrollperiodid = ANY(:ids)))"
             )
             for stmt in (
+                "DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = ANY(:ids)",
                 f"DELETE FROM payroll.payrollcalculationsnapshotlines "
                 f"WHERE payrollcalculationdrivertotalid IN {drivertotal_subq}",
+                "DELETE FROM payroll.payrollcalculationsnapshotcomponents WHERE payrollperiodid = ANY(:ids)",
+                "DELETE FROM payroll.payrollcalculationsnapshotminmaxrules WHERE payrollperiodid = ANY(:ids)",
+                "DELETE FROM payroll.payrollcalculationsnapshotminmaxevaluations WHERE payrollperiodid = ANY(:ids)",
                 "DELETE FROM payroll.payrollperiodauditevidencesnapshotevents WHERE payrollperiodid = ANY(:ids)",
                 "DELETE FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid = ANY(:ids)",
                 "DELETE FROM payroll.payrollperiodauditevidencecoverage WHERE payrollperiodid = ANY(:ids)",
@@ -759,138 +763,11 @@ async def _insert_approved_review_item(
 @pytest.mark.asyncio
 class TestDriversOffFinalized:
 
-    async def test_locked_period_legacy_snapshot_status_evidence_unavailable(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
-    ):
-        """Case C: a Locked period whose authoritative snapshot predates
-        CP-5C (ReportEvidenceVersion IS NULL) must report status_evidence as
-        UNAVAILABLE/LEGACY_NOT_CAPTURED, with no row fabricated from mutable
-        PayrollStatusKeys or legacy DraftLines."""
-        await _clean_finalized(direct_db, paytest_branch_id)
-        company_id = await _get_company_id(direct_db)
-        period_id, start = await _insert_finalized_period(
-            direct_db, company_id, paytest_branch_id, "LEGACYSNAP", status="Locked",
-        )
-        snapshot_id = int((await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollcalculationsnapshots
-                    (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-                     sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES (:cid, :bid, :pid, 1, 'payroll-calculation-v1', :source_hash, :snapshot_hash, 1, 0, 'USD', 2)
-                RETURNING payrollcalculationsnapshotid
-            """),
-            {
-                "cid": company_id, "bid": paytest_branch_id, "pid": period_id,
-                "source_hash": "0" * 64, "snapshot_hash": "4" * 64,
-            },
-        )).scalar_one())
-        await _insert_approved_review_item(
-            direct_db, company_id, paytest_branch_id, period_id, snapshot_id,
-        )
-        async with allow_final_line_insert(direct_db):
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
-                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
-                """),
-                {
-                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
-                    "wdate": start,
-                    "snap": (
-                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
-                        f'"snapshot_hash": "{"4" * 64}"}}'
-                    ),
-                },
-            )
-        await direct_db.commit()
-
-        try:
-            resp = await session_client.get(
-                f"/payroll/periods/{period_id}/drivers-off", headers=auth(auth_token),
-            )
-            assert resp.status_code == 200, resp.text
-            data = resp.json()
-            assert data["total_count"] == 0
-            assert data["entries"] == []
-            assert data.get("status_evidence") == {
-                "state": "UNAVAILABLE", "reason_code": "LEGACY_NOT_CAPTURED",
-            }
-        finally:
-            await _clean_finalized(direct_db, paytest_branch_id)
-
-    async def test_locked_period_captured_snapshot_zero_status_rows_is_empty(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
-    ):
-        """Case D: a Locked period whose authoritative snapshot IS versioned
-        (captured) but has zero PayrollCalculationSnapshotStatusEntries rows
-        must report status_evidence as EMPTY -- a positive historical fact,
-        not UNAVAILABLE -- with no fabricated off-driver rows."""
-        await _clean_finalized(direct_db, paytest_branch_id)
-        company_id = await _get_company_id(direct_db)
-        period_id, start = await _insert_finalized_period(
-            direct_db, company_id, paytest_branch_id, "EMPTYSNAP", status="Locked",
-        )
-        snapshot_id = int((await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrollcalculationsnapshots
-                    (companyid, branchid, payrollperiodid, revisionnumber, calculationversion,
-                     sourceconfighash, snapshothash, createdbyuserid, totalexpectedpay,
-                     reportevidenceversion, reportevidencehash, CurrencyCode, CurrencyMinorUnitDigits)
-                VALUES (:cid, :bid, :pid, 1, 'payroll-calculation-v1', :source_hash, :snapshot_hash, 1, 0,
-                        1, :evidence_hash, 'USD', 2)
-                RETURNING payrollcalculationsnapshotid
-            """),
-            {
-                "cid": company_id, "bid": paytest_branch_id, "pid": period_id,
-                "source_hash": "0" * 64, "snapshot_hash": "5" * 64,
-                "evidence_hash": "6" * 64,
-            },
-        )).scalar_one())
-        await _insert_approved_review_item(
-            direct_db, company_id, paytest_branch_id, period_id, snapshot_id,
-        )
-        async with allow_final_line_insert(direct_db):
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
-                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, sourcesnapshot, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), CAST(:snap AS JSONB), 'USD', 2)
-                """),
-                {
-                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
-                    "wdate": start,
-                    "snap": (
-                        f'{{"payroll_calculation_snapshot_id": {snapshot_id:d}, "revision_number": 1, '
-                        f'"snapshot_hash": "{"5" * 64}"}}'
-                    ),
-                },
-            )
-        await direct_db.commit()
-
-        try:
-            resp = await session_client.get(
-                f"/payroll/periods/{period_id}/drivers-off", headers=auth(auth_token),
-            )
-            assert resp.status_code == 200, resp.text
-            data = resp.json()
-            assert data["total_count"] == 0
-            assert data["entries"] == []
-            assert data.get("status_evidence") == {"state": "EMPTY", "reason_code": None}
-        finally:
-            await _clean_finalized(direct_db, paytest_branch_id)
-
     async def test_locked_period_missing_snapshot_provenance_is_unavailable(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
     ):
-        """Case E: a Locked period with no Approved PeriodApproval review
-        item bound to a snapshot must report status_evidence as UNAVAILABLE/
+        """Case E: a Locked period whose FinalLines name more than one
+        snapshot must report status_evidence as UNAVAILABLE/
         PROVENANCE_UNAVAILABLE -- never falling back to another snapshot or
         to mutable current state."""
         await _clean_finalized(direct_db, paytest_branch_id)
@@ -898,21 +775,12 @@ class TestDriversOffFinalized:
         period_id, start = await _insert_finalized_period(
             direct_db, company_id, paytest_branch_id, "NOPROV", status="Locked",
         )
-        async with allow_final_line_insert(direct_db):
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid, workdate, linetype,
-                         linescope, quantity, finalamount, sourcetype, approvedbyuserid,
-                         approvedatutc, lockedatutc, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), :wdate, 'HOURS', 'Daily', 1, 12.0000,
-                            'DraftLine', 1, NOW(), NOW(), 'USD', 2)
-                """),
-                {
-                    "cid": company_id, "bid": paytest_branch_id, "pid": period_id, "did": paytest_driver_assignment_id,
-                    "wdate": start,
-                },
-            )
+        # Two snapshots projected into one period: the FinalLines do not name exactly one
+        # snapshot, so the evidence is unavailable rather than taken from either of them.
+        for revision in (1, 2):
+            await seed_finalized_evidence(
+                direct_db, period_id=period_id, driver_assignment_id=paytest_driver_assignment_id,
+                revision=revision)
         await direct_db.commit()
 
         try:

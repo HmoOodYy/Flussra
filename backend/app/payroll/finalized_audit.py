@@ -8,7 +8,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.permissions import check_permission
-from app.payroll.evidence_gate import require_target_payroll_evidence
 from app.payroll.finalized_context import (
     availability as _availability,
 )
@@ -66,7 +65,6 @@ async def build_finalized_audit(
 ) -> dict[str, Any]:
     """Build P6D's lazy immutable change chronology and revision grouping."""
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    require_target_payroll_evidence()
     await check_permission(company_id, user_id, int(period["branchid"]), "ledger.audit.view", db)
     snapshot, provenance = await _originating_snapshot(period, db)
     availability = await _audit_domain_availability(period, db)
@@ -178,6 +176,14 @@ async def build_finalized_audit(
             "company_id": period["companyid"], "branch_id": period["branchid"],
             "period_id": period["payrollperiodid"],
         })).mappings().all()]
+
+        # Min/Max rule evidence of the frozen evaluations is the rules' one authority.
+        for total in snapshot["content"]["DriverTotals"]:
+            rate_rows.extend({
+                "used_rate_definition_id": int(rule["PayrollCalculationSnapshotMinMaxRuleID"]),
+                "evidence_kind": "DriverPayRule", "driver_pay_rule_id": rule["DriverPayRuleID"],
+                "driver_assignment_id": total["DriverAssignmentID"],
+            } for rule in total["MinMax"]["Rules"])
 
     complete = all(value["state"] in {"AVAILABLE", "EMPTY"} for value in availability.values())
     metadata = {

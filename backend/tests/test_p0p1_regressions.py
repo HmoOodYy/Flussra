@@ -18,6 +18,7 @@ import psycopg2
 import pytest_asyncio
 from sqlalchemy import text
 
+from tests.builders.final_evidence import discard_chain, insert_final_line, seed_snapshot_component
 from tests.builders.owned_scope import (
     create_owned_branch,
     create_owned_driver,
@@ -25,8 +26,6 @@ from tests.builders.owned_scope import (
 from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.db_state import (
     DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
-    FINAL_LINE_IMMUTABLE_TRIGGER,
-    allow_final_line_insert,
     suspended_test_triggers,
 )
 
@@ -519,19 +518,9 @@ class TestDriverPayRulesArchivedProtection:
         arch_pid = p_result.scalar_one()
         await _roster(direct_db, company_id, paytest_branch_id, arch_pid, owned_driver_assignment_id)
 
-        # Phase 6: authorise this test-setup INSERT via the session-level GUC.
-        # is_local=false (third arg) persists for this AUTOCOMMIT connection session.
-        async with allow_final_line_insert(direct_db):
-            await direct_db.execute(
-                text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
-                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), 'Miles', 100, 55.00, 'Manual', 'USD', 2)
-                """),
-                {"cid": company_id, "bid": paytest_branch_id,
-                 "pid": arch_pid, "did": owned_driver_assignment_id},
-            )
+        chain = await seed_snapshot_component(
+            direct_db, period_id=arch_pid, driver_assignment_id=owned_driver_assignment_id)
+        await insert_final_line(direct_db, chain)
 
         try:
             # Void must be blocked because Archived period was governed by the rule
@@ -543,11 +532,7 @@ class TestDriverPayRulesArchivedProtection:
             assert void_resp.json()["detail"]["code"] == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"
             assert void_resp.json()["detail"]["payroll_period_ids"] == [arch_pid]
         finally:
-            async with suspended_test_triggers(direct_db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
-                await direct_db.execute(
-                    text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-                    {"pid": arch_pid},
-                )
+            await discard_chain(direct_db, chain)
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperioddrivereligibility WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},
@@ -607,18 +592,9 @@ class TestDriverPayRulesArchivedProtection:
         arch_pid = p_result.scalar_one()
         await _roster(direct_db, company_id, paytest_branch_id, arch_pid, owned_driver_assignment_id)
 
-        # Phase 6: authorise this test-setup INSERT via the session-level GUC.
-        async with allow_final_line_insert(direct_db):
-            await direct_db.execute(
-                text("""
-                    INSERT INTO payroll.payrollfinallines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, driverid,
-                         linetype, quantity, finalamount, sourcetype, CurrencyCode, CurrencyMinorUnitDigits)
-                    VALUES (:cid, :bid, :pid, :did, (SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :did), 'Miles', 100, 55.00, 'Manual', 'USD', 2)
-                """),
-                {"cid": company_id, "bid": paytest_branch_id,
-                 "pid": arch_pid, "did": owned_driver_assignment_id},
-            )
+        chain = await seed_snapshot_component(
+            direct_db, period_id=arch_pid, driver_assignment_id=owned_driver_assignment_id)
+        await insert_final_line(direct_db, chain)
 
         try:
             # Try to end rule before the archived period start — must be blocked
@@ -630,11 +606,7 @@ class TestDriverPayRulesArchivedProtection:
             assert end_resp.status_code == 422
             assert end_resp.json()["detail"]["code"] == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"
         finally:
-            async with suspended_test_triggers(direct_db, [FINAL_LINE_IMMUTABLE_TRIGGER]):
-                await direct_db.execute(
-                    text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"),
-                    {"pid": arch_pid},
-                )
+            await discard_chain(direct_db, chain)
             await direct_db.execute(
                 text("DELETE FROM payroll.payrollperioddrivereligibility WHERE payrollperiodid = :pid"),
                 {"pid": arch_pid},

@@ -1,7 +1,6 @@
 """Immutable Phase 6 evidence writers shared by payroll and review actions."""
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Iterable
 from typing import Any
@@ -11,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.company_currency import CompanyCurrency
+from app.payroll.snapshot_hash import used_rate_fingerprint
 
 
 def _canonical_json(value: Any) -> str:
@@ -155,45 +155,73 @@ async def capture_workflow_action_evidence(
     })
 
 
-def _definition_fingerprint(descriptor: dict[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json(descriptor).encode("utf-8")).hexdigest()
+def _scope_error(kind: str) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail=f"Cannot submit: used {kind} evidence is outside the snapshot scope.",
+    )
 
 
-async def capture_snapshot_used_rate_definitions(
+def _schedule_descriptor(line: dict[str, Any]) -> dict[str, Any]:
+    """The target DriverRateSchedule an ordinary line used, as the packet resolved it."""
+    required = (
+        "DriverRateScheduleID", "RateDefinitionID", "PayDefinitionID",
+        "RateComponentDefinitionID", "ResolvedRateAmount", "ScheduleStatus",
+        "ScheduleEffectiveFrom",
+    )
+    if any(line.get(field) is None for field in required):
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot submit: an ordinary line does not identify the rate it used.",
+        )
+    return {
+        "EvidenceKind": "DriverRateSchedule",
+        "SourceType": "DraftLine",
+        "DriverAssignmentID": int(line["DriverAssignmentID"]),
+        "DriverID": int(line["DriverID"]),
+        "DriverRateScheduleID": int(line["DriverRateScheduleID"]),
+        "RateDefinitionID": int(line["RateDefinitionID"]),
+        "PayDefinitionID": int(line["PayDefinitionID"]),
+        "RateComponentDefinitionID": int(line["RateComponentDefinitionID"]),
+        "RateAmount": line["ResolvedRateAmount"],
+        "EffectiveFrom": line["ScheduleEffectiveFrom"],
+        "EffectiveTo": line["ScheduleEffectiveTo"],
+        "RateStatus": line["ScheduleStatus"],
+    }
+
+
+async def build_used_rate_evidence(
     *,
-    snapshot_id: int,
     company_id: int,
     branch_id: int,
-    period_id: int,
-    snapshot_line_rows: Iterable[dict[str, Any]],
+    lines: Iterable[dict[str, Any]],
     currency: CompanyCurrency,
     db: AsyncConnection,
-) -> dict[int, int]:
-    """Persist only the rate/rule definitions actually referenced by snapshot lines.
+) -> tuple[list[dict[str, Any]], list[str | None]]:
+    """The rates actually used by the snapshot's lines, one descriptor per distinct rate.
 
-    The returned mapping uses the caller's stable snapshot-line ordinal.  This
-    lets the CP-4D writer link every applicable immutable line without a later
-    mutable-rate lookup.
+    Ordinary lines record the target DriverRateSchedule they used (schedule, definition, the
+    schedule value and its amount, status and effective window) exactly as the calculation
+    packet resolved them. Status lines record the legacy Status DriverRate and RateType (Status
+    remains assignment-owned). Bonus lines use no rate. DriverPayRules are not captured here:
+    the Min/Max rule evidence of the snapshot is their one authority.
+
+    Returns the distinct descriptors (each with its ``DefinitionFingerprint``) and, per input
+    line in order, the fingerprint of the rate that line used (``None`` for a line that uses
+    none). Nothing is written: the descriptors are hashed with the snapshot first.
     """
-    rows = list(snapshot_line_rows)
-    rate_ids = sorted({
-        int(row["DriverRateID"])
-        for row in rows
-        if row.get("DriverRateID") is not None
+    rows = list(lines)
+    status_rate_ids = sorted({
+        int(row["DriverRateID"]) for row in rows
+        if row["SourceType"] == "StatusEntryState" and row.get("DriverRateID") is not None
     })
-    rule_ids = sorted({
-        int((row.get("SourceEvidenceJSONB") or {}).get("DriverPayRuleID"))
-        for row in rows
-        if (row.get("SourceEvidenceJSONB") or {}).get("DriverPayRuleID") is not None
-    })
-    rate_rows: dict[int, Any] = {}
-    if rate_ids:
-        rate_rows = {
+    status_rates: dict[int, Any] = {}
+    if status_rate_ids:
+        status_rates = {
             int(row["driverrateid"]): row
             for row in (await db.execute(text("""
                 SELECT dr.driverrateid, dr.companyid, dr.branchid, dr.driverassignmentid,
-                       dr.ratetypeid, dr.amount, dr.effectivefrom, dr.effectiveto,
-                       dr.status, dr.blocksize, dr.roundingrule,
+                       dr.ratetypeid, dr.amount, dr.effectivefrom, dr.effectiveto, dr.status,
                        rt.ratecode, rt.ratename, rt.unitname
                 FROM payroll.driverrates dr
                 JOIN payroll.ratetypes rt ON rt.ratetypeid = dr.ratetypeid
@@ -201,140 +229,108 @@ async def capture_snapshot_used_rate_definitions(
                   AND dr.companyid = :company_id
                   AND dr.branchid = :branch_id
             """), {
-                "rate_ids": rate_ids,
+                "rate_ids": status_rate_ids,
                 "company_id": company_id,
                 "branch_id": branch_id,
             })).mappings().all()
         }
-    rule_rows: dict[int, Any] = {}
-    if rule_ids:
-        rule_rows = {
-            int(row["driverpayruleid"]): row
-            for row in (await db.execute(text("""
-                SELECT driverpayruleid, companyid, driverid, ruletype,
-                       amount, effectivefrom, effectiveto, status
-                FROM payroll.driverpayrules
-                WHERE driverpayruleid = ANY(:rule_ids)
-                  AND companyid = :company_id
-            """), {
-                "rule_ids": rule_ids,
-                "company_id": company_id,
-            })).mappings().all()
-        }
 
-    definition_ids: dict[str, int] = {}
-    line_definition_ids: dict[int, int] = {}
-    for ordinal, line in enumerate(rows):
-        evidence = line.get("SourceEvidenceJSONB") or {}
-        driver_rate_id = line.get("DriverRateID")
-        rule_id = evidence.get("DriverPayRuleID")
-        if driver_rate_id is None and rule_id is None:
-            continue
-
-        if driver_rate_id is not None:
-            rate = rate_rows.get(int(driver_rate_id))
-            if rate is None or int(rate["driverassignmentid"]) != int(line["DriverAssignmentID"]):
-                raise HTTPException(
-                    status_code=422,
-                    detail="Cannot submit: used DriverRate evidence is outside the snapshot scope.",
-                )
+    descriptors: dict[str, dict[str, Any]] = {}
+    line_fingerprints: list[str | None] = []
+    for line in rows:
+        source_type = line["SourceType"]
+        if source_type == "DraftLine":
+            descriptor = _schedule_descriptor(line)
+        elif source_type == "StatusEntryState":
+            rate = status_rates.get(int(line["DriverRateID"]))
+            if (
+                rate is None
+                or int(rate["driverassignmentid"]) != int(line["DriverAssignmentID"])
+                or rate["amount"] != line["ResolvedRateAmount"]
+            ):
+                raise _scope_error("DriverRate")
             descriptor = {
-                "EvidenceKind": "DriverRate",
-                "SourceType": line["SourceType"],
+                "EvidenceKind": "StatusDriverRate",
+                "SourceType": source_type,
                 "DriverAssignmentID": int(line["DriverAssignmentID"]),
                 "DriverID": int(line["DriverID"]),
-                "PayItemID": line.get("PayItemID"),
                 "RateTypeID": int(rate["ratetypeid"]),
                 "DriverRateID": int(rate["driverrateid"]),
-                "RateBehavior": evidence.get("RateBehavior"),
-                "RateTypeCode": rate["ratecode"],
-                "RateTypeName": rate["ratename"],
-                "UnitName": rate["unitname"],
+                "RateTypeCodeSnapshot": rate["ratecode"],
+                "RateTypeNameSnapshot": rate["ratename"],
+                "UnitNameSnapshot": rate["unitname"],
                 "RateAmount": rate["amount"],
                 "EffectiveFrom": rate["effectivefrom"],
                 "EffectiveTo": rate["effectiveto"],
                 "RateStatus": rate["status"],
-                "BlockSize": rate["blocksize"],
-                "RoundingRule": rate["roundingrule"],
             }
         else:
-            rule = rule_rows.get(int(rule_id))
-            # A pay rule belongs to the permanent Driver, so it is in scope for any line of
-            # that Driver whatever assignment or Branch the line was worked under.
-            if rule is None or int(rule["driverid"]) != int(line["DriverID"]):
-                raise HTTPException(
-                    status_code=422,
-                    detail="Cannot submit: used DriverPayRule evidence is outside the snapshot scope.",
-                )
-            descriptor = {
-                "EvidenceKind": "DriverPayRule",
-                "SourceType": line["SourceType"],
-                "DriverAssignmentID": int(line["DriverAssignmentID"]),
-                "DriverID": int(line["DriverID"]),
-                "PayItemID": line.get("PayItemID"),
-                "DriverPayRuleID": int(rule["driverpayruleid"]),
-                "RuleType": rule["ruletype"],
-                "RuleAmount": rule["amount"],
-                "EffectiveFrom": rule["effectivefrom"],
-                "EffectiveTo": rule["effectiveto"],
-                "RuleStatus": rule["status"],
-            }
+            line_fingerprints.append(None)
+            continue
         descriptor["CurrencyCodeSnapshot"] = currency.code
         descriptor["CurrencyMinorUnitDigitsSnapshot"] = currency.minor_unit_digits
-        fingerprint = _definition_fingerprint(descriptor)
-        definition_id = definition_ids.get(fingerprint)
-        if definition_id is None:
-            result = await db.execute(text("""
-                INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions
-                    (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-                     driverassignmentid, driverid, definitionfingerprint, evidencekind, sourcetypesnapshot,
-                     payitemid, ratetypeid, driverrateid, driverpayruleid,
-                     ratebehaviorsnapshot, ratetypecodesnapshot, ratetypenamesnapshot,
-                     unitnamesnapshot, rateamountsnapshot, effectivefromsnapshot,
-                     effectivetosnapshot, ratestatussnapshot, blocksizesnapshot,
-                     roundingrulesnapshot, ruletypesnapshot, ruleamountsnapshot,
-                     rulestatussnapshot, currencycodesnapshot,
-                     currencyminorunitdigitssnapshot)
-                VALUES
-                    (:snapshot_id, :company_id, :branch_id, :period_id,
-                     :driver_assignment_id, :driver_id, :fingerprint, :evidence_kind, :source_type,
-                     :pay_item_id, :rate_type_id, :driver_rate_id, :driver_pay_rule_id,
-                     :rate_behavior, :rate_type_code, :rate_type_name, :unit_name,
-                     :rate_amount, :effective_from, :effective_to, :rate_status,
-                     :block_size, :rounding_rule, :rule_type, :rule_amount, :rule_status,
-                     :currency_code, :currency_minor)
-                RETURNING payrollcalculationsnapshotusedratedefinitionid
-            """), {
-                "snapshot_id": snapshot_id,
-                "company_id": company_id,
-                "branch_id": branch_id,
-                "period_id": period_id,
-                "driver_assignment_id": descriptor["DriverAssignmentID"],
-                "driver_id": descriptor["DriverID"],
-                "fingerprint": fingerprint,
-                "evidence_kind": descriptor["EvidenceKind"],
-                "source_type": descriptor["SourceType"],
-                "pay_item_id": descriptor.get("PayItemID"),
-                "rate_type_id": descriptor.get("RateTypeID"),
-                "driver_rate_id": descriptor.get("DriverRateID"),
-                "driver_pay_rule_id": descriptor.get("DriverPayRuleID"),
-                "rate_behavior": descriptor.get("RateBehavior"),
-                "rate_type_code": descriptor.get("RateTypeCode"),
-                "rate_type_name": descriptor.get("RateTypeName"),
-                "unit_name": descriptor.get("UnitName"),
-                "rate_amount": descriptor.get("RateAmount"),
-                "effective_from": descriptor.get("EffectiveFrom"),
-                "effective_to": descriptor.get("EffectiveTo"),
-                "rate_status": descriptor.get("RateStatus"),
-                "block_size": descriptor.get("BlockSize"),
-                "rounding_rule": descriptor.get("RoundingRule"),
-                "rule_type": descriptor.get("RuleType"),
-                "rule_amount": descriptor.get("RuleAmount"),
-                "rule_status": descriptor.get("RuleStatus"),
-                "currency_code": currency.code,
-                "currency_minor": currency.minor_unit_digits,
-            })
-            definition_id = int(result.scalar_one())
-            definition_ids[fingerprint] = definition_id
-        line_definition_ids[ordinal] = definition_id
-    return line_definition_ids
+        fingerprint = used_rate_fingerprint(descriptor)
+        descriptors.setdefault(fingerprint, {**descriptor, "DefinitionFingerprint": fingerprint})
+        line_fingerprints.append(fingerprint)
+    return list(descriptors.values()), line_fingerprints
+
+
+async def insert_used_rate_evidence(
+    *,
+    snapshot_id: int,
+    company_id: int,
+    branch_id: int,
+    period_id: int,
+    used_rates: Iterable[dict[str, Any]],
+    db: AsyncConnection,
+) -> dict[str, int]:
+    """Persist the used-rate descriptors of one snapshot; returns fingerprint -> row id."""
+    ids: dict[str, int] = {}
+    for descriptor in used_rates:
+        result = await db.execute(text("""
+            INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions
+                (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
+                 driverassignmentid, driverid, definitionfingerprint, evidencekind,
+                 sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
+                 paydefinitionid, ratecomponentdefinitionid, ratetypeid, driverrateid,
+                 ratetypecodesnapshot, ratetypenamesnapshot, unitnamesnapshot,
+                 rateamountsnapshot, effectivefromsnapshot, effectivetosnapshot,
+                 ratestatussnapshot, currencycodesnapshot,
+                 currencyminorunitdigitssnapshot)
+            VALUES
+                (:snapshot_id, :company_id, :branch_id, :period_id,
+                 :driver_assignment_id, :driver_id, :fingerprint, :evidence_kind,
+                 :source_type, :schedule_id, :rate_definition_id, :pay_definition_id,
+                 :component_id, :rate_type_id, :driver_rate_id,
+                 :rate_type_code, :rate_type_name, :unit_name,
+                 :rate_amount, :effective_from, :effective_to, :rate_status,
+                 :currency_code, :currency_minor)
+            RETURNING payrollcalculationsnapshotusedratedefinitionid
+        """), {
+            "snapshot_id": snapshot_id,
+            "company_id": company_id,
+            "branch_id": branch_id,
+            "period_id": period_id,
+            "driver_assignment_id": descriptor["DriverAssignmentID"],
+            "driver_id": descriptor["DriverID"],
+            "fingerprint": descriptor["DefinitionFingerprint"],
+            "evidence_kind": descriptor["EvidenceKind"],
+            "source_type": descriptor["SourceType"],
+            "schedule_id": descriptor.get("DriverRateScheduleID"),
+            "rate_definition_id": descriptor.get("RateDefinitionID"),
+            "pay_definition_id": descriptor.get("PayDefinitionID"),
+            "component_id": descriptor.get("RateComponentDefinitionID"),
+            "rate_type_id": descriptor.get("RateTypeID"),
+            "driver_rate_id": descriptor.get("DriverRateID"),
+            "rate_type_code": descriptor.get("RateTypeCodeSnapshot"),
+            "rate_type_name": descriptor.get("RateTypeNameSnapshot"),
+            "unit_name": descriptor.get("UnitNameSnapshot"),
+            "rate_amount": descriptor["RateAmount"],
+            "effective_from": descriptor["EffectiveFrom"],
+            "effective_to": descriptor["EffectiveTo"],
+            "rate_status": descriptor["RateStatus"],
+            "currency_code": descriptor["CurrencyCodeSnapshot"],
+            "currency_minor": descriptor["CurrencyMinorUnitDigitsSnapshot"],
+        })
+        ids[descriptor["DefinitionFingerprint"]] = int(result.scalar_one())
+    return ids

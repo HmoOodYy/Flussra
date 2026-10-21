@@ -1,8 +1,10 @@
 """CP-5C read-only calculation-report model.
 
-This module owns the live report read flow and delegates shared report projections
-to report_components. It delegates lifecycle financial authority to RP-1 and never
-recalculates financial values or mutates payroll state.
+This module owns the report read flow and delegates shared report projections to
+report_components. It delegates lifecycle financial authority to ``financial_authority`` and never
+recalculates financial values or mutates payroll state. Open and Returned periods read the live
+packet; InReview, Approved, Locked and Archived periods read only the verified frozen snapshot
+their authority names, with its frozen labels, money and report evidence.
 """
 from __future__ import annotations
 
@@ -19,10 +21,18 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency, get_company_currency
-from app.payroll import bonus, period_calculation
-from app.payroll.evidence_gate import evidence_not_ready
+from app.payroll import bonus, period_calculation, status_evidence
+from app.payroll.financial_authority import (
+    FROZEN_KINDS,
+    AuthorityKind,
+    require_financial_authority,
+)
 from app.payroll.report_components import (
     aggregate_definition_amounts as _definition_amounts,
+)
+from app.payroll.report_components import (
+    frozen_financial_packet,
+    frozen_operational_rows,
 )
 from app.payroll.report_components import (
     load_financial_definition_columns as _definition_columns,
@@ -36,7 +46,6 @@ from app.payroll.report_components import (
 from app.payroll.report_components import (
     summarize_status_entries as _status_summaries,
 )
-from app.payroll.reporting import ReportAuthorityKind, resolve_report_financial_authority
 from app.payroll.schemas import PeriodSummary
 
 
@@ -125,14 +134,14 @@ async def _live_statuses(period: dict[str, Any], db: AsyncConnection) -> list[di
              "label": r["keyname"], "is_off": bool(r["isoffreason"])} for r in rows]
 
 
-async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnection) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], list[str], list[str], bool, int | None, str | None]:
+async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnection, frozen: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]], list[str], list[str], bool, int | None, str | None]:
     """Return authoritative financial lines and driver totals; never calculate them here."""
     kind = authority.authority_kind
-    if kind is ReportAuthorityKind.SOURCE_ONLY:
+    if kind is AuthorityKind.SOURCE_ONLY:
         return [], {}, [], [], False, None, None
-    if kind is ReportAuthorityKind.UNAVAILABLE:
+    if kind is AuthorityKind.UNAVAILABLE:
         raise _unavailable("REPORT_UNAVAILABLE", "Cancelled payroll periods have no calculation reports.")
-    if kind is ReportAuthorityKind.LIVE:
+    if kind is AuthorityKind.LIVE:
         summary = PeriodSummary.model_construct(
             payroll_period_id=int(period["payrollperiodid"]), branch_id=int(period["branchid"]),
             branch_name=period["branchname"], period_code=period["periodcode"], period_name=period["periodname"],
@@ -180,9 +189,11 @@ async def _financial_packet(authority, period: dict[str, Any], db: AsyncConnecti
                       for c in d.components if c.kind == "ORDINARY"}}
                   for d in packet.drivers}
         return lines, totals, packet.blockers, packet.warnings, True, None, None
-    # Submitted, approved and final authorities freeze calculation evidence, which target
-    # payroll does not have yet. They are refused rather than rebuilt from mutable state.
-    raise evidence_not_ready()
+    # Submitted, approved and final authorities read only their frozen snapshot.
+    assert frozen is not None
+    lines, totals = frozen_financial_packet(frozen)
+    return (lines, totals, [], list(frozen["Warnings"]), True,
+            int(frozen["PayrollCalculationSnapshotID"]), str(frozen["SnapshotHash"]))
 
 
 def _official_definition_amounts(
@@ -230,13 +241,14 @@ def _report_totals(
 
 async def build_report(*, report_type: str, period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> dict[str, Any]:
     period = await _period_context(period_id=period_id, company_id=company_id, user_id=user_id, db=db)
-    authority = await resolve_report_financial_authority(db=db, period_id=period_id, company_id=company_id, branch_id=int(period["branchid"]))
-    if authority.authority_kind is ReportAuthorityKind.UNAVAILABLE:
+    authority = await require_financial_authority(db, period_id=period_id, company_id=company_id, branch_id=int(period["branchid"]))
+    if authority.authority_kind is AuthorityKind.UNAVAILABLE:
         raise _unavailable("REPORT_UNAVAILABLE", "Cancelled payroll periods have no calculation reports.")
     columns = await _columns(period, db)
     definition_columns = await _definition_columns(period, db)
     definition_column_ids = [c["payroll_period_definition_id"] for c in definition_columns]
-    lines, financial_totals, blockers, warnings, financials_available, snapshot_id, snapshot_hash = await _financial_packet(authority, period, db)
+    frozen = authority.content if authority.authority_kind in FROZEN_KINDS else None
+    lines, financial_totals, blockers, warnings, financials_available, snapshot_id, snapshot_hash = await _financial_packet(authority, period, db, frozen)
     per_driver_definitions: dict[int, dict[int, Decimal]] = {}
     definition_total_map: dict[int, Decimal] = {cid: Decimal("0") for cid in definition_column_ids}
     # Period Work is operational (quantities/Status), not financial, and stays
@@ -247,12 +259,14 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         _definition_amounts(lines, definition_column_ids)
         per_driver_definitions, definition_total_map = _official_definition_amounts(
             financial_totals, definition_column_ids)
-    operational_drivers, work_rows = await _operational_rows(period, db)
+    operational_drivers, work_rows = (
+        frozen_operational_rows(frozen) if frozen is not None
+        else await _operational_rows(period, db))
     drivers = {**operational_drivers}
     for driver_assignment_id, total in financial_totals.items():
         drivers.setdefault(driver_assignment_id, {"driver_assignment_id": driver_assignment_id, "driver_id": total.get("driver_id"), "driver_number": total.get("driver_number"), "driver_name": total.get("driver_name")})
     evidence_available, evidence_version, evidence_hash, statuses, bonuses = (False, None, None, [], [])
-    if authority.authority_kind is ReportAuthorityKind.LIVE:
+    if authority.authority_kind is AuthorityKind.LIVE:
         statuses = await _live_statuses(period, db)
         bonuses = [{"bonus_event_id": int(r["payrollbonuseventid"]), "driver_assignment_id": int(r["driverassignmentid"]),
                     "amount": Decimal(str(r["amount"])), "reason": r["reason"], "notes": r["notes"],
@@ -260,6 +274,9 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
                     "creator_display_name": r["creatordisplaynamesnapshot"], "created_at_utc": r["createdatutc"]}
                    for r in await bonus._load_active_bonus_events(int(period["payrollperiodid"]), company_id, db)]
         evidence_available = True
+    elif frozen is not None:
+        evidence_available, evidence_version, evidence_hash, statuses, bonuses = (
+            status_evidence.report_evidence_from_content(frozen))
     summaries = _status_summaries(statuses)
     by_driver_work: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for row in work_rows:
@@ -303,7 +320,9 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         {"payroll_period_definition_id": cid, "amount": definition_total_map.get(cid, Decimal("0"))}
         for cid in definition_column_ids
     ]
-    currency = await get_company_currency(company_id, db)
+    currency = (
+        frozen_currency(frozen["CurrencyCode"], frozen["CurrencyMinorUnitDigits"])
+        if frozen is not None else await get_company_currency(company_id, db))
     metadata = {"currency_code": None if currency is None else currency.code,
                 "currency_minor_unit_digits": None if currency is None else currency.minor_unit_digits,
                 "period_id": int(period["payrollperiodid"]), "period_code": period["periodcode"], "period_name": period["periodname"],

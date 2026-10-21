@@ -38,15 +38,26 @@ SOURCE_AMOUNT_PRECISION = "SOURCE_AMOUNT_PRECISION"
 MINMAX_PERIOD_DAYS_MISSING = "MINMAX_PERIOD_DAYS_MISSING"
 
 
+def counted_days(
+    scheduled_days: Collection[date],
+    eligible_days: Collection[date],
+    off_reason_days: Collection[date],
+) -> tuple[date, ...]:
+    """The eligible scheduled non-off days, ascending: the days the numerator counts."""
+    counted = (set(scheduled_days) & set(eligible_days)) - set(off_reason_days)
+    return tuple(sorted(counted))
+
+
 def coverage(
     scheduled_days: Collection[date],
     eligible_days: Collection[date],
     off_reason_days: Collection[date],
 ) -> tuple[int, int]:
     """(numerator, denominator): eligible scheduled non-off days over scheduled days."""
-    scheduled = set(scheduled_days)
-    counted = (scheduled & set(eligible_days)) - set(off_reason_days)
-    return len(counted), len(scheduled)
+    return (
+        len(counted_days(scheduled_days, eligible_days, off_reason_days)),
+        len(set(scheduled_days)),
+    )
 
 
 def prorate(amount: Decimal, numerator: int, denominator: int) -> Decimal:

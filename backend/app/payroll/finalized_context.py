@@ -11,10 +11,8 @@ from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
 from app.access.policy import require_non_driver_subject
 from app.company_currency import frozen_currency
-from app.payroll.snapshot_hash import (
-    UnsupportedCalculationVersionError,
-    require_supported_calculation_version,
-)
+from app.payroll.financial_authority import resolve_financial_authority
+from app.payroll.snapshot_verification import SnapshotEvidenceError
 
 FINALIZED_STATUSES = {"Locked", "Archived"}
 
@@ -91,45 +89,37 @@ async def get_finalized_period_context(
 async def resolve_originating_snapshot(
     period: dict[str, Any], db: AsyncConnection,
 ) -> tuple[dict[str, Any] | None, dict[str, str | None]]:
-    """Resolve FinalLines provenance exactly; never select a latest snapshot."""
-    rows = (await db.execute(text("""
-        SELECT DISTINCT
-               sourcesnapshot ->> 'payroll_calculation_snapshot_id' AS snapshot_id,
-               sourcesnapshot ->> 'revision_number' AS revision_number,
-               sourcesnapshot ->> 'snapshot_hash' AS snapshot_hash
-        FROM payroll.payrollfinallines
-        WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
-    """), {
-        "period_id": period["payrollperiodid"], "company_id": period["companyid"],
-        "branch_id": period["branchid"],
-    })).mappings().all()
-    if not rows:
-        return None, availability("UNAVAILABLE", "FINAL_LINES_EMPTY")
-    if len(rows) != 1 or any(value is None for value in rows[0].values()):
-        return None, availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    source = rows[0]
+    """The one snapshot a finalized period's FinalLines name, verified; never a "latest".
+
+    Resolved through the shared financial authority, which selects the snapshot by
+    ``PayrollFinalLines.PayrollCalculationSnapshotID`` (exactly one per finalized period) and
+    verifies it: calculation version, the financial hash (with the used rates), the evidence
+    arithmetic, the report evidence, and the FinalLines being exactly its component projection.
+    A snapshot that does not verify raises its stable code. A period whose FinalLines name no
+    snapshot or several is unavailable: the financial sections are withheld with the reason.
+    The returned mapping carries the header fields readers use and the verified ``content``.
+    """
     try:
-        snapshot_id = int(source["snapshot_id"])
-        revision_number = int(source["revision_number"])
-    except (TypeError, ValueError):
-        return None, availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    snapshot = (await db.execute(text("""
-        SELECT payrollcalculationsnapshotid, revisionnumber, calculationversion, snapshothash, sourceconfighash,
-               currencycode, currencyminorunitdigits, reportevidenceversion, reportevidencehash
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :company_id AND branchid = :branch_id AND payrollperiodid = :period_id
-    """), {
-        "snapshot_id": snapshot_id, "period_id": period["payrollperiodid"],
-        "company_id": period["companyid"], "branch_id": period["branchid"],
-    })).mappings().first()
-    if snapshot is None or (
-        int(snapshot["revisionnumber"]) != revision_number
-        or str(snapshot["snapshothash"]) != str(source["snapshot_hash"])
-    ):
-        return None, availability("UNAVAILABLE", "PROVENANCE_UNAVAILABLE")
-    try:
-        require_supported_calculation_version(snapshot["calculationversion"])
-    except UnsupportedCalculationVersionError as exc:
-        raise finalized_error("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
-    return dict(snapshot), availability("AVAILABLE")
+        authority = await resolve_financial_authority(
+            db, period_id=int(period["payrollperiodid"]), company_id=int(period["companyid"]),
+            branch_id=int(period["branchid"]))
+    except SnapshotEvidenceError as exc:
+        if exc.code in {"FINAL_LINES_EMPTY", "PROVENANCE_UNAVAILABLE"}:
+            return None, availability("UNAVAILABLE", exc.code)
+        raise finalized_error(exc.code, exc.message) from exc
+    content = authority.content
+    if content is None:
+        raise finalized_error(
+            "FINALIZED_LIBRARY_UNAVAILABLE", "The period has no finalized financial authority.")
+    return {
+        "payrollcalculationsnapshotid": content["PayrollCalculationSnapshotID"],
+        "revisionnumber": content["RevisionNumber"],
+        "calculationversion": content["CalculationVersion"],
+        "snapshothash": content["SnapshotHash"],
+        "sourceconfighash": content["SourceConfigHash"],
+        "currencycode": content["CurrencyCode"],
+        "currencyminorunitdigits": content["CurrencyMinorUnitDigits"],
+        "reportevidenceversion": content["ReportEvidenceVersion"],
+        "reportevidencehash": content["ReportEvidenceHash"],
+        "content": content,
+    }, availability("AVAILABLE")

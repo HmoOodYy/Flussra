@@ -73,11 +73,14 @@ class DraftLineSummary(BaseModel):
     notes: str | None = None
     added_by_user_id: int | None = None
     added_at_utc: datetime
+    # Where the money of this row comes from (LIVE, FROZEN or UNAVAILABLE) and why it is withheld.
+    financial_authority: str | None = None
+    financial_authority_reason: str | None = None
 
 
 
 class DriverPeriodSummary(BaseModel):
-    """Aggregated live totals per driver x period definition for one period."""
+    """Aggregated totals per driver x period definition for one period, from its financial authority."""
     __module__ = "app.payroll.schemas"
     driver_assignment_id: int
     driver_id: int
@@ -89,9 +92,11 @@ class DriverPeriodSummary(BaseModel):
     definition_code: str | None = None
     definition_name: str | None = None
     total_quantity: Decimal
-    total_calculated_amount: Decimal
+    total_calculated_amount: Decimal | None = None
     line_count: int
     lines_needing_attention: int
+    financial_authority: str | None = None
+    financial_authority_reason: str | None = None
 
 
 
@@ -222,7 +227,11 @@ class DayGridSummary(BaseModel):
     quantity_totals: list[DayGridQuantityTotal] = []
     gross_total: str | None = None   # CP-2F: None for Draft (Prepared) periods — financials not available
     needs_attention: int
-    financials_available: bool = True  # CP-2F: False for Draft periods
+    financials_available: bool = True  # False for a Draft period or a frozen authority that is unavailable
+    # Where the money comes from: LIVE (Open/Returned), FROZEN (the verified snapshot of an
+    # InReview/Approved/Locked/Archived period) or UNAVAILABLE, with the reason it is withheld.
+    financial_authority: str | None = None
+    financial_authority_reason: str | None = None
 
 
 

@@ -263,7 +263,7 @@ def test_0087_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0088",)
+    assert cur.fetchone() == ("0089",)
 
     def columns(table: str, schema: str = "core") -> set[str]:
         cur.execute("""
@@ -370,13 +370,17 @@ def test_no_function_or_view_still_reads_the_profile_meaning_of_driverid(cur):
               'fn_driverpayrollperiodsforfootprint',
               'trg_drivercompensationcontextwritable', 'trg_driverrateschedules_beforeupdate',
               'trg_driverrateschedules_beforedelete', 'trg_driverpayrules_beforeupdate',
-              'fn_guard_used_rate_definition_scope')
+              'fn_guard_used_rate_definition_scope',
+              -- Immutable calculation evidence (0089): DriverID there is the permanent Driver.
+              'fn_guard_snapshot_minmax_rule_scope', 'fn_guard_final_line_insert')
           AND p.prosrc ~* '(\mdriverid\M|driver_id|fn_effectivedriverprofile|fn_drivercoversworkdate|drivercode)'
     """)
     assert cur.fetchall() == []
     cur.execute(r"""
         SELECT schemaname || '.' || viewname FROM pg_views
         WHERE schemaname NOT IN ('pg_catalog', 'information_schema') AND definition ~* '\mdriverid\M'
+          -- Immutable calculation evidence (0089): DriverID there is the permanent Driver.
+          AND viewname <> 'vw_finalizedworkdates'
     """)
     assert cur.fetchall() == []
 

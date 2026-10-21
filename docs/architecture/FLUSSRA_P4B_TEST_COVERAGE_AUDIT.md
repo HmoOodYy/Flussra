@@ -4,14 +4,15 @@
 
 P4b is a clean pre-production cutover. The legacy PayItem / RateType / DriverRate runtime
 and its PayrollPeriodPayItems snapshot no longer exist, and submit, resubmit, finalize and
-finalization preview are closed (`TARGET_PAYROLL_EVIDENCE_NOT_READY`) until P4c. Test
+finalization preview were closed (`TARGET_PAYROLL_EVIDENCE_NOT_READY`) until P4c, which
+removed that hold. Test
 modules that only characterized that retired authority were removed. Every assertion of
 every removed module was classified:
 
 | Class | Meaning | Action |
 | --- | --- | --- |
 | `OBSOLETE_AUTHORITY` | Characterizes the retired legacy runtime (PayItems, RateTypes, legacy DriverRate matrix/tiers, PayrollPeriodPayItems, LineType routing) | Not restored. Target equivalents of the *invariant* live in the P4b suites listed below. |
-| `P4C_DEFERRED` | Needs immutable target calculation evidence (submit/resubmit success, snapshot capture, approval binding, finalization, frozen reports, finalized library) | Not restorable now. P4c must rebuild it against target evidence. |
+| `P4C_DEFERRED` | Needs immutable target calculation evidence (submit/resubmit success, snapshot capture, approval binding, finalization, frozen reports, finalized library) | Not restorable at P4b. Rebuilt against target evidence by P4c (see below). |
 | `STILL_LIVE` | A contract that survives P4b (status guards, source-mutation guards, workflow slots, permissions and scope, eligibility, validation, audit atomicity, DB immutability, read boundaries, DriverPayRule, workforce) | Ported to the target model or confirmed already covered by a surviving suite. |
 
 ## Removed modules
@@ -57,3 +58,16 @@ projection and rollback, finalization preview, frozen report evidence, the final
 library, finalized Off-drivers/rates-used/audit content, and workflow capability success
 cases. The refusal tests in `test_p4b_evidence_gates` are removed or inverted by that work
 unit, and only there.
+
+### Rebuilt by P4c
+
+The list above is now covered by behaviour-named suites, and the refusal tests were
+replaced by their success counterparts:
+
+| Area | Suite |
+| --- | --- |
+| Snapshot capture, evidence shape, hash and version | `test_calculation_snapshot_capture`, `test_calculation_snapshot_hash`, `test_calculation_snapshot_integrity`, `test_calculation_evidence_migration` |
+| Submit/resubmit success, rollback, serialization, Draft promotion, approval binding and fail-closed verification, capabilities | `test_payroll_lifecycle_evidence` |
+| Finalization projection, preview parity, frozen money, rollback, concurrency, no live compensation reads | `test_payroll_finalization_evidence` |
+| Frozen reports, finalized library (overview, reports, Off-drivers, rates-used, audit), scope and fail-closed reads | `test_payroll_frozen_reads` |
+| Finalized-date and rate guards over immutable evidence | `test_finalized_history_guards`, `test_p4b_final_ledger_integrity` |

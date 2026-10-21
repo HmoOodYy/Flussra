@@ -1,14 +1,15 @@
 """
-Approved-snapshot validation, FinalLines projection, and finalization preview.
+Approved-snapshot verification, FinalLines projection, and finalization preview.
 
-Finalization and its preview remain refused by the target evidence gate.
-The retained implementation uses the snapshot bound to the Approved
-PeriodApproval, never a latest-snapshot guess or recalculated live money.
-Missing provenance is not reconstructed from mutable Status or Bonus data.
+Finalization uses only the snapshot bound to the single Approved PeriodApproval. It verifies
+the snapshot (calculation version, the hash recomputed from the persisted rows, and the
+arithmetic of the evidence), then projects one FinalLine per official component. It never
+consults live sources or configuration and never selects a "latest" snapshot. The preview
+reads the same snapshot through the same loader and projection, so what it shows is exactly
+what finalization writes.
 
-The preview is read-only. Finalization projects lines, updates period status,
-and writes its audit in the caller's transaction, so an audit failure rolls
-back the entire operation.
+The preview is read-only. Finalization projects lines, updates period status, and writes its
+audit in the caller's transaction, so an audit failure rolls back the entire operation.
 """
 from __future__ import annotations
 
@@ -27,14 +28,11 @@ from app.company_currency import (
     lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
-from app.payroll.evidence_gate import require_target_payroll_evidence
+from app.payroll.final_line_projection import project_final_lines
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import PeriodSummary
-from app.payroll.snapshot_hash import (
-    UnsupportedCalculationVersionError,
-    require_supported_calculation_version,
-)
+from app.payroll.snapshot_verification import SnapshotEvidenceError, verify_snapshot
 from app.payroll.workflow_lock import acquire_branch_workflow_lock
 
 if TYPE_CHECKING:
@@ -43,7 +41,6 @@ if TYPE_CHECKING:
 # ===========================================================================
 # Finalization — Approved → Locked
 # ===========================================================================
-
 
 
 # ---------------------------------------------------------------------------
@@ -104,27 +101,25 @@ async def _write_finalization_audit(
     )
 
 
-
-
-
 # ---------------------------------------------------------------------------
-# CP-3A — Finalization Preview (read-only)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# CP-4F — approved immutable snapshot finalization
+# Approved immutable snapshot -> verified content -> FinalLines projection
 # ---------------------------------------------------------------------------
 
 def _snapshot_finalization_error(code: str, message: str) -> HTTPException:
     return HTTPException(status_code=422, detail=f"{code}: {message}")
 
 
+def _evidence_error(exc: SnapshotEvidenceError) -> HTTPException:
+    """A snapshot that cannot be consumed fails finalization closed with its stable code."""
+    code = "APPROVED_SNAPSHOT_INTEGRITY_ERROR" if exc.code == "SNAPSHOT_NOT_FOUND" else exc.code
+    return _snapshot_finalization_error(code, exc.message)
+
+
 async def _load_approved_snapshot_packet(
     *, period_id: int, company_id: int, branch_id: int,
     db: AsyncConnection, lock_review_item: bool = False,
 ) -> dict[str, Any]:
-    """Load the one immutable packet authorized by an Approved PeriodApproval."""
+    """Load and verify the one immutable snapshot authorized by an Approved PeriodApproval."""
     review_lock = " FOR UPDATE OF ri" if lock_review_item else ""
     reviews = (await db.execute(text(f"""
         SELECT ri.reviewitemid, ri.payrollcalculationsnapshotid
@@ -149,155 +144,63 @@ async def _load_approved_snapshot_packet(
     if snapshot_id is None:
         raise _snapshot_finalization_error(
             "SNAPSHOT_REQUIRED_FOR_FINALIZATION",
-            "the approved PeriodApproval is historical and has no immutable calculation snapshot.",
+            "the approved PeriodApproval has no immutable calculation snapshot.",
         )
-    snapshot = (await db.execute(text("""
-        SELECT payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
-               revisionnumber, calculationversion, snapshothash, totalexpectedpay, createdatutc,
-               currencycode, currencyminorunitdigits
-        FROM payroll.payrollcalculationsnapshots
-        WHERE payrollcalculationsnapshotid = :snapshot_id
-          AND companyid = :cid AND branchid = :bid
-    """), {"snapshot_id": snapshot_id, "cid": company_id, "bid": branch_id})).mappings().first()
-    if snapshot is None or int(snapshot["payrollperiodid"]) != period_id:
+    try:
+        content = await verify_snapshot(
+            db, snapshot_id=int(snapshot_id), company_id=company_id, branch_id=branch_id,
+            period_id=period_id)
+    except SnapshotEvidenceError as exc:
+        raise _evidence_error(exc) from exc
+    projection = project_final_lines(content)
+    if not projection:
         raise _snapshot_finalization_error(
-            "APPROVED_SNAPSHOT_INTEGRITY_ERROR",
-            "the approved review item does not reference a snapshot for this exact period.",
-        )
-    try:
-        require_supported_calculation_version(snapshot["calculationversion"])
-    except UnsupportedCalculationVersionError as exc:
-        raise _snapshot_finalization_error("UNSUPPORTED_CALCULATION_VERSION", str(exc)) from exc
-    totals = (await db.execute(text("""
-        SELECT dt.payrollcalculationdrivertotalid, dt.driverassignmentid, dt.driverid,
-               dt.drivernumbersnapshot, dt.drivernamesnapshot,
-               dt.dailypay, dt.statuspay, dt.minimumadjustment,
-               dt.maximumadjustment, dt.bonustotal, dt.expectedpay
-        FROM payroll.payrollcalculationdrivertotals dt
-        JOIN core.driverassignments a ON a.driverassignmentid = dt.driverassignmentid
-            AND a.companyid = dt.companyid AND a.branchid = dt.branchid
-        WHERE dt.payrollcalculationsnapshotid = :snapshot_id
-          AND dt.companyid = :cid AND dt.branchid = :bid
-        ORDER BY dt.driverassignmentid, dt.payrollcalculationdrivertotalid
-    """), {"snapshot_id": snapshot_id, "cid": company_id, "bid": branch_id})).mappings().all()
-    lines = (await db.execute(text("""
-        SELECT sl.payrollcalculationsnapshotlineid,
-               sl.payrollcalculationdrivertotalid, dt.driverassignmentid, dt.driverid, sl.sourcetype,
-               sl.sourceid, sl.linetype, sl.linescope, sl.workdate, sl.payitemid,
-               sl.ratetypeid, sl.driverrateid, sl.bonuseventid, sl.quantity,
-               sl.resolvedrateamount, sl.calculatedamount, sl.sourceevidencejsonb
-        FROM payroll.payrollcalculationsnapshotlines sl
-        JOIN payroll.payrollcalculationdrivertotals dt
-          ON dt.payrollcalculationdrivertotalid = sl.payrollcalculationdrivertotalid
-        WHERE dt.payrollcalculationsnapshotid = :snapshot_id
-          AND dt.companyid = :cid AND dt.branchid = :bid
-        ORDER BY dt.driverassignmentid, sl.payrollcalculationsnapshotlineid
-    """), {"snapshot_id": snapshot_id, "cid": company_id, "bid": branch_id})).mappings().all()
-    return {"review": review, "snapshot": snapshot, "totals": totals, "lines": lines}
-
-
-def _reconcile_approved_snapshot_packet(packet: dict[str, Any]) -> None:
-    """Check persisted packet arithmetic only; never consult mutable sources."""
-    snapshot, totals, lines = packet["snapshot"], packet["totals"], packet["lines"]
-    header_total = Decimal(str(snapshot["totalexpectedpay"]))
-    totals_total = sum((Decimal(str(row["expectedpay"])) for row in totals), Decimal("0"))
-    if header_total != totals_total:
-        raise _snapshot_finalization_error("APPROVED_SNAPSHOT_INTEGRITY_ERROR", "snapshot header total does not reconcile with driver totals.")
-    line_totals: dict[int, Decimal] = {}
-    for line in lines:
-        key = int(line["payrollcalculationdrivertotalid"])
-        line_totals[key] = line_totals.get(key, Decimal("0")) + Decimal(str(line["calculatedamount"]))
-    for total in totals:
-        key = int(total["payrollcalculationdrivertotalid"])
-        components = sum((Decimal(str(total[column])) for column in (
-            "dailypay", "statuspay", "minimumadjustment",
-            "maximumadjustment", "bonustotal",
-        )), Decimal("0"))
-        expected = Decimal(str(total["expectedpay"]))
-        if components != expected or line_totals.get(key, Decimal("0")) != expected:
-            raise _snapshot_finalization_error("APPROVED_SNAPSHOT_INTEGRITY_ERROR", "snapshot lines do not reconcile with a driver total.")
-
-
-def _snapshot_line_draft_line_id(line: Any) -> int | None:
-    if line["sourcetype"] != "DraftLine" or line["sourceid"] is None:
-        return None
-    try:
-        return int(str(line["sourceid"]))
-    except ValueError:
-        return None
-
-
-def _snapshot_line_provenance(packet: dict[str, Any], line: Any) -> str:
-    snapshot = packet["snapshot"]
-    return json.dumps({
-        "payroll_calculation_snapshot_id": int(snapshot["payrollcalculationsnapshotid"]),
-        "revision_number": int(snapshot["revisionnumber"]),
-        "snapshot_hash": snapshot["snapshothash"],
-        "currency_code": snapshot["currencycode"],
-        "currency_minor_unit_digits": snapshot["currencyminorunitdigits"],
-        "snapshot_line_id": int(line["payrollcalculationsnapshotlineid"]),
-        "source_type": line["sourcetype"], "source_id": line["sourceid"],
-        "source_evidence": line["sourceevidencejsonb"] or {},
-    }, default=str)
+            "APPROVED_SNAPSHOT_INTEGRITY_ERROR", "the approved snapshot has no official component.")
+    return {"review": review, "snapshot": content, "projection": projection}
 
 
 async def _project_approved_snapshot_final_lines(
     *, packet: dict[str, Any], period_id: int, company_id: int, branch_id: int,
     user_id: int, db: AsyncConnection,
 ) -> None:
+    snapshot = packet["snapshot"]
     await db.execute(text("SELECT set_config('app.allow_payroll_final_line_insert', 'true', true)"))
-    for line in packet["lines"]:
-        evidence = line["sourceevidencejsonb"] or {}
-        source_type = str(line["sourcetype"])
-        rate_behavior = evidence.get("RateBehavior")
-        if source_type == "System":
-            rate_behavior = "System"
-        elif source_type == "BonusEvent":
-            rate_behavior = "Fixed"
+    for row in packet["projection"]:
         await db.execute(text("""
             INSERT INTO payroll.payrollfinallines
-                (companyid, branchid, payrollperiodid, draftlineid, bonuseventid,
-                 driverassignmentid, driverid, workdate, linetype, linescope, quantity, rateamount,
-                 finalamount, sourcetype, sourceid, approvedbyuserid, approvedatutc,
-                 lockedatutc, notes, payitemid, ratebehavior, ratetypeid,
-                 driverrateid, resolvedrateamount, sourcesnapshot,
-                 currencycode, currencyminorunitdigits)
+                (companyid, branchid, payrollperiodid, driverassignmentid, driverid, employeeid,
+                 linetype, linescope, finalamount, sourcetype, sourceid, approvedbyuserid,
+                 approvedatutc, lockedatutc, sourcesnapshot, currencycode,
+                 currencyminorunitdigits, payrollcalculationsnapshotid,
+                 payrollcalculationsnapshotcomponentid, componentkind,
+                 payrollperioddefinitionid, paydefinitionid)
             VALUES
-                (:cid, :bid, :period_id, :draft_line_id, :bonus_event_id,
-                 :driver_assignment_id, :driver_id, :work_date, :line_type, :line_scope, :quantity,
-                 :rate_amount, :final_amount, :source_type, :source_id,
-                 :approved_by, NOW(), NOW(), :notes, :pay_item_id,
-                 :rate_behavior, :rate_type_id, :driver_rate_id,
-                 :resolved_rate_amount, CAST(:source_snapshot AS jsonb),
-                 :currency_code, :currency_minor)
+                (:cid, :bid, :period_id, :driver_assignment_id, :driver_id, :employee_id,
+                 :line_type, 'Period', :amount, 'SnapshotComponent', :source_id, :approved_by,
+                 NOW(), NOW(), CAST(:source_snapshot AS jsonb), :currency_code, :currency_minor,
+                 :snapshot_id, :component_id, :component_kind, :ppd_id, :pay_definition_id)
         """), {
             "cid": company_id, "bid": branch_id, "period_id": period_id,
-            "draft_line_id": _snapshot_line_draft_line_id(line),
-            "bonus_event_id": line["bonuseventid"], "driver_assignment_id": line["driverassignmentid"],
-            "driver_id": line["driverid"],
-            "work_date": line["workdate"], "line_type": line["linetype"],
-            "line_scope": line["linescope"], "quantity": line["quantity"] or Decimal("0"),
-            "rate_amount": line["resolvedrateamount"], "final_amount": line["calculatedamount"],
-            "source_type": source_type, "source_id": line["sourceid"], "approved_by": user_id,
-            "notes": evidence.get("Notes"), "pay_item_id": line["payitemid"],
-            "rate_behavior": rate_behavior, "rate_type_id": line["ratetypeid"],
-            "driver_rate_id": line["driverrateid"], "resolved_rate_amount": line["resolvedrateamount"],
-            "source_snapshot": _snapshot_line_provenance(packet, line),
-            "currency_code": packet["snapshot"]["currencycode"],
-            "currency_minor": packet["snapshot"]["currencyminorunitdigits"],
+            "driver_assignment_id": row["driver_assignment_id"], "driver_id": row["driver_id"],
+            "employee_id": row["employee_id"], "line_type": row["line_type"],
+            "amount": row["amount"], "source_id": str(row["component_id"]),
+            "approved_by": user_id, "source_snapshot": json.dumps(row["source_snapshot"]),
+            "currency_code": snapshot["CurrencyCode"],
+            "currency_minor": snapshot["CurrencyMinorUnitDigits"],
+            "snapshot_id": snapshot["PayrollCalculationSnapshotID"],
+            "component_id": row["component_id"], "component_kind": row["component_kind"],
+            "ppd_id": row["payroll_period_definition_id"],
+            "pay_definition_id": row["pay_definition_id"],
         })
 
 
 async def finalize_period(period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> PeriodSummary:
-    """Project the exact approved immutable packet into FinalLines and lock the period."""
+    """Project the exact approved immutable snapshot into FinalLines and lock the period."""
     await require_non_driver_subject(company_id, user_id, db)
     period = await get_period_by_id(company_id, user_id, period_id, db)
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Only Approved periods can be finalized (current status: '{period.status}').")
     await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
-    # P4c gate: finalizing projects frozen target calculation evidence, which does not
-    # exist yet. Refuse before any lock, claim or financial write.
-    require_target_payroll_evidence()
     currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
     await acquire_branch_workflow_lock(company_id, period.branch_id, db)
     locked = (await db.execute(text("""
@@ -308,8 +211,8 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     if locked is None:
         raise HTTPException(status_code=422, detail="Period could not be claimed for finalization — its status may have changed concurrently.")
     packet = await _load_approved_snapshot_packet(period_id=period_id, company_id=company_id, branch_id=period.branch_id, db=db, lock_review_item=True)
-    require_matching_snapshot_currency(currency, packet["snapshot"]["currencycode"], packet["snapshot"]["currencyminorunitdigits"])
-    _reconcile_approved_snapshot_packet(packet)
+    snapshot = packet["snapshot"]
+    require_matching_snapshot_currency(currency, snapshot["CurrencyCode"], snapshot["CurrencyMinorUnitDigits"])
     claimed = await db.execute(text("""
         UPDATE payroll.payrollperiods SET status = 'Locked', lockedbyuserid = :locker, lockedatutc = NOW()
         WHERE payrollperiodid = :period_id AND companyid = :cid AND status = 'Approved'
@@ -318,12 +221,11 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     if claimed.scalar_one_or_none() is None:
         raise HTTPException(status_code=422, detail="Period could not be claimed for finalization — its status may have changed concurrently.")
     await _project_approved_snapshot_final_lines(packet=packet, period_id=period_id, company_id=company_id, branch_id=period.branch_id, user_id=user_id, db=db)
-    snapshot = packet["snapshot"]
     await capture_workflow_action_evidence(
         company_id=company_id,
         branch_id=period.branch_id,
         period_id=period_id,
-        snapshot_id=int(snapshot["payrollcalculationsnapshotid"]),
+        snapshot_id=int(snapshot["PayrollCalculationSnapshotID"]),
         review_item_id=int(packet["review"]["reviewitemid"]),
         action_code="FINALIZED",
         user_id=user_id,
@@ -332,17 +234,17 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     )
     await _write_finalization_audit(
         db, company_id=company_id, branch_id=period.branch_id, user_id=user_id,
-        period_id=period_id, line_count=len(packet["lines"]),
-        total_amount=Decimal(str(snapshot["totalexpectedpay"])),
+        period_id=period_id, line_count=len(packet["projection"]),
+        total_amount=snapshot["TotalExpectedPay"],
         approved_review_item_id=int(packet["review"]["reviewitemid"]),
-        snapshot_id=int(snapshot["payrollcalculationsnapshotid"]),
-        revision_number=int(snapshot["revisionnumber"]), snapshot_hash=str(snapshot["snapshothash"]),
+        snapshot_id=int(snapshot["PayrollCalculationSnapshotID"]),
+        revision_number=int(snapshot["RevisionNumber"]), snapshot_hash=str(snapshot["SnapshotHash"]),
     )
     return await get_period_by_id(company_id, user_id, period_id, db)
 
 
 async def get_finalization_preview(period_id: int, company_id: int, user_id: int, db: AsyncConnection) -> FinalizationPreviewResponse:
-    """Read the same immutable approved packet that finalization will project."""
+    """Read the same verified snapshot and projection that finalization will write."""
     from app.payroll.schemas import (
         BonusEventPreviewEntry,
         FinalizationPreviewDriverTotal,
@@ -355,41 +257,60 @@ async def get_finalization_preview(period_id: int, company_id: int, user_id: int
     if period.status != "Approved":
         raise HTTPException(status_code=422, detail=f"Finalization preview requires an Approved period. Current status: '{period.status}'.")
     await check_permission(company_id, user_id, period.branch_id, "payroll.finalize", db)
-    require_target_payroll_evidence()
     packet = await _load_approved_snapshot_packet(period_id=period_id, company_id=company_id, branch_id=period.branch_id, db=db)
-    _reconcile_approved_snapshot_packet(packet)
-    currency = frozen_currency(packet['snapshot']['currencycode'], packet['snapshot']['currencyminorunitdigits'])
-    total_rows = {int(row["payrollcalculationdrivertotalid"]): row for row in packet["totals"]}
-    lines, adjustments, bonuses = [], [], []
-    for row in packet["lines"]:
-        total = total_rows[int(row["payrollcalculationdrivertotalid"])]
-        amount, evidence = Decimal(str(row["calculatedamount"])), row["sourceevidencejsonb"] or {}
+    snapshot = packet["snapshot"]
+    currency = frozen_currency(snapshot["CurrencyCode"], snapshot["CurrencyMinorUnitDigits"])
+    totals = {t["DriverAssignmentID"]: t for t in snapshot["DriverTotals"]}
+
+    lines, adjustments, bonuses, driver_totals = [], [], [], []
+    for row in packet["projection"]:
+        total = totals[row["driver_assignment_id"]]
         lines.append(FinalizationPreviewLine(
-            draft_line_id=_snapshot_line_draft_line_id(row), source_key=f"snapshot-line:{row['payrollcalculationsnapshotlineid']}",
-            driver_assignment_id=int(row["driverassignmentid"]), driver_name=total["drivernamesnapshot"], work_date=row["workdate"],
-            line_type=row["linetype"], line_scope=row["linescope"], quantity=row["quantity"],
-            rate_amount=row["resolvedrateamount"], calculated_amount=amount, final_amount=amount,
-            needs_manager_review=False, rate_behavior=evidence.get("RateBehavior"),
-            driver_rate_id=row["driverrateid"], rate_type_id=row["ratetypeid"], resolved_rate_amount=row["resolvedrateamount"],
+            draft_line_id=None, source_key=f"component:{row['component_id']}",
+            driver_assignment_id=row["driver_assignment_id"], driver_name=row["driver_name"],
+            work_date=None, line_type=row["line_type"], line_scope="Period",
+            quantity=None, rate_amount=None, calculated_amount=row["amount"],
+            final_amount=row["amount"], needs_manager_review=False,
+            component_kind=row["component_kind"],
+            payroll_period_definition_id=row["payroll_period_definition_id"],
+            pay_definition_id=row["pay_definition_id"], label=row["label"],
+            pre_rounding_amount=row["pre_rounding_amount"],
         ))
-        normal_base = Decimal(str(total["dailypay"])) + Decimal(str(total["statuspay"]))
-        if row["linetype"] in {"SYS_MIN_TOPUP", "SYS_MAX_CAP"}:
-            adjustments.append(FinalizationPreviewSysAdjustment(driver_assignment_id=int(row["driverassignmentid"]), driver_name=total["drivernamesnapshot"], adjustment_type=row["linetype"], gross_before=normal_base, adjustment_amount=amount, bonus_total=Decimal(str(total["bonustotal"])), final_pay=Decimal(str(total["expectedpay"]))))
-        if row["sourcetype"] == "BonusEvent" and row["bonuseventid"] is not None:
-            bonuses.append(BonusEventPreviewEntry(bonus_event_id=int(row["bonuseventid"]), driver_assignment_id=int(row["driverassignmentid"]), driver_name=total["drivernamesnapshot"], amount=amount, reason=evidence.get("Reason"), notes=evidence.get("Notes")))
-    driver_totals = [FinalizationPreviewDriverTotal(
-        driver_assignment_id=int(row["driverassignmentid"]), driver_id=int(row["driverid"]),
-        driver_number=row["drivernumbersnapshot"], driver_name=row["drivernamesnapshot"],
-        daily_pay=Decimal(str(row["dailypay"])), status_pay=Decimal(str(row["statuspay"])),
-        gross_pay=Decimal(str(row["dailypay"])) + Decimal(str(row["statuspay"])),
-        sys_adjustment=Decimal(str(row["minimumadjustment"])) + Decimal(str(row["maximumadjustment"])),
-        bonus_total=Decimal(str(row["bonustotal"])), final_pay=Decimal(str(row["expectedpay"])),
-        line_count=sum(1 for line in packet["lines"] if line["payrollcalculationdrivertotalid"] == row["payrollcalculationdrivertotalid"]),
-    ) for row in packet["totals"]]
-    non_bonus_non_system = [line for line in packet["lines"] if line["sourcetype"] not in {"BonusEvent", "System"}]
+        if row["component_kind"] in ("MINIMUM_ADJUSTMENT", "MAXIMUM_ADJUSTMENT"):
+            adjustments.append(FinalizationPreviewSysAdjustment(
+                driver_assignment_id=row["driver_assignment_id"], driver_name=row["driver_name"],
+                adjustment_type=row["line_type"], gross_before=total["MinMax"]["BaseAmount"],
+                adjustment_amount=row["amount"], bonus_total=total["BonusTotal"],
+                final_pay=total["ExpectedPay"]))
+    for total in snapshot["DriverTotals"]:
+        for line in total["Lines"]:
+            if line["SourceType"] == "BonusEvent":
+                evidence = line["SourceEvidenceJSONB"] or {}
+                bonuses.append(BonusEventPreviewEntry(
+                    bonus_event_id=int(line["BonusEventID"]),
+                    driver_assignment_id=total["DriverAssignmentID"],
+                    driver_name=total["DriverNameSnapshot"], amount=line["CalculatedAmount"],
+                    reason=evidence.get("Reason"), notes=evidence.get("Notes")))
+        driver_totals.append(FinalizationPreviewDriverTotal(
+            driver_assignment_id=total["DriverAssignmentID"], driver_id=total["DriverID"],
+            driver_number=total["DriverNumberSnapshot"], driver_name=total["DriverNameSnapshot"],
+            daily_pay=total["DailyPay"], status_pay=total["StatusPay"],
+            gross_pay=total["DailyPay"] + total["StatusPay"],
+            sys_adjustment=total["MinimumAdjustment"] + total["MaximumAdjustment"],
+            bonus_total=total["BonusTotal"], final_pay=total["ExpectedPay"],
+            line_count=len(total["Components"]),
+        ))
     return FinalizationPreviewResponse(
         currency_code=currency.code, currency_minor_unit_digits=currency.minor_unit_digits,
-        period_id=period_id, period_name=period.period_name, period_status=period.status, branch_id=period.branch_id, branch_name=period.branch_name,
-        can_finalize=True, blockers=[], warnings=[], driver_totals=driver_totals, sys_adjustments=adjustments, lines=lines, bonus_events=bonuses, bonus_event_count=len(bonuses),
-        total_final_gross=Decimal(str(packet["snapshot"]["totalexpectedpay"])), draft_line_count=len(non_bonus_non_system), sys_adjustment_count=len(adjustments), final_line_count_estimate=len(packet["lines"]), driver_count=len(driver_totals),
+        period_id=period_id, period_name=period.period_name, period_status=period.status,
+        branch_id=period.branch_id, branch_name=period.branch_name,
+        can_finalize=True, blockers=[], warnings=list(snapshot["Warnings"]),
+        driver_totals=driver_totals, sys_adjustments=adjustments, lines=lines,
+        bonus_events=bonuses, bonus_event_count=len(bonuses),
+        total_final_gross=snapshot["TotalExpectedPay"],
+        draft_line_count=sum(
+            1 for total in snapshot["DriverTotals"] for line in total["Lines"]
+            if line["SourceType"] == "DraftLine"),
+        sys_adjustment_count=len(adjustments),
+        final_line_count_estimate=len(packet["projection"]), driver_count=len(driver_totals),
     )

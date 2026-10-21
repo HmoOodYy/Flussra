@@ -1,6 +1,6 @@
 ## Plan: Durable Driver identity, Driver-owned compensation, payable rules
 
-**Order: Stage 1 → Stage 2 → Stage 3 → P4c.** All three stages must land before P4c, because P4c freezes driver identity, rate identity and payable amounts into evidence and the hash. Stages 1–3 are CLOSED/merged: Stage 1 (PR #57, migration `0087`), Stage 2 (PR #58, migration `0088`), and Stage 3 (PR #59, no migration). Current baseline is `main @ 79ef2ab08864f37ea9fbb556256b3e90370b28c1`, Alembic head `0088`. P4c is next and has not started.
+**Order: Stage 1 → Stage 2 → Stage 3 → P4c.** All three stages must land before P4c, because P4c freezes driver identity, rate identity and payable amounts into evidence and the hash. Stages 1–3 are CLOSED/merged: Stage 1 (PR #57, migration `0087`), Stage 2 (PR #58, migration `0088`), and Stage 3 (PR #59, no migration). Current baseline is `main @ 79ef2ab08864f37ea9fbb556256b3e90370b28c1`, Alembic head `0088`. P4c is implemented (migration `0089`) and closes on merge.
 
 ### The model (target)
 
@@ -268,7 +268,7 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
   - a negative Max adjustment
 - **Existing 4-decimal Bonus and pay-rule values in dev data:** reset or refuse, never silently rewrite.
 - **The frontend shows official amounts with exactly the currency’s decimals**, and rates with their own precision.
-- **Nothing here unlocks submit or finalize.** The evidence gate stays closed until P4c.
+- **Nothing here unlocks submit or finalize.** The evidence gate stayed closed until P4c, which removed it.
 
 **Out of scope:** freezing into evidence and the hash, finalization, reports and ledger (P4c); export; the concrete temporary cross-branch work / worked-for-Branch feature; half-day leave and hours-per-day schedules (deferred).
 
@@ -294,6 +294,6 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
 
 ### After the three stages
 
-**P4c** freezes Stage 3’s packet into immutable evidence and the hash, including `DriverAssignmentID`, `DriverID`, `EmployeeID`, `BranchID` and the driver number snapshot. It rebuilds the deleted submit/finalize/report suites and opens the evidence gate, with **no open product decisions left inside the current P4c scope**. The concrete temporary cross-branch work / worked-for-Branch feature remains explicitly deferred, but P4c must not encode identity or Branch-provenance semantics that make that future path impossible.
+**P4c** freezes Stage 3’s packet into immutable evidence and the hash, including `DriverAssignmentID`, `DriverID`, `EmployeeID`, `BranchID` and the driver number snapshot. It rebuilds the deleted submit/finalize/report suites and removes the evidence gate (implemented in migration `0089`, closes on merge), with **no open product decisions left inside the current P4c scope**. The concrete temporary cross-branch work / worked-for-Branch feature remains explicitly deferred, but P4c must not encode identity or Branch-provenance semantics that make that future path impossible.
 
 **P5** must meet the recorded criterion: *a transfer never requires re-entering status rates.*
