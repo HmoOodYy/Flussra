@@ -638,7 +638,7 @@ Transfer architecture planning.
 Copying legacy DriverRates now and replacing them soon afterward would duplicate work and create another dependency on architecture that is already scheduled for retirement.
 
 **Current State:**  
-Resolved by DD2 / Driver-owned compensation (PR #58, migration `0088`). Ordinary rate schedules and Min/Max belong to the permanent Driver and continue across a permanent transfer without a copy. The transfer-copy design and P6a are retired; the legacy copy route, service and contracts are removed. Assignment-owned Status rates remain intentional until P5, whose transfer-binding criterion is tracked separately.
+Resolved by DD2 / Driver-owned compensation (PR #58, migration `0088`). Ordinary rate schedules and Min/Max belong to the permanent Driver and continue across a permanent transfer without a copy. The transfer-copy design and P6a are retired; the legacy copy route, service and contracts are removed. Assignment-owned Status rates remain intentional until P5a, which makes Status rate values Driver-owned against Company-owned Status rate columns.
 
 Historical updates (preserved): transfers before the supersession must not silently introduce new compensation-copy semantics.
 

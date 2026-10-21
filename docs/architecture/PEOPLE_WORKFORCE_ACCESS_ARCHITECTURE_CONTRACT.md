@@ -585,7 +585,7 @@ A transfer never creates, moves, copies, rebinds or rewrites rate or pay-rule re
 
 Each Min/Max rule records the Driver's home pay calendar as a compatibility key: frequency, anchor start date and custom interval days (the period grid only; the normal-days-off mask is not part of it). The calendar is captured by the server from the Payroll Setup of the Branch of the tenure that is the rule's context (§9.1), never entered by a user, and it is never a rescaling basis: there is no frequency conversion. A rule is compatible with a payroll period only if the period is exactly one period of the rule's calendar. A permanent change of home Branch, or a home Payroll Setup version change, to an incompatible pay calendar is a payroll blocker (`MINMAX_CALENDAR_MISMATCH`) until the rule is reconciled by an explicit edit (end the rule and create a new one, which captures the new calendar); it is not an advisory notice. A transfer into an incompatible calendar is still allowed and is not blocked at scheduling: payroll blocks later, and the Pay Rates screen warns that Min/Max needs reconciliation from the transfer date. Nothing is ended automatically.
 
-Status rate columns, and the legacy status rates (`DriverRates`, `DriverRateTiers`), remain Branch-owned and assignment-owned, and a transfer never requires re-entering status rates. Status-owned RateDefinitions are not authorable as Driver rate schedules.
+Status keys and Status rate columns are Company-owned and Status rate values are Driver-owned from P5a (the Unified plan's P5a definition), so a transfer never requires re-entering status rates. Until P5a lands, the legacy status rates (`DriverRates`, `DriverRateTiers`) remain assignment-owned and Status-owned RateDefinitions are not authorable as Driver rate schedules.
 
 ### 8.5 Linked DRIVER self-service User
 
@@ -633,7 +633,7 @@ Branch payroll history (drafts, day entries, eligibility, bonus events, calculat
 
 `DriverID` is durable: it never changes across transfers and never identifies a branch tenure.
 
-Ordinary Driver compensation (rate schedules, schedule values and Min/Max rules) is owned by `DriverID` (Stage 2, §8.4) and is not payroll history keyed by assignment. Only the legacy status rates (`DriverRates`, `DriverRateTiers`) remain assignment-owned.
+Ordinary Driver compensation (rate schedules, schedule values and Min/Max rules) is owned by `DriverID` (Stage 2, §8.4) and is not payroll history keyed by assignment. Only the legacy status rates (`DriverRates`, `DriverRateTiers`) remain assignment-owned, until P5a makes Status rate values Driver-owned and payroll stops reading them.
 
 This is intentional.
 
