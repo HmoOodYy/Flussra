@@ -29,6 +29,7 @@ from app.payroll.snapshot_hash import (
     calculate_report_evidence_hash,
     calculate_snapshot_hash,
     require_supported_calculation_version,
+    strict_json_equal,
     used_rate_fingerprint,
 )
 
@@ -691,7 +692,7 @@ def reconcile_report_evidence(content: dict[str, Any]) -> None:
                 entry is None
                 or entry["DriverAssignmentID"] != total["DriverAssignmentID"]
                 or entry["WorkDate"] != line["WorkDate"]
-                or entry["StatusKeyID"] != status_key
+                or not strict_json_equal(entry["StatusKeyID"], status_key)
             ):
                 raise _report_error(
                     "REPORT_EVIDENCE_INTEGRITY_ERROR",

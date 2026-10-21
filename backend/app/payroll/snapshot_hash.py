@@ -227,6 +227,41 @@ def sha256_hex(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
+def json_native(value: Any) -> Any:
+    """``value`` as the JSON-native document it is stored as (a dump and parse round trip)."""
+    return json.loads(json.dumps(value))
+
+
+def strict_json_equal(left: Any, right: Any) -> bool:
+    """Equality of two parsed JSON documents under strict JSON typing.
+
+    Python equality is looser than JSON: ``True == 1`` and ``1 == 1.0``. A provenance document
+    is evidence, so a value only equals a value of the same JSON type: ``null`` only ``null``,
+    a boolean only a boolean, an integer only a non-boolean integer, a string only a string;
+    objects need identical key sets and lists equal length and order. A non-integer number is
+    never equal: no stored provenance field is a JSON fraction (amounts are strings).
+    """
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, int) or isinstance(right, int):
+        return isinstance(left, int) and isinstance(right, int) and left == right
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and isinstance(right, str) and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list) and isinstance(right, list) and len(left) == len(right)
+            and all(strict_json_equal(a, b) for a, b in zip(left, right, strict=True))
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict) and isinstance(right, dict) and left.keys() == right.keys()
+            and all(strict_json_equal(left[key], right[key]) for key in left)
+        )
+    return False
+
+
 def calculate_source_config_hash(source_config: Mapping[str, Any]) -> str:
     """Hash the CP-4D captured source/configuration packet when one exists."""
     return sha256_hex(source_config)

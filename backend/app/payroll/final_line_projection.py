@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.payroll.snapshot_hash import json_native, strict_json_equal
 from app.payroll.snapshot_verification import SnapshotEvidenceError
 
 # The ledger display vocabulary of a FinalLine's LineType. ComponentKind, with the component
@@ -147,8 +148,8 @@ async def verify_final_lines(
     Every official component has exactly one FinalLine, and every field of that line equals the
     projection: scope (Company, Branch, period, snapshot, component), identity (DriverAssignment,
     Driver, Employee), classification (kind, line type, scope, source type and id), definition,
-    money (amount, quantity, rate, currency), the frozen provenance JSON and the legacy columns
-    that component lines never use. No other FinalLine may exist for the period. Raises
+    money (amount, quantity, rate, currency), the frozen provenance JSON (compared under strict
+    JSON typing, so ``true`` is not ``1``) and the legacy columns that component lines never use. No other FinalLine may exist for the period. Raises
     ``SnapshotEvidenceError`` (FINAL_LINES_INTEGRITY_ERROR) otherwise; returns the rows.
     """
     rows = (await db.execute(text("""
@@ -175,7 +176,11 @@ async def verify_final_lines(
     for component_id, row in expected.items():
         line = persisted[component_id]
         for column, value in _expected_columns(content, row).items():
-            actual = json.loads(line[column]) if column == "sourcesnapshot" else line[column]
-            if actual != value:
+            if column == "sourcesnapshot":
+                # The provenance document is compared whole under strict JSON typing, against
+                # the expected projection normalized the way it was stored.
+                if not strict_json_equal(json.loads(line[column]), json_native(value)):
+                    raise failure
+            elif line[column] != value:
                 raise failure
     return [dict(row) for row in rows]
