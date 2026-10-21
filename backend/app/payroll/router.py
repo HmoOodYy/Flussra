@@ -8,7 +8,7 @@ inside the service layer.
 
 from fastapi import APIRouter
 
-from .routes import bonus, calculation, entry, finalized, pay_rules, periods, rates, reporting
+from .routes import bonus, calculation, entry, finalized, pay_rules, periods, reporting
 
 # Preserve the original flat route sequence; payroll families occupy noncontiguous segments.
 router = APIRouter(
@@ -19,7 +19,6 @@ router = APIRouter(
         *calculation.router.routes,
         *reporting.router.routes,
         *finalized.router.routes,
-        *rates.router.routes,
         *bonus.router.routes,
         *pay_rules.router.routes,
         *entry.off_drivers_router.routes,

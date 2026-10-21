@@ -44,6 +44,22 @@ def build_payroll_tenant(dsn: dict, *, currency: str | None = "USD") -> Tenant:
     return build_tenant(dsn, currency=currency, permissions=PAYROLL_PERMISSIONS)
 
 
+def build_catalog_tenant(dsn: dict) -> Tenant:
+    """A payroll Tenant whose owner may also write the Company Status catalog."""
+    conn = psycopg2.connect(client_encoding="utf-8", **dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO sec.permissions (permissioncode, permissionname, modulecode)
+                VALUES ('setup.manage', 'Manage Settings', 'settings')
+                ON CONFLICT (permissioncode) DO NOTHING
+            """)
+    finally:
+        conn.close()
+    return build_tenant(dsn, permissions=[*PAYROLL_PERMISSIONS, "setup.manage"])
+
+
 async def assign_weekly_setup(engine, tenant: Tenant, branch_id: int, *, mask: int = 0) -> None:
     """Give the Branch a published weekly Payroll Setup (the period creation authority)."""
     from app.payroll_setup.payroll_policy import (

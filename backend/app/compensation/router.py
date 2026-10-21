@@ -2,11 +2,12 @@
 
 Company-owned PayDefinition governance, Branch applicability and Driver rate
 schedule authoring. These routes are the operational authority for
-PayDefinitions, their Branch configuration and ordinary PerUnit rates; the
-Settings Pay Items and Pay Rates pages call them.
+PayDefinitions, their Branch configuration and every Driver rate: ordinary
+PerUnit rates and Status rates, which are schedules of a Company Status rate
+column's RateDefinition. The Settings Pay Items and Pay Rates pages call them.
 
-Status rates retain their separate legacy path. Payroll owns period layout and
-live calculation, and freezes it into immutable evidence on submission.
+Payroll owns period layout and live calculation, and freezes it into immutable
+evidence on submission.
 """
 
 from datetime import date

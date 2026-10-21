@@ -21,9 +21,9 @@ from tests.compensation_database_fixtures import (  # noqa: F401 - register fixt
     p3b_database,
 )
 from tests.payroll_runtime_fixtures import (
-    PAYROLL_PERMISSIONS,
     add_driver,
     assign_weekly_setup,
+    build_catalog_tenant,
     build_tenant,
     create_period,
     get_grid,
@@ -38,20 +38,7 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture(name="tenant")
 def catalog_tenant(p3b_dsn):
     """A Tenant whose owner may also write the Company Status catalog."""
-    import psycopg2
-
-    conn = psycopg2.connect(client_encoding="utf-8", **p3b_dsn)
-    conn.autocommit = True
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO sec.permissions (permissioncode, permissionname, modulecode)
-                VALUES ('setup.manage', 'Manage Settings', 'settings')
-                ON CONFLICT (permissioncode) DO NOTHING
-            """)
-    finally:
-        conn.close()
-    return build_tenant(p3b_dsn, permissions=[*PAYROLL_PERMISSIONS, "setup.manage"])
+    return build_catalog_tenant(p3b_dsn)
 
 
 def _url(period) -> str:

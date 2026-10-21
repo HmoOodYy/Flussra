@@ -12,11 +12,10 @@ Covers:
     therefore exercised here directly, without database fixtures.
 
 This is a behavior-preserving-extraction verification slice, not a new
-characterization slice. Current Status characterization lives in
-`test_payroll_status_characterization.py`; canonical entry and Status-payment
-contracts remain in `test_cp2d_canonical_entry_state.py` and
-`test_cp2d2_status_payment.py`. No M13c legacy-method cases are added here (OrdinalTier/RangeBracket/RangeProgressive/Block remain out
-of CP-4A scope).
+characterization slice. Status pay is calculated directly from the canonical selection
+(`test_status_direct_calculation.py`); canonical entry contracts are in
+`test_cp2d_canonical_entry_state.py`. No M13c legacy-method cases are added here
+(OrdinalTier/RangeBracket/RangeProgressive/Block remain out of CP-4A scope).
 
 Isolation: periods use year 2099 dates, distinct from every other test
 module's isolation year.
@@ -485,94 +484,6 @@ async def _owned_driver(session_client, auth_token, branch_id, direct_db, *, nam
                 assert residue["employee_audit"] == 0, f"Employee {employee_id} audit residue was not removed"
 
 
-async def _get_hourly_rate_type_id(client, token) -> int:
-    rv = await client.get("/payroll/rate-types", headers=auth(token))
-    assert rv.status_code == 200
-    for rt in rv.json():
-        if rt["rate_code"] == "HOURLY":
-            return rt["rate_type_id"]
-    raise AssertionError("HOURLY rate type not found")
-
-
-@contextlib.asynccontextmanager
-async def _owned_driver_rate(
-    direct_db, session_client, auth_token, driver_assignment_id, rate_type_id, amount, effective_from,
-    *, _inject_failure_after_write: bool = False,
-):
-    """
-    Exception-safe DriverRate lifecycle. Ownership begins in this `try`
-    BEFORE the create-rate POST is sent (P1-B fix: the previous version
-    assigned `rate_id = await _create_and_approve_rate(...)` OUTSIDE any
-    try/finally, so a 201-then-parse-failure, or a failure in the
-    subsequent approve call, never entered the `finally` at all).
-
-    Recovery key: the exact `(driver_assignment_id, rate_type_id, effective_from)`
-    tuple is unique to this test (`driver_assignment_id` is a freshly-created,
-    test-owned driver), so cleanup can recover the created `DriverRateID`
-    via `direct_db` even if the HTTP response was never successfully parsed.
-    A unique `notes` marker (a real, schema-supported `DriverRateCreate`
-    field) is also written as a second, independent recovery signal.
-
-    `_inject_failure_after_write` is a test-local-only fault-injection
-    parameter (never referenced by production code) used by the P1-B
-    regression test to prove cleanup survives a failure occurring strictly
-    AFTER the create-rate write commits but BEFORE `rate_id` would normally
-    be extracted from the response.
-    """
-    marker = f"CP4A-RATE-{uuid.uuid4().hex[:8]}"
-    eff_date = datetime.date.fromisoformat(effective_from)
-    rate_id = None
-    try:
-        rc = await session_client.post(
-            "/payroll/rates",
-            json={
-                "driver_assignment_id": driver_assignment_id, "rate_type_id": rate_type_id, "amount": amount,
-                "effective_from": effective_from, "notes": marker,
-            },
-            headers=auth(auth_token),
-        )
-        assert rc.status_code == 201, f"Create rate failed: {rc.text}"
-        if _inject_failure_after_write:
-            raise _DeliberateSetupFailure(
-                "simulated failure after DriverRate write committed, before rate_id extracted"
-            )
-        rate_id = rc.json()["driver_rate_id"]
-        ra = await session_client.post(f"/payroll/rates/{rate_id}/approve", headers=auth(auth_token))
-        assert ra.status_code == 200, f"Approve rate failed: {ra.text}"
-        yield rate_id
-    finally:
-        if rate_id is None:
-            row = (await direct_db.execute(
-                _text("""
-                    SELECT driverrateid FROM payroll.driverrates
-                    WHERE driverassignmentid = :did AND ratetypeid = :rtid
-                      AND (effectivefrom = :eff OR notes = :marker)
-                """),
-                {"did": driver_assignment_id, "rtid": rate_type_id, "eff": eff_date, "marker": marker},
-            )).mappings().first()
-            if row is not None:
-                rate_id = row["driverrateid"]
-        if rate_id is not None:
-            await direct_db.execute(
-                _text("DELETE FROM audit.auditlog WHERE entityname = 'DriverRates' AND entityid = :eid"),
-                {"eid": str(rate_id)},
-            )
-            await direct_db.execute(
-                _text("DELETE FROM payroll.driverrates WHERE driverrateid = :id"), {"id": rate_id},
-            )
-            residue = (await direct_db.execute(
-                _text("""
-                    SELECT
-                        (SELECT COUNT(*) FROM payroll.driverrates WHERE driverrateid = :id) AS rates,
-                        (SELECT COUNT(*) FROM audit.auditlog
-                            WHERE entityname = 'DriverRates' AND entityid = :eid) AS rate_audit
-                """),
-                {"id": rate_id, "eid": str(rate_id)},
-            )).mappings().first()
-            assert residue["rates"] == 0, f"DriverRate {rate_id} was not removed"
-            assert residue["rate_audit"] == 0, f"DriverRate {rate_id} audit residue was not removed"
-
-
 _PERIOD_CODE_MAX_LEN = 80  # payroll.PayrollPeriods.PeriodCode is VARCHAR(80)
 _PERIOD_CODE_SEPARATOR = "-"
 
@@ -728,38 +639,6 @@ async def _owned_period_scenario(
             pid = recovered_pid
         if pid is not None:
             await _delete_period_and_children(direct_db, pid)
-
-
-@contextlib.asynccontextmanager
-async def _perunit_period(session_client, auth_token, paytest_branch_id, direct_db, *, driver_name, rate_amount, effective_from, suffix=""):
-    """
-    Composed single cleanup owner for the complete driver + rate + period
-    integration scenario. Resources are created and their ownership entered
-    in this exact order -- driver FIRST (outermost, via `_owned_driver`),
-    then rate and period (inner, via `AsyncExitStack`) -- so teardown
-    unwinds in the reverse, FK-safe order: period+children, then rate, then
-    (only once both are gone) the driver/employee themselves. `driver_name`
-    is combined with a `uuid4` suffix so it is unique enough to serve as
-    `_owned_driver`'s recovery marker.
-    """
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
-    unique_driver_name = f"{driver_name} {uuid.uuid4().hex[:8]}"
-    async with _owned_driver(
-        session_client, auth_token, paytest_branch_id, direct_db, name=unique_driver_name,
-    ) as driver_assignment_id:
-        hourly_rt_id = await _get_hourly_rate_type_id(session_client, auth_token)
-        async with contextlib.AsyncExitStack() as stack:
-            rate_id = await stack.enter_async_context(
-                _owned_driver_rate(
-                    direct_db, session_client, auth_token, driver_assignment_id, hourly_rt_id,
-                    amount=rate_amount, effective_from=effective_from,
-                )
-            )
-            pid = await stack.enter_async_context(
-                _owned_period_scenario(session_client, auth_token, paytest_branch_id, direct_db, suffix=suffix)
-            )
-            yield driver_assignment_id, pid, rate_id
-    await _cancel_active_periods(session_client, auth_token, paytest_branch_id, db=direct_db)
 
 
 class TestPeriodCodeUniquenessAndTenantSafety:

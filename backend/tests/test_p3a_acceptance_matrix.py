@@ -1,7 +1,6 @@
 """Focused P3a currency authority, immutable evidence and read integrity proofs."""
 from __future__ import annotations
 
-from datetime import date
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -11,8 +10,6 @@ from sqlalchemy import text
 
 from app.company_currency import get_company_currency
 from app.payroll import finalized_library_read_model, report_read_model
-from app.payroll import rates as rates_service
-from app.payroll.schemas import DriverRateCreate
 from app.settings import audit as settings_audit
 from app.settings import company
 from app.settings import security as settings_security
@@ -240,27 +237,3 @@ async def test_finalized_currency_page_resolves_multiple_periods_setwise():
     assert currencies[10].code == "USD" and currencies[10].minor_unit_digits == 2
     assert currencies[11].code == "JPY" and currencies[11].minor_unit_digits == 0
     assert len(db.queries) == 2
-
-
-@pytest.mark.asyncio
-async def test_unauthorized_rate_request_cannot_probe_company_currency(monkeypatch):
-    currency_gate_called = False
-
-    async def deny_driver_subject(*_args, **_kwargs):
-        raise HTTPException(status_code=403, detail="DRIVER/Self cannot manage rates")
-
-    async def currency_probe(*_args, **_kwargs):
-        nonlocal currency_gate_called
-        currency_gate_called = True
-        raise HTTPException(status_code=422, detail={"code": "COMPANY_CURRENCY_REQUIRED"})
-
-    monkeypatch.setattr(rates_service, "_require_non_driver_rate_subject", deny_driver_subject)
-    monkeypatch.setattr(rates_service, "lock_and_get_company_currency_for_monetary_write", currency_probe)
-    request = DriverRateCreate(
-        driver_assignment_id=1, rate_type_id=1, amount=10, effective_from=date(2099, 1, 1),
-    )
-    with pytest.raises(HTTPException) as denied:
-        await rates_service.create_rate(1, 2, request, db=object())
-    assert denied.value.status_code == 403
-    assert "COMPANY_CURRENCY_REQUIRED" not in str(denied.value.detail)
-    assert currency_gate_called is False

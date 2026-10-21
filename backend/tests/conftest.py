@@ -798,34 +798,24 @@ async def hq_driver_assignment_id(
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_rate_type_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
+async def paytest_rate_type_id(session_db_conn) -> int:
     """
     Return the rate_type_id for HOURLY (seeded in _SEED_STMTS).
-    Rate tests use this fixture to avoid hard-coding database-assigned IDs.
+    Tests use this fixture to avoid hard-coding database-assigned IDs.
     """
-    resp = await session_client.get(
-        "/payroll/rate-types",
-        headers={"Authorization": f"Bearer {auth_token}"},
-    )
-    assert resp.status_code == 200, f"Rate-type lookup failed: {resp.text}"
-    for rt in resp.json():
-        if rt["rate_code"] == "HOURLY":
-            return rt["rate_type_id"]
-    raise AssertionError("HOURLY rate type not found — check seed data")
+    row = (await session_db_conn.execute(
+        text("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'HOURLY'"))).scalar_one_or_none()
+    assert row is not None, "HOURLY rate type not found — check seed data"
+    return int(row)
 
 
 @pytest_asyncio.fixture(scope="session")
-async def paytest_mileage_rate_type_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
+async def paytest_mileage_rate_type_id(session_db_conn) -> int:
     """Return the rate_type_id for MILEAGE."""
-    resp = await session_client.get(
-        "/payroll/rate-types",
-        headers={"Authorization": f"Bearer {auth_token}"},
-    )
-    assert resp.status_code == 200
-    for rt in resp.json():
-        if rt["rate_code"] == "MILEAGE":
-            return rt["rate_type_id"]
-    raise AssertionError("MILEAGE rate type not found — check seed data")
+    row = (await session_db_conn.execute(
+        text("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'MILEAGE'"))).scalar_one_or_none()
+    assert row is not None, "MILEAGE rate type not found — check seed data"
+    return int(row)
 
 
 @pytest_asyncio.fixture(scope="session")

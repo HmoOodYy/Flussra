@@ -351,7 +351,8 @@ async def create_status_key(
     """Create a Company Status. The technical code is generated server-side. Requires
     AllCompanyBranches scope."""
     await security.ensure_company_admin(company_id, user_id, db)
-    await status_rate_columns.lock_status_catalog(company_id, db)
+    # The Company's default Status rate column exists before any Status needs a column.
+    await status_rate_columns.ensure_default_status_rate_column(company_id, db)
 
     name_normalized = _normalized_name(data.key_name, "key_name")
     aliases = _alias_map(data.aliases)

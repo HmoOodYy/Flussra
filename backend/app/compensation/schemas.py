@@ -254,7 +254,9 @@ class ScheduleSummary(BaseModel):
     driver_rate_schedule_id: int
     company_id: int
     driver_id: int
-    pay_definition_id: int
+    # Exactly one owner: a PayDefinition or a Company Status rate column.
+    pay_definition_id: int | None = None
+    status_rate_column_id: int | None = None
     rate_definition_id: int
     effective_from: date
     effective_to: date | None = None
@@ -281,7 +283,11 @@ class DriverRateSummaryItem(BaseModel):
     """
 
     rate_definition_id: int
+    # "PayDefinition" or "StatusRateColumn" (a Status column is labelled by its name).
+    kind: str = "PayDefinition"
     pay_definition_id: int | None = None
+    status_rate_column_id: int | None = None
+    status_rate_column_name: str | None = None
     definition_code: str | None = None
     definition_name: str | None = None
     unit: str | None = None
@@ -415,10 +421,17 @@ class ScheduleBrief(BaseModel):
 
 
 class DriverPayRateRow(BaseModel):
-    """One branch-applicable PayDefinition and a Driver's scalar rate state for it."""
+    """One authorable PayDefinition or Status rate column and a Driver's scalar rate state.
 
-    pay_definition_id: int
-    definition_code: str
+    ``kind`` is "PayDefinition" or "StatusRateColumn". A Status row has no PayDefinition and no
+    code, is labelled by its column name and has no Branch applicability.
+    """
+
+    kind: str = "PayDefinition"
+    pay_definition_id: int | None = None
+    status_rate_column_id: int | None = None
+    status_rate_column_name: str | None = None
+    definition_code: str | None = None
     definition_name: str
     input_type: str
     unit: str | None = None

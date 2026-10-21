@@ -59,6 +59,7 @@ _SCHEDULE_COLUMNS = """
     s.companyid              AS company_id,
     s.driverid               AS driver_id,
     s.paydefinitionid        AS pay_definition_id,
+    s.statusratecolumnid     AS status_rate_column_id,
     s.ratedefinitionid       AS rate_definition_id,
     s.effectivefrom          AS effective_from,
     s.effectiveto            AS effective_to,
@@ -158,7 +159,8 @@ async def _summary(company_id: int, schedule_id: int, db: AsyncConnection) -> Sc
 async def _authorable_rate_definition(
     company_id: int, rate_definition_id: int, db: AsyncConnection,
 ) -> dict:
-    """Any company-Active, PayDefinition-owned, Scalar (PerUnit) RateDefinition.
+    """Any scalar RateDefinition of the Company whose owner is Active: a PayDefinition that is
+    Active, or a Status rate column that is active. Both are authored by the same lifecycle.
 
     Branch applicability is deliberately not checked: it is decided at calculation, where
     a missing value still blocks. PayDefinition retirement takes the RateDefinition
@@ -167,24 +169,26 @@ async def _authorable_rate_definition(
     """
     row = (await db.execute(
         text("""
-            SELECT rd.ratedefinitionid, rd.shape, rd.paydefinitionid, pd.status AS definition_status
+            SELECT rd.ratedefinitionid, rd.shape, rd.paydefinitionid, rd.statusratecolumnid,
+                   pd.status AS definition_status, src.isactive AS column_active
             FROM   payroll.ratedefinitions rd
             LEFT JOIN payroll.paydefinitions pd ON pd.paydefinitionid = rd.paydefinitionid
+            LEFT JOIN payroll.statusratecolumns src ON src.statusratecolumnid = rd.statusratecolumnid
             WHERE  rd.ratedefinitionid = :rid AND rd.companyid = :cid
         """),
         {"rid": rate_definition_id, "cid": company_id},
     )).mappings().first()
     if row is None:
         raise compensation_error("RATE_DEFINITION_NOT_FOUND", "Rate definition not found.", 404)
-    if row["paydefinitionid"] is None:
-        raise compensation_error(
-            "RATE_DEFINITION_NOT_AUTHORABLE",
-            "Only PayDefinition-owned rate definitions can be authored here.", 422)
     if row["shape"] != "Scalar":
         raise compensation_error(
             "RATE_DEFINITION_NOT_AUTHORABLE",
             "Only scalar (PerUnit) rate definitions can be authored at this time.", 422)
-    if row["definition_status"] != "Active":
+    if row["statusratecolumnid"] is not None:
+        if not row["column_active"]:
+            raise compensation_error(
+                "STATUS_RATE_COLUMN_NOT_ACTIVE", "The Status rate column is not active.", 422)
+    elif row["definition_status"] != "Active":
         raise compensation_error(
             "PAY_DEFINITION_NOT_ACTIVE", "The PayDefinition is not Active.", 422)
     return dict(row)
@@ -222,13 +226,13 @@ async def create_pending(
         schedule_id = (await db.execute(
             text("""
                 INSERT INTO payroll.driverrateschedules
-                    (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom,
-                     effectiveto, notes, createdbyuserid)
-                VALUES (:cid, :did, :pdid, :rid, :efrom, :eto, :notes, :uid)
+                    (companyid, driverid, paydefinitionid, statusratecolumnid, ratedefinitionid,
+                     effectivefrom, effectiveto, notes, createdbyuserid)
+                VALUES (:cid, :did, :pdid, :srcid, :rid, :efrom, :eto, :notes, :uid)
                 RETURNING driverratescheduleid
             """),
             {"cid": company_id, "did": data.driver_id, "pdid": definition["paydefinitionid"],
-             "rid": data.rate_definition_id, "efrom": data.effective_from,
+             "srcid": definition["statusratecolumnid"], "rid": data.rate_definition_id, "efrom": data.effective_from,
              "eto": data.effective_to, "notes": data.notes, "uid": user_id},
         )).scalar_one()
     except DBAPIError as exc:
@@ -518,17 +522,23 @@ async def driver_summary(
     company_id: int, user_id: int, driver_id: int, db: AsyncConnection,
 ) -> list[DriverRateSummaryItem]:
     """Every rate definition the Driver has schedules for, grouped per definition regardless
-    of its PayDefinition's status (the history source), limited to what the caller may read:
-    past-Branch readers see only overlapping rows and never a Pending one."""
+    of its owner status (the history source), limited to what the caller may read:
+    past-Branch readers see only overlapping rows and never a Pending one. A definition is
+    owned by a PayDefinition or by a Company Status rate column (``kind``)."""
     scope = await driver_compensation_read_scope(company_id, user_id, driver_id, db)
     params: dict = {"cid": company_id, "did": driver_id}
     rows = (await db.execute(
         text(f"""
             SELECT s.ratedefinitionid AS rate_definition_id,
+                   CASE WHEN rd.statusratecolumnid IS NULL THEN 'PayDefinition'
+                        ELSE 'StatusRateColumn' END AS kind,
                    rd.paydefinitionid AS pay_definition_id,
+                   rd.statusratecolumnid AS status_rate_column_id,
+                   src.columnname AS status_rate_column_name,
                    pd.definitioncode AS definition_code,
-                   pd.definitionname AS definition_name,
-                   pd.unit AS unit,
+                   COALESCE(pd.definitionname, src.columnname) AS definition_name,
+                   COALESCE(pd.unit, CASE WHEN src.statusratecolumnid IS NOT NULL THEN 'hour' END)
+                       AS unit,
                    pd.status AS pay_definition_status,
                    max(s.driverratescheduleid) FILTER (WHERE s.status = 'Approved')
                        AS approved_schedule_id,
@@ -539,11 +549,14 @@ async def driver_summary(
             FROM   payroll.driverrateschedules s
             JOIN   payroll.ratedefinitions rd ON rd.ratedefinitionid = s.ratedefinitionid
             LEFT JOIN payroll.paydefinitions pd ON pd.paydefinitionid = rd.paydefinitionid
+            LEFT JOIN payroll.statusratecolumns src
+                   ON src.statusratecolumnid = rd.statusratecolumnid
             WHERE  s.companyid = :cid AND s.driverid = :did
               {scope.row_filter("s", params)}
-            GROUP  BY s.ratedefinitionid, rd.paydefinitionid, pd.definitioncode,
+            GROUP  BY s.ratedefinitionid, rd.paydefinitionid, rd.statusratecolumnid,
+                      src.statusratecolumnid, src.columnname, pd.definitioncode,
                       pd.definitionname, pd.unit, pd.status
-            ORDER  BY lower(pd.definitionname), s.ratedefinitionid
+            ORDER  BY lower(COALESCE(pd.definitionname, src.columnname)), s.ratedefinitionid
         """),
         params,
     )).mappings().all()
@@ -571,7 +584,8 @@ async def _reference_branch_id(company_id: int, driver_id: int, db: AsyncConnect
 async def driver_pay_rates(
     company_id: int, user_id: int, driver_id: int, as_of: date | None, db: AsyncConnection,
 ) -> list[DriverPayRateRow]:
-    """Every authorable PayDefinition (Company-Active, scalar) and the Driver's rate state.
+    """Every authorable PayDefinition (Company-Active, scalar) and Status rate column (active)
+    with the Driver's rate state.
 
     The reference date defaults to today in the Branch of the Driver's current (else next,
     else latest) tenure. ``applicable_in_context_branch`` says whether the definition has an
@@ -616,6 +630,33 @@ async def driver_pay_rates(
         """),
         {"cid": company_id, "bid": context_branch_id, "asof": reference},
     )).mappings().all()
+    definitions = [{**dict(d), "kind": "PayDefinition", "status_rate_column_id": None,
+                    "status_rate_column_name": None} for d in definitions]
+    # The Company active Status rate columns are authored beside the PayDefinitions: each is
+    # labelled by its column name and has no Branch applicability.
+    definitions += [
+        {"kind": "StatusRateColumn", "pay_definition_id": None, "definition_code": None,
+         "definition_name": row["columnname"], "input_type": "Decimal", "unit": "hour",
+         "rate_definition_id": row["ratedefinitionid"],
+         "rate_component_definition_id": row["ratecomponentdefinitionid"],
+         "applicable_in_context_branch": None,
+         "status_rate_column_id": row["statusratecolumnid"],
+         "status_rate_column_name": row["columnname"]}
+        for row in (await db.execute(
+            text("""
+                SELECT src.statusratecolumnid, src.columnname, rd.ratedefinitionid,
+                       c.ratecomponentdefinitionid
+                FROM   payroll.statusratecolumns src
+                JOIN   payroll.ratedefinitions rd
+                       ON rd.statusratecolumnid = src.statusratecolumnid AND rd.shape = 'Scalar'
+                JOIN   payroll.ratecomponentdefinitions c
+                       ON c.ratedefinitionid = rd.ratedefinitionid AND c.sequenceno = 1
+                WHERE  src.companyid = :cid AND src.isactive
+                ORDER  BY src.isdefault DESC, lower(src.columnname), src.statusratecolumnid
+            """),
+            {"cid": company_id},
+        )).mappings().all()
+    ]
     if not definitions:
         return []
 
@@ -654,5 +695,5 @@ async def driver_pay_rates(
             (b for b in briefs if b.status == "Approved" and b.effective_from > reference), None)
         pending = next((b for b in briefs if b.status == "Pending"), None)
         result.append(DriverPayRateRow(
-            **dict(definition), current=current, future=future, pending=pending))
+            **definition, current=current, future=future, pending=pending))
     return result

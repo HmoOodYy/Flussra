@@ -244,6 +244,8 @@ class StatusRateColumn(BaseModel):
     is_default: bool
     is_active: bool
     rate_definition_id: int
+    # The one scalar component a Driver's schedule value is authored against.
+    rate_component_definition_id: int
     created_at_utc: datetime
     updated_at_utc: datetime | None = None
 

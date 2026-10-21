@@ -192,3 +192,161 @@ async def test_two_drivers_are_paid_from_their_own_schedules(p3c_client, p3c_eng
     preview = await _preview(p3c_client, tenant, period)
     assert D(str(_driver(preview, tenant.driver_a)["status_pay"])) == D("200.00")
     assert D(str(_driver(preview, tenant.driver_a2)["status_pay"])) == D("320.00")
+
+
+# ---------------------------------------------------------------------------
+# Rounding, Min/Max and what the amount does not depend on
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("hours, rate, line_amount, official", [
+    # The product is quantized once to four decimals, ties to the even digit.
+    ("3.25", "2.0002", "6.5006", "6.50"),     # 6.500650: the retained digit is even, it stays
+    ("2.75", "2.0002", "5.5006", "5.50"),     # 5.500550: the retained digit is odd, it rounds up
+])
+async def test_the_line_is_rounded_once_to_four_decimals_half_even_and_paid_to_the_cent(
+    p3c_client, p3c_engine, tenant, hours, rate, line_amount, official,
+):
+    _paid_status(tenant, hours=hours)
+    seed_status_rate(tenant, rate)
+    period = await _period(p3c_client, p3c_engine, tenant)
+    await _select(p3c_client, tenant, period, 0, "Vacation")
+
+    driver = _driver(await _preview(p3c_client, tenant, period), tenant.driver_a)
+    (line,) = [row for row in driver["lines"] if row["source_type"] == "StatusEntryState"]
+    assert D(str(line["calculated_amount"])) == D(line_amount)
+    assert D(str(driver["status_pay"])) == D(official)
+
+
+async def _rule(client, tenant, period, rule_type, amount) -> None:
+    response = await client.post(
+        "/payroll/driver-pay-rules",
+        json={"driver_id": tenant.driver_a_id, "rule_type": rule_type, "amount": amount,
+              "effective_from": period["start_date"]},
+        headers=tenant.admin)
+    assert response.status_code == 201, response.text
+
+
+async def test_status_pay_is_part_of_the_min_max_base(p3c_client, p3c_engine, tenant):
+    _paid_status(tenant)
+    seed_status_rate(tenant, "25")
+    period = await _period(p3c_client, p3c_engine, tenant)
+    await _select(p3c_client, tenant, period, 0, "Vacation")           # 8 h x 25 = 200
+    await _rule(p3c_client, tenant, period, "MinimumPay", "500")
+
+    driver = _driver(await _preview(p3c_client, tenant, period), tenant.driver_a)
+    assert D(str(driver["minimum_adjustment"])) == D("300.00")
+    assert D(str(driver["expected_pay"])) == D("500.00")
+
+
+async def test_a_maximum_caps_the_status_pay_too(p3c_client, p3c_engine, tenant):
+    _paid_status(tenant)
+    seed_status_rate(tenant, "25")
+    period = await _period(p3c_client, p3c_engine, tenant)
+    await _select(p3c_client, tenant, period, 0, "Vacation")
+    await _rule(p3c_client, tenant, period, "MaximumPay", "150")
+
+    driver = _driver(await _preview(p3c_client, tenant, period), tenant.driver_a)
+    assert D(str(driver["maximum_adjustment"])) == D("-50.00")
+    assert D(str(driver["expected_pay"])) == D("150.00")
+
+
+async def test_the_allowance_category_is_a_label_and_never_changes_the_amount(
+    p3c_client, p3c_engine, tenant,
+):
+    column, _, _ = status_column_of(tenant)
+    seed_status_key(tenant, "Holiday pay", off=False, hoursvalue=D("8"), category="Holiday",
+                    statusratecolumnid=column)
+    seed_status_key(tenant, "Sick pay", off=False, hoursvalue=D("8"), category="Sick",
+                    statusratecolumnid=column)
+    seed_status_rate(tenant, "25")
+    period = await _period(p3c_client, p3c_engine, tenant)
+    await _select(p3c_client, tenant, period, 0, "Holiday pay")
+    await _select(p3c_client, tenant, period, 1, "Sick pay")
+
+    driver = _driver(await _preview(p3c_client, tenant, period), tenant.driver_a)
+    amounts = [D(str(row["calculated_amount"]))
+               for row in driver["lines"] if row["source_type"] == "StatusEntryState"]
+    assert amounts == [D("200"), D("200")]
+    assert D(str(driver["status_pay"])) == D("400.00")
+
+
+async def test_a_status_with_a_rate_column_pays_from_the_selection_whatever_the_legacy_duplicate_says(
+    p3c_client, p3c_engine, tenant,
+):
+    """Pay, the preview blockers and the frozen Status evidence read only the canonical
+    selection: the legacy DailyStatus duplicate row can be rewritten or voided without any
+    effect."""
+    from tests.calculation_snapshot_helpers import capture
+
+    _paid_status(tenant)
+    seed_status_key(tenant, "Other leave", off=True)
+    seed_status_rate(tenant, "25")
+    period = await _period(p3c_client, p3c_engine, tenant)
+    await _select(p3c_client, tenant, period, 0, "Vacation")
+    period_id = period["payroll_period_id"]
+    assert query(tenant, """
+        SELECT count(*) FROM payroll.payrolldraftlines
+        WHERE payrollperiodid = %s AND linetype = 'DailyStatus' AND status <> 'Void'
+    """, (period_id,)) == [(1,)]
+
+    before = await _preview(p3c_client, tenant, period)
+    frozen_before = await capture(p3c_engine, tenant, period)
+
+    query(tenant, """
+        UPDATE payroll.payrolldraftlines SET notes = 'OTHER LEAVE'
+        WHERE payrollperiodid = %s AND linetype = 'DailyStatus'
+    """, (period_id,))
+    rewritten = await _preview(p3c_client, tenant, period)
+    query(tenant, """
+        UPDATE payroll.payrolldraftlines SET status = 'Void'
+        WHERE payrollperiodid = %s AND linetype = 'DailyStatus'
+    """, (period_id,))
+    voided = await _preview(p3c_client, tenant, period)
+    frozen_after = await capture(p3c_engine, tenant, period)
+
+    for other in (rewritten, voided):
+        assert D(str(_driver(other, tenant.driver_a)["status_pay"])) == D("200.00")
+        assert other["has_blockers"] is False
+        assert other["drivers"] == before["drivers"]
+    evidence = [query(tenant, """
+        SELECT statuskeyid, statushoursvaluesnapshot, statuscategorysnapshot, workdate
+        FROM payroll.payrollcalculationsnapshotstatusentries
+        WHERE payrollcalculationsnapshotid = %s
+    """, (frozen.snapshot_id,)) for frozen in (frozen_before, frozen_after)]
+    assert evidence[0] == evidence[1] and len(evidence[0]) == 1
+
+
+async def test_pto_status_cannot_be_entered_it_is_not_a_status(p3c_client, p3c_engine, tenant):
+    _paid_status(tenant)
+    period = await _period(p3c_client, p3c_engine, tenant)
+    response = await p3c_client.post(
+        f"/payroll/periods/{period['payroll_period_id']}/day-grid",
+        json={"work_date": _day(period), "rows": [
+            {"driver_assignment_id": tenant.driver_a, "values": {}, "status_key": "PTO_STATUS"}]},
+        headers=tenant.admin)
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "STATUS_NOT_FOUND"
+
+
+async def test_status_pay_is_not_a_payitem_and_cannot_be_written_as_an_ordinary_line(
+    p3c_client, p3c_engine, tenant,
+):
+    assert query(tenant, """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'payroll' AND table_name = 'payrollstatuskeys'
+          AND column_name ILIKE '%%payitem%%'
+    """) == []
+    assert query(tenant, "SELECT count(*) FROM payroll.payitems WHERE payitemcode IN "
+                         "('STATUS_PAY', 'STATUS_PAYMENT')") == [(0,)]
+    period = await _period(p3c_client, p3c_engine, tenant)
+    # An ordinary source line is a quantity against a period definition: a line type, a rate
+    # or an amount is not an input at all.
+    for extra in ({"line_type": "STATUS_PAY"}, {"line_type": "STATUS_PAYMENT"},
+                  {"calculated_amount": "200"}):
+        response = await p3c_client.post(
+            f"/payroll/periods/{period['payroll_period_id']}/lines",
+            json={"driver_assignment_id": tenant.driver_a, "work_date": _day(period),
+                  "payroll_period_definition_id": 1, "quantity": "8", **extra},
+            headers=tenant.admin)
+        assert response.status_code == 422, (extra, response.text)
+        assert {error["type"] for error in response.json()["detail"]} == {"extra_forbidden"}

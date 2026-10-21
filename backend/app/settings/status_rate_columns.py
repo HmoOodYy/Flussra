@@ -26,10 +26,12 @@ from app.settings.status_names import STATUS_NAME_MAX_LENGTH, normalize_status_n
 _COLUMN_SELECT = """
     SELECT src.statusratecolumnid, src.companyid, src.columnname, src.isdefault,
            src.isactive, src.createdatutc, src.updatedatutc,
-           rd.ratedefinitionid
+           rd.ratedefinitionid, c.ratecomponentdefinitionid
     FROM   payroll.statusratecolumns src
     JOIN   payroll.ratedefinitions rd
            ON rd.statusratecolumnid = src.statusratecolumnid AND rd.companyid = src.companyid
+    JOIN   payroll.ratecomponentdefinitions c
+           ON c.ratedefinitionid = rd.ratedefinitionid AND c.sequenceno = 1
 """
 
 
@@ -45,6 +47,7 @@ def _row_to_status_rate_column(row) -> StatusRateColumn:
         is_default=bool(row["isdefault"]),
         is_active=bool(row["isactive"]),
         rate_definition_id=row["ratedefinitionid"],
+        rate_component_definition_id=row["ratecomponentdefinitionid"],
         created_at_utc=row["createdatutc"],
         updated_at_utc=row["updatedatutc"],
     )
@@ -75,6 +78,8 @@ async def list_status_rate_columns(
 ) -> list[StatusRateColumn]:
     """Every Status rate column of the Company (any user with access to the Company)."""
     await check_branch_access(company_id, user_id, db)
+    # A Company always has its default column: one inserted without it heals here.
+    await ensure_default_status_rate_column(company_id, db)
     where = "WHERE src.companyid = :cid" + (" AND src.isactive" if active_only else "")
     result = await db.execute(
         text(f"{_COLUMN_SELECT} {where} ORDER BY src.isdefault DESC, src.statusratecolumnid"),
@@ -131,7 +136,7 @@ async def create_status_rate_column(
     AllCompanyBranches scope. ``is_default`` makes it the Company default (the previous
     default is demoted atomically)."""
     await security.ensure_company_admin(company_id, user_id, db)
-    await lock_status_catalog(company_id, db)
+    await ensure_default_status_rate_column(company_id, db)
 
     normalized = _normalized_column_name(data.column_name)
     if await _name_in_use(company_id, normalized, db):
