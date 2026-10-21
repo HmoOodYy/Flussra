@@ -81,6 +81,7 @@ from app.payroll.schemas import (
     DraftLineCreate,
     DraftLineUpdate,
 )
+from app.payroll.status_work_conflict import FinalDayState, assert_no_off_status_work_conflicts
 from app.settings.status_keys import resolve_status_input
 
 # ===========================================================================
@@ -755,6 +756,23 @@ async def save_day_grid(
         company_id, db,
     )
 
+    # ── Full-day-off integrity (under the Period lock) ──────────────────── #
+    # The final state of every row of the batch (its resolved Status and the ordinary
+    # quantities left after the save) must not combine a full-day-off Status with ordinary
+    # work. A whole batch with one such row is refused before any write.
+    await assert_no_off_status_work_conflicts(
+        period_id=period_id, company_id=company_id, work_date=work_date,
+        rows=[
+            FinalDayState(
+                driver_assignment_id=driver_assignment_id,
+                status_is_off=bool(key_row["isoffreason"]) if key_row is not None else False,
+                quantities=parsed_values,
+            )
+            for _, driver_assignment_id, parsed_values, _, key_row in parsed_rows
+        ],
+        db=db,
+    )
+
     # ── Status key usage limit enforcement (under the Period lock) ─────── #
     # All existence/active checks passed. Enforce configured usage limits
     # batch-wide so that intra-batch writes that would collectively exceed a
@@ -784,56 +802,70 @@ async def save_day_grid(
     for save_row, driver_assignment_id, parsed_values, validated_status_key, key_row in parsed_rows:
 
         # ── Ordinary pay lines, by period definition ─────────────────────── #
-        for ppd_id, qty in parsed_values.items():
-            # Treat None (empty/blank) as zero (clear)
-            effective_qty: Decimal = qty if qty is not None else Decimal("0")
+        # Two passes around the Status write keep every intermediate database state free of a
+        # full-day-off Status beside ordinary work: lines being cleared go first, lines being
+        # set go after the Status and entry state. The final state was validated above.
+        async def apply_quantities(
+            *, clearing: bool, driver_assignment_id=driver_assignment_id,
+            parsed_values=parsed_values,
+        ) -> None:
+            for ppd_id, qty in parsed_values.items():
+                # Treat None (empty/blank) as zero (clear)
+                effective_qty: Decimal = qty if qty is not None else Decimal("0")
+                if (effective_qty == 0) != clearing:
+                    continue
 
-            existing_result = await db.execute(
-                text("""
-                    SELECT draftlineid FROM payroll.payrolldraftlines
-                    WHERE  payrollperiodid = :pid
-                      AND  workdate        = :dt
-                      AND  driverassignmentid        = :did
-                      AND  payrollperioddefinitionid = :ppd
-                      AND  status         != 'Void'
-                """),
-                {"pid": period_id, "dt": work_date, "did": driver_assignment_id, "ppd": ppd_id},
-            )
-            existing = existing_result.mappings().first()
+                existing_result = await db.execute(
+                    text("""
+                        SELECT draftlineid FROM payroll.payrolldraftlines
+                        WHERE  payrollperiodid = :pid
+                          AND  workdate        = :dt
+                          AND  driverassignmentid        = :did
+                          AND  payrollperioddefinitionid = :ppd
+                          AND  status         != 'Void'
+                    """),
+                    {"pid": period_id, "dt": work_date, "did": driver_assignment_id,
+                     "ppd": ppd_id},
+                )
+                existing = existing_result.mappings().first()
 
-            if effective_qty == 0 and existing:
-                await void_draft_line(
-                    period_id=period_id,
-                    draft_line_id=existing["draftlineid"],
-                    company_id=company_id,
-                    user_id=user_id,
-                    db=db,
-                )
-            elif effective_qty == 0 and not existing:
-                continue  # don't create zero rows
-            elif not existing:
-                await add_draft_line(
-                    period_id=period_id,
-                    company_id=company_id,
-                    user_id=user_id,
-                    data=DraftLineCreate(
-                        driver_assignment_id=driver_assignment_id,
-                        work_date=work_date,
-                        payroll_period_definition_id=ppd_id,
-                        quantity=effective_qty,
-                        source_type="Manual",
-                    ),
-                    db=db,
-                )
-            else:
-                await update_draft_line(
-                    period_id=period_id,
-                    draft_line_id=existing["draftlineid"],
-                    company_id=company_id,
-                    user_id=user_id,
-                    data=DraftLineUpdate(quantity=effective_qty),
-                    db=db,
-                )
+                if effective_qty == 0 and existing:
+                    await void_draft_line(
+                        period_id=period_id,
+                        draft_line_id=existing["draftlineid"],
+                        company_id=company_id,
+                        user_id=user_id,
+                        db=db,
+                    )
+                elif effective_qty == 0 and not existing:
+                    continue  # don't create zero rows
+                elif not existing:
+                    await add_draft_line(
+                        period_id=period_id,
+                        company_id=company_id,
+                        user_id=user_id,
+                        data=DraftLineCreate(
+                            driver_assignment_id=driver_assignment_id,
+                            work_date=work_date,
+                            payroll_period_definition_id=ppd_id,
+                            quantity=effective_qty,
+                            source_type="Manual",
+                        ),
+                        db=db,
+                        enforce_status_conflict=False,
+                    )
+                else:
+                    await update_draft_line(
+                        period_id=period_id,
+                        draft_line_id=existing["draftlineid"],
+                        company_id=company_id,
+                        user_id=user_id,
+                        data=DraftLineUpdate(quantity=effective_qty),
+                        db=db,
+                        enforce_status_conflict=False,
+                    )
+
+        await apply_quantities(clearing=True)
 
         # ── DailyStatus upsert ────────────────────────────────────────────── #
         # P1 #4: write audit via _write_line_audit for all DailyStatus mutations
@@ -1036,6 +1068,8 @@ async def save_day_grid(
             status_key_id=key_row["statuskeyid"] if key_row else None,
             note_text=notes_val if notes_val else None,
         )
+
+        await apply_quantities(clearing=False)
 
     # Return the refreshed grid
     return await get_day_grid(

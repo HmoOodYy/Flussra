@@ -673,7 +673,6 @@ class TestOffDrivers:
         days = await _period_dates(direct_db, period_id)
         await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[0], "STATUS_PAYMENT", source_type="System")
         await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[1], "SYS_MIN_TOPUP", source_type="System")
         bonus = await session_client.post(
             f"/payroll/periods/{period_id}/bonuses",
@@ -683,6 +682,18 @@ class TestOffDrivers:
         assert bonus.status_code == 201, bonus.text
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 1
 
+        # Ordinary work cannot share a day with a full-day-off Status (the database refuses it),
+        # so the day has to stop being off first; then the worked day disqualifies the driver.
+        await direct_db.execute(
+            _text("""
+                UPDATE payroll.payrollperioddriverdayentrystate SET isvoided = TRUE
+                WHERE payrollperiodid = :period_id AND driverassignmentid = :driver_assignment_id
+                  AND workdate = :work_date
+            """),
+            {"period_id": period_id, "driver_assignment_id": paytest_driver_assignment_id,
+             "work_date": days[2]},
+        )
+        await direct_db.commit()
         await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[2], "HOURS")
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
