@@ -420,6 +420,8 @@ def reconcile_snapshot_content(content: dict[str, Any]) -> None:
         ):
             raise _integrity(f"{label}: the Driver total does not equal its official components.")
 
+        _reconcile_component_membership(label, total)
+
         # Components against their source lines.
         for component in components:
             kind = component["ComponentKind"]
@@ -445,6 +447,50 @@ def reconcile_snapshot_content(content: dict[str, Any]) -> None:
             raise _integrity(f"{label}: a source line contributes to no component.")
 
         _reconcile_minmax(label, total, by_kind)
+
+
+def _membership_error(message: str) -> SnapshotEvidenceError:
+    return SnapshotEvidenceError("SNAPSHOT_COMPONENT_MEMBERSHIP_ERROR", message)
+
+
+# The identity a source line must share with the component it contributes to, by family. A
+# Bonus line has none beyond its kind and Driver total (BONUS is one component per Driver total).
+_LINE_IDENTITY_BY_KIND = {
+    "ORDINARY": ("PayrollPeriodDefinitionID", "PayDefinitionID", "RateDefinitionID"),
+    "STATUS": ("StatusRateColumnID",),
+    "BONUS": (),
+}
+
+
+def _reconcile_component_membership(label: str, total: dict[str, Any]) -> None:
+    """Every source line belongs to the component of its own identity, not just of its kind.
+
+    The component links are generated ids that the financial hash deliberately does not cover,
+    so two components of equal value could have their lines swapped without changing anything the
+    hash sees. Membership is therefore proved from the evidence itself, independently of the
+    database keys: the component is one of this Driver total, its kind is the line type, and the
+    identity the family carries (Definition ids for an ordinary line, the Status rate column for a
+    Status line) equals the component's. Min/Max components have no source lines, and every other
+    component has at least one.
+    """
+    components = {c["PayrollCalculationSnapshotComponentID"]: c for c in total["Components"]}
+    members: dict[int, int] = {}
+    for line in total["Lines"]:
+        component = components.get(line["PayrollCalculationSnapshotComponentID"])
+        if component is None:
+            raise _membership_error(f"{label}: a source line links to a component of no Driver total.")
+        kind = component["ComponentKind"]
+        identity = _LINE_IDENTITY_BY_KIND.get(kind)
+        if identity is None or kind != line["LineType"]:
+            raise _membership_error(f"{label}: a source line links to a component of another kind.")
+        if any(line[field] != component[field] for field in identity):
+            raise _membership_error(
+                f"{label}: a source line links to a component of another identity.")
+        members[component["PayrollCalculationSnapshotComponentID"]] = (
+            members.get(component["PayrollCalculationSnapshotComponentID"], 0) + 1)
+    for component_id, component in components.items():
+        if component["ComponentKind"] in _LINE_IDENTITY_BY_KIND and members.get(component_id, 0) < 1:
+            raise _membership_error(f"{label}: a {component['ComponentKind']} component has no source line.")
 
 
 def _reconcile_minmax(

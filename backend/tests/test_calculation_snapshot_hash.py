@@ -268,7 +268,8 @@ def test_an_adjustment_without_its_min_max_evidence_fails_reconciliation():
     total["ExpectedPay"] = D("6.00")
     content["TotalExpectedPay"] = D("6.00")
     total["Components"].append(_component(
-        "MINIMUM_ADJUSTMENT", "1.00", SourceCount=0, DriverPayRuleID=81))
+        "MINIMUM_ADJUSTMENT", "1.00", SourceCount=0, DriverPayRuleID=81,
+        PayrollCalculationSnapshotComponentID=703))
     with pytest.raises(SnapshotEvidenceError) as failed:
         reconcile_snapshot_content(content)
     assert failed.value.code == "SNAPSHOT_INTEGRITY_ERROR"

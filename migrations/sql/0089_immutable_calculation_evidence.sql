@@ -255,6 +255,12 @@ CREATE TABLE payroll.PayrollCalculationSnapshotComponents (
                 ComponentKind),
     CONSTRAINT uq_PayrollCalculationSnapshotComponents_FinalLine
         UNIQUE (PayrollCalculationSnapshotComponentID, PayrollCalculationSnapshotID),
+    -- The identity a source line of each family must share with its component.
+    CONSTRAINT uq_PayrollCalculationSnapshotComponents_OrdinaryIdentity
+        UNIQUE (PayrollCalculationSnapshotComponentID, PayrollPeriodDefinitionID,
+                PayDefinitionID, RateDefinitionID),
+    CONSTRAINT uq_PayrollCalculationSnapshotComponents_StatusIdentity
+        UNIQUE (PayrollCalculationSnapshotComponentID, StatusRateColumnID),
     CONSTRAINT fk_PayrollCalculationSnapshotComponents_Snapshot
         FOREIGN KEY (PayrollCalculationSnapshotID, CompanyID, BranchID, PayrollPeriodID)
         REFERENCES payroll.PayrollCalculationSnapshots
@@ -386,6 +392,24 @@ ALTER TABLE payroll.PayrollCalculationSnapshotLines
         FOREIGN KEY (PayrollCalculationSnapshotComponentID, PayrollCalculationDriverTotalID, LineType)
         REFERENCES payroll.PayrollCalculationSnapshotComponents
             (PayrollCalculationSnapshotComponentID, PayrollCalculationDriverTotalID, ComponentKind)
+        ON DELETE RESTRICT,
+    -- A source line belongs to the component of its own identity, not just of its kind.
+    -- Each family has its own narrow key and the default MATCH SIMPLE is exactly right: the
+    -- per-source CHECK below fills every column of a family's key for that family and leaves
+    -- them NULL for the other families, so a key is enforced precisely for the lines it
+    -- applies to and skipped for the others. A Bonus line has no identity beyond its kind and
+    -- Driver total (BONUS is one component per DriverAssignment), enforced by the key above.
+    ADD CONSTRAINT fk_PayrollCalculationSnapshotLines_OrdinaryComponentIdentity
+        FOREIGN KEY (PayrollCalculationSnapshotComponentID, PayrollPeriodDefinitionID,
+                     PayDefinitionID, RateDefinitionID)
+        REFERENCES payroll.PayrollCalculationSnapshotComponents
+            (PayrollCalculationSnapshotComponentID, PayrollPeriodDefinitionID,
+             PayDefinitionID, RateDefinitionID)
+        ON DELETE RESTRICT,
+    ADD CONSTRAINT fk_PayrollCalculationSnapshotLines_StatusComponentIdentity
+        FOREIGN KEY (PayrollCalculationSnapshotComponentID, StatusRateColumnID)
+        REFERENCES payroll.PayrollCalculationSnapshotComponents
+            (PayrollCalculationSnapshotComponentID, StatusRateColumnID)
         ON DELETE RESTRICT,
     ADD CONSTRAINT fk_PayrollCalculationSnapshotLines_DriverRateSchedule
         FOREIGN KEY (DriverRateScheduleID, RateDefinitionID)
