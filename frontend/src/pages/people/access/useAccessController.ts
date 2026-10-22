@@ -58,7 +58,7 @@ export function useAccessController() {
         if (forEmployee !== null && authUser && canCreatePeople(authUser)) {
           deepLinkedEmployee.current = null;
           dispatch({ type: 'CREATE_OPEN' });
-          dispatch({ type: 'CREATE_FORM', form: { employeeId: forEmployee } });
+          dispatch({ type: 'CREATE_PRESELECT', employeeId: forEmployee });
           const next = new URLSearchParams(window.location.search);
           next.delete('newForEmployee');
           setSearchParams(next, { replace: true });

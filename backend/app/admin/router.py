@@ -96,11 +96,13 @@ async def list_employee_link_candidates(
     db: DbDep,
     q: str | None = Query(None, description="Case-insensitive search on name or employee key"),
     driver_state: str | None = Query(None, pattern="^(current|pending|none)$"),
+    employee_id: int | None = Query(None, description="Resolve one specific Employee"),
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
 ) -> list[EmployeeLinkCandidate]:
     return await user_reads.list_employee_link_candidates(
         company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
-        q=q, driver_state=driver_state, limit=limit,
+        q=q, driver_state=driver_state, employee_id=employee_id, limit=limit, offset=offset,
     )
 
 

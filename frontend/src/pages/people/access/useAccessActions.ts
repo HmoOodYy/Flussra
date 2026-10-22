@@ -21,7 +21,14 @@ import type {
   UserUpdate,
 } from '../../../types/admin';
 import { apiError } from '../peoplePresentation';
-import { buildCreateAccountPayload, buildProvisionPayload, eligibleCandidates, unlinkBlockedReason } from './accessModel';
+import {
+  CANDIDATE_PAGE_SIZE,
+  buildCreateAccountPayload,
+  buildProvisionPayload,
+  eligibleCandidates,
+  hasMoreCandidates,
+  unlinkBlockedReason,
+} from './accessModel';
 import type { AccessAction, AccessPageState } from './accessState';
 
 interface Options {
@@ -74,22 +81,25 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
   }, [selected, st.provision.form, st.provision.loading, st.roles, dispatch, showToast]);
 
   // ── Employee link ──
+  // One page of candidates; `offset > 0` appends the next page to what is already shown.
   const loadCandidates = useCallback(async (
-    target: 'create' | 'link', search: string, driverStateOnly: boolean,
+    target: 'create' | 'link', search: string, driverStateOnly: boolean, offset = 0,
   ) => {
     if (!canReadCandidates) {
       dispatch(target === 'create'
-        ? { type: 'CREATE_CANDIDATES', candidates: [] }
-        : { type: 'LINK_CANDIDATES', candidates: [] });
+        ? { type: 'CREATE_CANDIDATES', candidates: [], more: false }
+        : { type: 'LINK_CANDIDATES', candidates: [], more: false });
       return;
     }
     try {
       const result = await getEmployeeLinkCandidates({
         q: search.trim() || undefined, driver_state: driverStateOnly ? 'current' : undefined,
+        limit: CANDIDATE_PAGE_SIZE, offset,
       });
+      const more = hasMoreCandidates(result.data.length);
       dispatch(target === 'create'
-        ? { type: 'CREATE_CANDIDATES', candidates: result.data }
-        : { type: 'LINK_CANDIDATES', candidates: result.data });
+        ? { type: 'CREATE_CANDIDATES', candidates: result.data, more, append: offset > 0 }
+        : { type: 'LINK_CANDIDATES', candidates: result.data, more, append: offset > 0 });
     } catch (err) {
       dispatch(target === 'create'
         ? { type: 'CREATE_ERROR', err: `Could not load Employees to link: ${apiError(err)}` }
@@ -97,16 +107,44 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
     }
   }, [canReadCandidates, dispatch]);
 
-  // Candidates for the create dialog follow the chosen role (DRIVER needs a current Driver).
+  // Candidates for the create dialog follow the chosen role (DRIVER needs a current Driver) and the
+  // search text (debounced), so an Employee beyond the first page is found by searching for it.
   const createRoleId = st.create.form.roleId;
   const createMode = st.create.form.mode;
   const createOpen = st.create.open;
+  const createSearch = st.create.search;
   const roles = st.roles;
+  const createTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!createOpen) return;
     const role = roles.find(r => r.company_role_id === createRoleId);
-    void loadCandidates('create', '', createMode === 'provisioned' && role?.role_code === 'DRIVER');
-  }, [createOpen, createRoleId, createMode, roles, loadCandidates]);
+    const driverOnly = createMode === 'provisioned' && role?.role_code === 'DRIVER';
+    if (createTimer.current) clearTimeout(createTimer.current);
+    createTimer.current = setTimeout(() => { void loadCandidates('create', createSearch, driverOnly); }, createSearch ? 200 : 0);
+    return () => { if (createTimer.current) clearTimeout(createTimer.current); };
+  }, [createOpen, createRoleId, createMode, createSearch, roles, loadCandidates]);
+
+  // An Employee preselected by id (Workforce → Access) is looked up on its own, so it resolves
+  // wherever it would sit in the paged list.
+  const resolving = st.create.resolving;
+  const preselectedId = st.create.form.employeeId;
+  useEffect(() => {
+    if (!createOpen || !resolving || preselectedId === null) return;
+    let cancelled = false;
+    getEmployeeLinkCandidates({ employee_id: preselectedId, limit: 1 })
+      .then((r) => { if (!cancelled) dispatch({ type: 'CREATE_RESOLVED', employee: r.data[0] ?? null }); })
+      .catch(() => { if (!cancelled) dispatch({ type: 'CREATE_RESOLVED', employee: null }); });
+    return () => { cancelled = true; };
+  }, [createOpen, resolving, preselectedId, dispatch]);
+
+  const loadMoreCandidates = useCallback((target: 'create' | 'link') => {
+    if (target === 'create') {
+      const role = roles.find(r => r.company_role_id === createRoleId);
+      void loadCandidates('create', createSearch, createMode === 'provisioned' && role?.role_code === 'DRIVER', st.create.candidates.length);
+    } else {
+      void loadCandidates('link', st.link.search, false, st.link.candidates.length);
+    }
+  }, [roles, createRoleId, createMode, createSearch, st.create.candidates.length, st.link.search, st.link.candidates.length, loadCandidates]);
 
   // Search-as-you-type for the link dialog (debounced).
   const linkOpen = st.link.open;
@@ -238,6 +276,6 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
   return {
     submitCreate, submitProvision, submitLink, unlink, submitEdit, submitReset,
     confirmToggleActive, submitChangeRole, submitExtraPerms, submitOwnerTransfer,
-    eligibleCandidates,
+    eligibleCandidates, loadMoreCandidates,
   };
 }

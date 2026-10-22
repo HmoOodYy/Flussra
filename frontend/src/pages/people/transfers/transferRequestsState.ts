@@ -1,5 +1,4 @@
-import type { DriverTransferRequest } from '../../../types/transfer';
-import type { DriverSummary } from '../../../types/core';
+import type { DriverTransferRequest, TransferDriverCandidate } from '../../../types/transfer';
 import type { FilterView } from './transferRequestsView';
 
 export interface TabState {
@@ -29,7 +28,7 @@ export interface TabState {
 
 interface CreateState {
   open: boolean; loading: boolean; error: string | null;
-  drivers: DriverSummary[];
+  drivers: TransferDriverCandidate[];
   driversLoading: boolean;
   driverId: number | null;
   targetBranchId: number | null;
@@ -91,7 +90,7 @@ export type TabAction =
   // Create dialog
   | { type: 'CREATE_OPEN' }
   | { type: 'CREATE_CLOSE' }
-  | { type: 'CREATE_DRIVERS'; drivers: DriverSummary[] }
+  | { type: 'CREATE_DRIVERS'; drivers: TransferDriverCandidate[] }
   | { type: 'CREATE_DRIVERS_LOADING'; val: boolean }
   | { type: 'CREATE_FIELD'; field: keyof Omit<CreateState, 'drivers' | 'driversLoading'>; val: unknown }
   | { type: 'CREATE_LOADING'; val: boolean }

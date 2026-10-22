@@ -11,11 +11,14 @@ import {
   accessStatus,
   buildCreateAccountPayload,
   buildProvisionPayload,
+  CANDIDATE_PAGE_SIZE,
   canLinkUser,
   eligibleCandidates,
   filterUsers,
+  hasMoreCandidates,
   linkSummary,
   unlinkBlockedReason,
+  withSelected,
 } from '../src/pages/people/access/accessModel.ts';
 import { accessReducer, ACCESS_INITIAL } from '../src/pages/people/access/accessState.ts';
 
@@ -121,22 +124,69 @@ test('provisioning applies only to a staged account and needs the Employee for D
   assert.equal(ok.role_assignment.scope_type, 'Self');
 });
 
-test('a create dialog opened for an Employee keeps that Employee and fills the name once candidates load', () => {
+test('a chosen Employee survives paging and searching of the candidate list', () => {
   let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
-  st = accessReducer(st, { type: 'CREATE_FORM', form: { employeeId: 5 } });
-  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(5, 'Ada Driver', 'current')] });
-  assert.equal(st.create.form.employeeId, 5);
-  assert.equal(st.create.form.displayName, 'Ada Driver');
+  const far = candidate(900, 'Zed Far Away', 'none');
+  st = accessReducer(st, { type: 'CREATE_PICK', employee: far });
+  assert.equal(st.create.form.employeeId, 900);
+  assert.equal(st.create.form.displayName, 'Zed Far Away');
+  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(1, 'A', 'none')], more: false });
+  assert.equal(st.create.form.employeeId, 900);
+  assert.deepEqual(withSelected(st.create.candidates, st.create.selected).map((c) => c.employee_id), [900, 1]);
+  assert.deepEqual(withSelected([far], far).map((c) => c.employee_id), [900]);
+});
+
+test('an Employee preselected by id resolves independently of the first candidate page', () => {
+  let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
+  st = accessReducer(st, { type: 'CREATE_PRESELECT', employeeId: 900 });
+  assert.equal(st.create.resolving, true);
+  assert.equal(st.create.form.employeeId, 900);
+  // The first page does not contain it: the preselection is not discarded.
+  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(1, 'A', 'none')], more: true });
+  assert.equal(st.create.form.employeeId, 900);
+  st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: candidate(900, 'Zed Far Away', 'current') });
+  assert.deepEqual([st.create.resolving, st.create.form.employeeId, st.create.form.displayName], [false, 900, 'Zed Far Away']);
+  assert.equal(st.create.selected?.employee_id, 900);
+});
+
+test('a preselected Employee that cannot be found is cleared with an explanation', () => {
+  let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
+  st = accessReducer(st, { type: 'CREATE_PRESELECT', employeeId: 5 });
+  st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: null });
+  assert.deepEqual([st.create.resolving, st.create.form.employeeId, st.create.selected], [false, null, null]);
+  assert.match(st.create.error ?? '', /not available/);
+});
+
+test('a typed display name is never overwritten by the chosen Employee name', () => {
+  let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
   st = accessReducer(st, { type: 'CREATE_FORM', form: { displayName: 'Custom Name' } });
-  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(5, 'Ada Driver', 'current')] });
+  st = accessReducer(st, { type: 'CREATE_PICK', employee: candidate(5, 'Ada Driver', 'current') });
   assert.equal(st.create.form.displayName, 'Custom Name');
 });
 
-test('a chosen Employee that is no longer eligible after a role change is dropped', () => {
+test('choosing the DRIVER role drops a chosen Employee that is not a current Driver, and keeps one that is', () => {
+  const roles = [{ company_role_id: 3, role_code: 'DRIVER', is_active: true }] as unknown as CompanyRole[];
+  const base = { ...accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' }), roles };
+  const notDriver = accessReducer(base, { type: 'CREATE_PICK', employee: candidate(1, 'Plain', 'none') });
+  const dropped = accessReducer(notDriver, { type: 'CREATE_FORM', form: { roleId: 3 } });
+  assert.deepEqual([dropped.create.form.employeeId, dropped.create.selected], [null, null]);
+  const driver = accessReducer(base, { type: 'CREATE_PICK', employee: candidate(2, 'Dana', 'current') });
+  const kept = accessReducer(driver, { type: 'CREATE_FORM', form: { roleId: 3 } });
+  assert.equal(kept.create.form.employeeId, 2);
+});
+
+test('candidate pages append, and a full page means there may be more', () => {
+  assert.equal(hasMoreCandidates(CANDIDATE_PAGE_SIZE), true);
+  assert.equal(hasMoreCandidates(CANDIDATE_PAGE_SIZE - 1), false);
   let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
-  st = accessReducer(st, { type: 'CREATE_FORM', form: { employeeId: 9 } });
-  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(1, 'Other', 'current')] });
-  assert.equal(st.create.form.employeeId, null);
+  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(1, 'A', 'none')], more: true });
+  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(2, 'B', 'none')], more: false, append: true });
+  assert.deepEqual(st.create.candidates.map((c) => c.employee_id), [1, 2]);
+  assert.equal(st.create.candidatesMore, false);
+  st = accessReducer(st, { type: 'LINK_OPEN' });
+  st = accessReducer(st, { type: 'LINK_CANDIDATES', candidates: [candidate(3, 'C', 'none')], more: true });
+  st = accessReducer(st, { type: 'LINK_CANDIDATES', candidates: [candidate(4, 'D', 'none')], more: false, append: true });
+  assert.deepEqual(st.link.candidates.map((c) => c.employee_id), [3, 4]);
 });
 
 // ── The legacy User-as-Person People UI is gone ─────────────────────────────
@@ -157,10 +207,21 @@ test('no source file still depends on the retired People wizard or the /core/peo
   assert.deepEqual(offenders, []);
 });
 
-test('the Transfer Requests driver picker reads the canonical Driver roster', () => {
+test('the Transfer Requests driver picker reads the transfer-authorized candidate read', () => {
   const api = readFileSync(new URL('../src/lib/transferApi.ts', import.meta.url), 'utf8');
-  assert.match(api, /apiClient\.get<DriverSummary\[\]>\('\/core\/drivers'/);
+  assert.match(api, /\/driver-transfers\/driver-candidates/);
+  assert.doesNotMatch(api, /\/core\/drivers/);
   const hook = readFileSync(new URL('../src/pages/people/transfers/useTransferRequests.ts', import.meta.url), 'utf8');
-  assert.match(hook, /canEditTransfers\(user, d\.branch_id\)/);
-  assert.match(hook, /d\.driver_status === 'Active'/);
+  assert.match(hook, /listTransferDriverCandidates\(\)/);
+  // Eligibility is the backend's: no Driver work status or Branch filtering is re-derived here.
+  assert.doesNotMatch(hook, /driver_status/);
+  assert.doesNotMatch(hook, /canEditTransfers\(user, d\./);
+  // A failed load is shown, never turned into a silently empty picker.
+  assert.match(hook, /Could not load Drivers/);
+});
+
+test('account creation resolves a preselected Employee by id instead of searching the first page', () => {
+  const actions = readFileSync(new URL('../src/pages/people/access/useAccessActions.ts', import.meta.url), 'utf8');
+  assert.match(actions, /getEmployeeLinkCandidates\(\{ employee_id: preselectedId, limit: 1 \}\)/);
+  assert.match(actions, /limit: CANDIDATE_PAGE_SIZE, offset/);
 });

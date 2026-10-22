@@ -50,7 +50,10 @@ export function unlinkAdminUserEmployee(userId: number): AxiosPromise<UserAdmin>
 export function getEmployeeLinkCandidates(params: {
   q?: string;
   driver_state?: 'current' | 'pending' | 'none';
+  /** Resolve one specific Employee, wherever it sits in the paged order. */
+  employee_id?: number;
   limit?: number;
+  offset?: number;
 } = {}): AxiosPromise<EmployeeLinkCandidate[]> {
   return apiClient.get<EmployeeLinkCandidate[]>('/admin/employee-link-candidates', { params });
 }

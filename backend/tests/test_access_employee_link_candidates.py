@@ -69,6 +69,11 @@ def workforce_only_tenant(p3b_dsn) -> Tenant:
     return build_tenant(p3b_dsn, permissions=["employees.view", "employees.manage"])
 
 
+@pytest.fixture(name="workforce_and_access")
+def workforce_and_access_tenant(p3b_dsn) -> Tenant:
+    return build_tenant(p3b_dsn, permissions=["employees.view", "employees.manage", "users.view"])
+
+
 async def _ids(client, tenant, headers=None, **params):
     response = await client.get(CANDIDATES, params=params, headers=headers or tenant.admin)
     assert response.status_code == 200, response.text
@@ -206,9 +211,9 @@ async def test_the_linking_is_refused_for_an_employee_of_another_company(
 
 
 async def test_the_employee_detail_reports_whether_its_account_is_staged(
-    p3c_client, workforce_only,
+    p3c_client, workforce_and_access,
 ):
-    tenant = workforce_only
+    tenant = workforce_and_access
     employee = _employee(tenant, "Staged Account Holder")
     staged_user = _sql(tenant, """
         INSERT INTO sec.users (companyid, employeeid, username, displayname, passwordhash,
@@ -223,3 +228,92 @@ async def test_the_employee_detail_reports_whether_its_account_is_staged(
          (staged_user,))
     detail = (await p3c_client.get(f"/workforce/employees/{employee}", headers=tenant.admin)).json()
     assert (detail["linked_user"]["is_staged"], detail["linked_user"]["can_login"]) == (False, True)
+
+
+def _linked_account(tenant: Tenant, employee: int) -> int:
+    return _sql(tenant, """
+        INSERT INTO sec.users (companyid, employeeid, username, displayname, passwordhash,
+                               isactive, canlogin, isstaged)
+        VALUES (%s, %s, %s, 'Linked Person', 'x', TRUE, TRUE, FALSE) RETURNING userid
+    """, (tenant.company_id, employee, "linked_" + str(employee)))[0][0]
+
+
+async def test_a_workforce_only_reader_receives_no_account_detail(p3c_client, workforce_only):
+    tenant = workforce_only
+    employee = _employee(tenant, "Has An Account")
+    _linked_account(tenant, employee)
+
+    detail = await p3c_client.get(f"/workforce/employees/{employee}", headers=tenant.admin)
+    assert detail.status_code == 200, detail.text
+    body = detail.json()
+    assert body["employee_id"] == employee and body["full_name"] == "Has An Account"
+    assert body["linked_user"] is None
+    assert f"linked_{employee}" not in detail.text
+    admin_read = await p3c_client.get("/admin/users", headers=tenant.admin)
+    assert admin_read.status_code == 403
+
+
+async def test_a_reader_with_access_authority_receives_the_contextual_account_summary(
+    p3c_client, workforce_and_access,
+):
+    tenant = workforce_and_access
+    employee = _employee(tenant, "Has An Account")
+    user_id = _linked_account(tenant, employee)
+
+    body = (await p3c_client.get(f"/workforce/employees/{employee}", headers=tenant.admin)).json()
+    assert body["linked_user"]["user_id"] == user_id
+    assert body["linked_user"]["username"] == f"linked_{employee}"
+    assert (body["linked_user"]["is_active"], body["linked_user"]["can_login"],
+            body["linked_user"]["is_staged"]) == (True, True, False)
+
+
+async def test_workforce_writes_do_not_disclose_the_account_to_a_workforce_only_caller(
+    p3c_client, workforce_only,
+):
+    tenant = workforce_only
+    employee = _employee(tenant, "Edited Person")
+    _linked_account(tenant, employee)
+    edited = await p3c_client.patch(
+        f"/workforce/employees/{employee}", json={"preferred_name": "Eddie"}, headers=tenant.admin)
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["linked_user"] is None
+
+
+async def test_candidates_can_be_paged_and_searched_past_the_first_page(p3c_client, access_only):
+    tenant = access_only
+    ids = [_employee(tenant, f"Paged {index:03d}", key=f"PG-{index:03d}") for index in range(7)]
+
+    first = await _ids(p3c_client, tenant, q="paged", limit=3)
+    second = await _ids(p3c_client, tenant, q="paged", limit=3, offset=3)
+    third = await _ids(p3c_client, tenant, q="paged", limit=3, offset=6)
+    paged = [row["employee_id"] for row in first + second + third]
+    assert paged == ids
+
+    far = await _ids(p3c_client, tenant, q="paged 006", limit=3)
+    assert [row["employee_id"] for row in far] == [ids[6]]
+    by_key = await _ids(p3c_client, tenant, q="pg-005")
+    assert [row["employee_id"] for row in by_key] == [ids[5]]
+
+
+async def test_one_employee_can_be_resolved_by_id_wherever_it_sits(p3c_client, access_only):
+    tenant = access_only
+    ids = [_employee(tenant, f"Zed {index:03d}") for index in range(5)]
+    last = ids[-1]
+    window = await _ids(p3c_client, tenant, limit=2)
+    assert last not in [row["employee_id"] for row in window]
+
+    resolved = await _ids(p3c_client, tenant, employee_id=last)
+    assert [row["employee_id"] for row in resolved] == [last]
+    assert set(resolved[0]) == MINIMUM_FIELDS
+
+
+async def test_an_employee_id_that_is_linked_or_foreign_does_not_resolve(
+    p3c_client, access_only, p3b_dsn,
+):
+    tenant = access_only
+    linked = _employee(tenant, "Already Linked")
+    _linked_account(tenant, linked)
+    other = build_tenant(p3b_dsn, permissions=["users.view", "users.edit"])
+    foreign = _employee(other, "Foreign")
+    assert await _ids(p3c_client, tenant, employee_id=linked) == []
+    assert await _ids(p3c_client, tenant, employee_id=foreign) == []

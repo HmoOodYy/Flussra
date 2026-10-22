@@ -3,9 +3,9 @@
  * Lifecycle routes are under /driver-transfers (backend app/transfer/router.py).
  */
 import apiClient from './apiClient';
-import type { DriverSummary } from '../types/core';
 import type {
   DriverTransferRequest,
+  TransferDriverCandidate,
   TransferListResponse,
   DriverTransferCreate,
   SourceApprovalRequest,
@@ -16,14 +16,12 @@ import type {
 
 
 /**
- * The permanent Drivers a transfer can be requested for: the canonical Driver roster under the
- * caller's own drivers.view authority (no Workforce or Access permission is needed). Each item
- * carries the Branch of the Driver's current (else pending, else latest) assignment.
+ * The Drivers a transfer can be requested for. The backend decides eligibility (a current,
+ * not-ending assignment, no transfer in flight, source Branch the caller may edit), under the
+ * transfer-create authority alone: no drivers.view, Workforce or Access permission is needed.
  */
-export async function listTransferDriverPicker(): Promise<DriverSummary[]> {
-  const response = await apiClient.get<DriverSummary[]>('/core/drivers', {
-    params: { driver_status: 'Active' },
-  });
+export async function listTransferDriverCandidates(): Promise<TransferDriverCandidate[]> {
+  const response = await apiClient.get<TransferDriverCandidate[]>('/driver-transfers/driver-candidates');
   return response.data;
 }
 

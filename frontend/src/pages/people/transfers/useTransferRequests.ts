@@ -4,7 +4,7 @@ import type { Branch } from '../../../types/core';
 import { canEditTransfers } from '../../../lib/permissions';
 import {
   listTransfers, approveSource, decideTarget, completeTransfer, cancelTransfer, createTransfer,
-  rescheduleTransfer, listTransferDriverPicker,
+  rescheduleTransfer, listTransferDriverCandidates,
 } from '../../../lib/transferApi';
 import type { TargetDecisionRequest } from '../../../types/transfer';
 import { useAuth } from '../../../store/authStore';
@@ -67,19 +67,21 @@ export function useTransferRequests(branches: Branch[], newForDriverId: number |
     dispatch({ type: 'CREATE_OPEN' });
     dispatch({ type: 'CREATE_DRIVERS_LOADING', val: true });
     try {
-      // The canonical Driver roster under the caller's own drivers.view authority.
-      const drivers = await listTransferDriverPicker();
-      // Restrict to drivers whose source branch the user can edit, so the form never becomes submit-capable for an unauthorized branch.
-      const usable = drivers.filter(d =>
-        d.driver_status === 'Active' && (user ? canEditTransfers(user, d.branch_id) : false));
-      dispatch({ type: 'CREATE_DRIVERS', drivers: usable });
-      if (preselectDriverId !== null && usable.some(d => d.driver_id === preselectDriverId)) {
-        dispatch({ type: 'CREATE_FIELD', field: 'driverId', val: preselectDriverId });
+      // The backend returns only the Drivers a transfer can be started for by this caller.
+      const drivers = await listTransferDriverCandidates();
+      dispatch({ type: 'CREATE_DRIVERS', drivers });
+      if (preselectDriverId !== null) {
+        if (drivers.some(d => d.driver_id === preselectDriverId)) {
+          dispatch({ type: 'CREATE_FIELD', field: 'driverId', val: preselectDriverId });
+        } else {
+          dispatch({ type: 'CREATE_ERR', err: 'That Driver cannot start a transfer right now (no current assignment, or a transfer is already in progress).' });
+        }
       }
-    } catch {
+    } catch (err) {
       dispatch({ type: 'CREATE_DRIVERS', drivers: [] });
+      dispatch({ type: 'CREATE_ERR', err: `Could not load Drivers: ${apiError(err)}` });
     }
-  }, [user]);
+  }, []);
 
   // A deep link from a Driver's Workforce detail opens the form with that Driver chosen.
   const deepLinkHandled = useRef(false);

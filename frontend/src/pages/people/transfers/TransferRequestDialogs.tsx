@@ -42,7 +42,7 @@ export function TransferRequestDialogs({ st, selected, branches, dispatch, submi
                   <option value="">— Select a driver —</option>
                   {st.create.drivers.map(d => (
                     <option key={d.driver_id} value={d.driver_id!}>
-                      {d.full_name}{d.driver_number ? ` (${d.driver_number})` : ''} · {d.branch_name}
+                      {d.full_name}{d.driver_number ? ` (${d.driver_number})` : ''} · {d.source_branch_name}
                     </option>
                   ))}
                 </select>

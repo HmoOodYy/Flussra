@@ -125,3 +125,13 @@ export function statusKind(s: TransferStatus): StatusBadgeKind {
     case 'Cancelled':             return 'cancelled';
   }
 }
+
+/** A Driver a transfer can be started for, as the backend's transfer-authority read reports it. */
+export interface TransferDriverCandidate {
+  driver_id: number;
+  driver_number: string | null;
+  full_name: string;
+  driver_assignment_id: number;
+  source_branch_id: number;
+  source_branch_name: string;
+}

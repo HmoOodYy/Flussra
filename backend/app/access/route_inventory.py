@@ -86,6 +86,7 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'GET /dashboard': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.dashboard.service.get_dashboard_summary', 'BRANCH', 'DENY', None, None),
     'GET /driver-transfers': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('drivers.view', 'drivers.edit'), None, 'BRANCH', 'DENY', None, None),
     'POST /driver-transfers': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.transfer.service.create_driver_transfer_request', 'RESOURCE_SPECIFIC', 'ALLOW_OWN', 'app.access.policy.resolve_driver_self', None),
+    'GET /driver-transfers/driver-candidates': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'BRANCH', 'DENY', None, None),
     'GET /driver-transfers/{transfer_request_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('drivers.view', 'drivers.edit'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /driver-transfers/{transfer_request_id}/approve-source': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /driver-transfers/{transfer_request_id}/cancel': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('drivers.edit',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),

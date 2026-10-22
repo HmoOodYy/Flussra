@@ -22,8 +22,14 @@ interface Busy { open: boolean; loading: boolean; error: string | null }
 
 export interface CreateAccountState extends Busy {
   form: AccountForm;
+  search: string;
   candidates: EmployeeLinkCandidate[];
   candidatesLoading: boolean;
+  candidatesMore: boolean;
+  /** The chosen Employee, kept whole so it survives paging and searching of the candidate list. */
+  selected: EmployeeLinkCandidate | null;
+  /** An Employee preselected by id (from Workforce) that is still being looked up. */
+  resolving: boolean;
 }
 
 export interface ProvisionState extends Busy { form: ProvisionForm }
@@ -32,6 +38,7 @@ export interface LinkState extends Busy {
   search: string;
   candidates: EmployeeLinkCandidate[];
   candidatesLoading: boolean;
+  candidatesMore: boolean;
   employeeId: number | null;
 }
 
@@ -86,7 +93,11 @@ export type AccessAction =
   | { type: 'CREATE_OPEN' }
   | { type: 'CREATE_CLOSE' }
   | { type: 'CREATE_FORM'; form: Partial<AccountForm> }
-  | { type: 'CREATE_CANDIDATES'; candidates: EmployeeLinkCandidate[]; loading?: boolean }
+  | { type: 'CREATE_SEARCH'; val: string }
+  | { type: 'CREATE_CANDIDATES'; candidates: EmployeeLinkCandidate[]; more: boolean; append?: boolean; loading?: boolean }
+  | { type: 'CREATE_PICK'; employee: EmployeeLinkCandidate | null }
+  | { type: 'CREATE_PRESELECT'; employeeId: number }
+  | { type: 'CREATE_RESOLVED'; employee: EmployeeLinkCandidate | null }
   | { type: 'CREATE_LOADING'; val: boolean }
   | { type: 'CREATE_ERROR'; err: string | null }
   // Provision a staged account
@@ -99,7 +110,7 @@ export type AccessAction =
   | { type: 'LINK_OPEN' }
   | { type: 'LINK_CLOSE' }
   | { type: 'LINK_SEARCH'; val: string }
-  | { type: 'LINK_CANDIDATES'; candidates: EmployeeLinkCandidate[]; loading?: boolean }
+  | { type: 'LINK_CANDIDATES'; candidates: EmployeeLinkCandidate[]; more: boolean; append?: boolean; loading?: boolean }
   | { type: 'LINK_PICK'; employeeId: number | null }
   | { type: 'LINK_LOADING'; val: boolean }
   | { type: 'LINK_ERROR'; err: string | null }
@@ -144,9 +155,9 @@ const CLOSED: Busy = { open: false, loading: false, error: null };
 export const ACCESS_INITIAL: AccessPageState = {
   users: [], roles: [], branches: [], allPerms: [],
   loading: true, error: null, selectedId: null, filters: ACCESS_FILTERS0,
-  create: { ...CLOSED, form: ACCOUNT_FORM0, candidates: [], candidatesLoading: false },
+  create: { ...CLOSED, form: ACCOUNT_FORM0, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, selected: null, resolving: false },
   provision: { ...CLOSED, form: PROVISION_FORM0 },
-  link: { ...CLOSED, search: '', candidates: [], candidatesLoading: false, employeeId: null },
+  link: { ...CLOSED, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, employeeId: null },
   edit: { ...CLOSED, name: '', email: '', phone: '', canLogin: true, mustChange: false },
   reset: { ...CLOSED, pw: '', mustChange: true },
   changeRole: { ...CLOSED, roleId: null, scope: 'AllCompanyBranches', branchId: null },
@@ -168,18 +179,53 @@ export function accessReducer(st: AccessPageState, a: AccessAction): AccessPageS
     // Create account
     case 'CREATE_OPEN': return { ...st, create: { ...ACCESS_INITIAL.create, open: true } };
     case 'CREATE_CLOSE': return { ...st, create: { ...st.create, open: false } };
-    case 'CREATE_FORM': return { ...st, create: { ...st.create, form: { ...st.create.form, ...a.form }, error: null } };
-    case 'CREATE_CANDIDATES': {
-      // A chosen Employee that is no longer eligible (the role changed) is dropped; a chosen one
-      // fills a still-blank display name so a deep link from Workforce needs no retyping.
-      const chosen = a.candidates.find(c => c.employee_id === st.create.form.employeeId) ?? null;
-      const form = {
-        ...st.create.form,
-        employeeId: chosen ? chosen.employee_id : null,
-        displayName: chosen && st.create.form.displayName.trim() === '' ? chosen.full_name : st.create.form.displayName,
-      };
-      return { ...st, create: { ...st.create, form, candidates: a.candidates, candidatesLoading: a.loading ?? false } };
+    case 'CREATE_FORM': {
+      const form = { ...st.create.form, ...a.form };
+      // DRIVER access takes only a current Driver: a chosen Employee that is not one is dropped.
+      const role = st.roles.find(r => r.company_role_id === form.roleId);
+      const dropEmployee = a.form.roleId !== undefined && form.mode === 'provisioned'
+        && role?.role_code === 'DRIVER' && st.create.selected !== null && st.create.selected.driver_state !== 'current';
+      return { ...st, create: {
+        ...st.create,
+        form: dropEmployee ? { ...form, employeeId: null } : form,
+        selected: dropEmployee ? null : st.create.selected,
+        error: null,
+      } };
     }
+    case 'CREATE_SEARCH': return { ...st, create: { ...st.create, search: a.val } };
+    case 'CREATE_CANDIDATES': return { ...st, create: {
+      ...st.create,
+      candidates: a.append ? [...st.create.candidates, ...a.candidates] : a.candidates,
+      candidatesMore: a.more,
+      candidatesLoading: a.loading ?? false,
+    } };
+    case 'CREATE_PICK': return { ...st, create: {
+      ...st.create,
+      selected: a.employee,
+      form: {
+        ...st.create.form,
+        employeeId: a.employee?.employee_id ?? null,
+        displayName: a.employee && st.create.form.displayName.trim() === '' ? a.employee.full_name : st.create.form.displayName,
+      },
+      error: null,
+    } };
+    case 'CREATE_PRESELECT': return { ...st, create: {
+      ...st.create, resolving: true, form: { ...st.create.form, employeeId: a.employeeId },
+    } };
+    case 'CREATE_RESOLVED': return a.employee
+      ? { ...st, create: {
+          ...st.create, resolving: false, selected: a.employee,
+          form: {
+            ...st.create.form,
+            employeeId: a.employee.employee_id,
+            displayName: st.create.form.displayName.trim() === '' ? a.employee.full_name : st.create.form.displayName,
+          },
+        } }
+      : { ...st, create: {
+          ...st.create, resolving: false, selected: null,
+          form: { ...st.create.form, employeeId: null },
+          error: 'That Employee is not available for a new account (it may already have one).',
+        } };
     case 'CREATE_LOADING': return { ...st, create: { ...st.create, loading: a.val } };
     case 'CREATE_ERROR': return { ...st, create: { ...st.create, error: a.err, loading: false } };
     // Provision
@@ -192,7 +238,12 @@ export function accessReducer(st: AccessPageState, a: AccessAction): AccessPageS
     case 'LINK_OPEN': return { ...st, link: { ...ACCESS_INITIAL.link, open: true, candidatesLoading: true } };
     case 'LINK_CLOSE': return { ...st, link: { ...st.link, open: false } };
     case 'LINK_SEARCH': return { ...st, link: { ...st.link, search: a.val } };
-    case 'LINK_CANDIDATES': return { ...st, link: { ...st.link, candidates: a.candidates, candidatesLoading: a.loading ?? false } };
+    case 'LINK_CANDIDATES': return { ...st, link: {
+      ...st.link,
+      candidates: a.append ? [...st.link.candidates, ...a.candidates] : a.candidates,
+      candidatesMore: a.more,
+      candidatesLoading: a.loading ?? false,
+    } };
     case 'LINK_PICK': return { ...st, link: { ...st.link, employeeId: a.employeeId, error: null } };
     case 'LINK_LOADING': return { ...st, link: { ...st.link, loading: a.val } };
     case 'LINK_ERROR': return { ...st, link: { ...st.link, error: a.err, loading: false } };

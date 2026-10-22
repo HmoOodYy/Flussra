@@ -2,7 +2,7 @@ import type { Dispatch, FormEvent } from 'react';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import type { CompanyRole, EmployeeLinkCandidate, UserAdmin } from '../../../types/admin';
 import { ErrMsg, Field, Modal, ModalFoot, PermissionPicker, ScopeFields } from '../PeopleFormControls';
-import { eligibleCandidates } from './accessModel';
+import { eligibleCandidates, withSelected } from './accessModel';
 import type { AccessAction, AccessPageState } from './accessState';
 import styles from '../PeoplePage.module.css';
 
@@ -22,6 +22,7 @@ interface AccessDialogsProps {
   submitExtraPerms(e: FormEvent): void;
   confirmToggleActive(): void;
   submitOwnerTransfer(e: FormEvent): void;
+  loadMoreCandidates(target: 'create' | 'link'): void;
 }
 
 function candidateLabel(c: EmployeeLinkCandidate): string {
@@ -33,8 +34,10 @@ export function AccessDialogs(props: AccessDialogsProps) {
   const { st, selected, ownerTransferTarget, assignableRoles, ownerTransferRoles, dispatch } = props;
   const createRole = assignableRoles.find(r => r.company_role_id === st.create.form.roleId) ?? null;
   const createIsDriver = st.create.form.mode === 'provisioned' && createRole?.role_code === 'DRIVER';
-  const createCandidates = st.create.form.mode === 'provisioned'
-    ? eligibleCandidates(createRole, st.create.candidates) : st.create.candidates;
+  const createCandidates = withSelected(
+    st.create.form.mode === 'provisioned' ? eligibleCandidates(createRole, st.create.candidates) : st.create.candidates,
+    st.create.selected,
+  );
   const provisionRole = assignableRoles.find(r => r.company_role_id === st.provision.form.roleId) ?? null;
   const linkCandidates = st.link.candidates;
 
@@ -74,14 +77,21 @@ export function AccessDialogs(props: AccessDialogsProps) {
                 onBranch={b => dispatch({ type: 'CREATE_FORM', form: { branchId: b } })}
               />
             )}
+            <Field label="Search Employees">
+              <input className={styles.inp} placeholder="Name or employee key…" value={st.create.search}
+                onChange={e => dispatch({ type: 'CREATE_SEARCH', val: e.target.value })} />
+            </Field>
             <Field label={createIsDriver ? 'Employee * (a current Driver)' : 'Link to an Employee (optional)'}>
               <select className={styles.inp} value={st.create.form.employeeId ?? ''} required={createIsDriver}
-                onChange={e => dispatch({ type: 'CREATE_FORM', form: { employeeId: e.target.value ? parseInt(e.target.value) : null } })}>
+                onChange={e => dispatch({ type: 'CREATE_PICK', employee: createCandidates.find(c => c.employee_id === parseInt(e.target.value)) ?? null })}>
                 <option value="">{createIsDriver ? '— Select the current Driver —' : '— No Employee (stand-alone account) —'}</option>
                 {createCandidates.map(c => <option key={c.employee_id} value={c.employee_id}>{candidateLabel(c)}</option>)}
               </select>
             </Field>
-            {st.create.candidatesLoading && <p className={styles.helpTxt}>Loading Employees…</p>}
+            {(st.create.candidatesLoading || st.create.resolving) && <p className={styles.helpTxt}>Loading Employees…</p>}
+            {st.create.candidatesMore && (
+              <button type="button" className={styles.linkBtn} onClick={() => props.loadMoreCandidates('create')}>Load more Employees</button>
+            )}
             {createIsDriver && createCandidates.length === 0 && !st.create.candidatesLoading && (
               <p className={styles.helpTxt}>No current Driver is waiting for an account. Add the Driver in Workforce first.</p>
             )}
@@ -132,6 +142,9 @@ export function AccessDialogs(props: AccessDialogsProps) {
               </select>
             </Field>
             {st.link.candidatesLoading && <p className={styles.helpTxt}>Loading Employees…</p>}
+            {st.link.candidatesMore && (
+              <button type="button" className={styles.linkBtn} onClick={() => props.loadMoreCandidates('link')}>Load more Employees</button>
+            )}
             {!st.link.candidatesLoading && linkCandidates.length === 0 && <p className={styles.helpTxt}>No Employee without an account matches.</p>}
             {st.link.error && <ErrMsg msg={st.link.error} />}
             <ModalFoot onCancel={() => dispatch({ type: 'LINK_CLOSE' })} loading={st.link.loading} label="Link Employee" />

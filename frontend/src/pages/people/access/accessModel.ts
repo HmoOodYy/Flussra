@@ -44,6 +44,22 @@ export function accessFacts(user: UserAdmin): AccessFacts {
 
 // ─── Employee link ───────────────────────────────────────────────────────────
 
+/** Candidates are read a page at a time; a full page means there may be more. */
+export const CANDIDATE_PAGE_SIZE = 50;
+
+export function hasMoreCandidates(received: number): boolean {
+  return received >= CANDIDATE_PAGE_SIZE;
+}
+
+/** The select's options: the loaded page plus the chosen Employee, which may sit on another page. */
+export function withSelected(
+  candidates: EmployeeLinkCandidate[],
+  selected: EmployeeLinkCandidate | null,
+): EmployeeLinkCandidate[] {
+  if (selected === null || candidates.some((c) => c.employee_id === selected.employee_id)) return candidates;
+  return [selected, ...candidates];
+}
+
 export interface LinkSummary {
   linked: boolean;
   employeeId: number | null;

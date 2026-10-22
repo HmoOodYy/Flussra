@@ -53,7 +53,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.branch_access import check_branch_access
@@ -70,6 +70,7 @@ from app.transfer.schemas import (
     RescheduleRequest,
     SourceApprovalRequest,
     TargetDecisionRequest,
+    TransferDriverCandidate,
     TransferListResponse,
 )
 from app.workforce import audit as workforce_audit
@@ -347,7 +348,7 @@ async def _get_accessible_branches_for_transfers(
     Return (can_see_all, branch_ids) for transfer read access.
 
     Caller must have drivers.view (or drivers.edit) on at least one branch.
-    - AllCompanyBranches scope + drivers.view → can_see_all=True, branch_ids=[]
+    - AllCompanyBranches scope + drivers.view or drivers.edit → can_see_all=True, branch_ids=[]
     - SpecificBranch scope → branch_ids = branches where caller has drivers.view
     - No qualifying permission → raises HTTP 403
 
@@ -357,8 +358,16 @@ async def _get_accessible_branches_for_transfers(
     can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     if can_see_all:
-        # Check drivers.view at company level (branch_id=None → AllCompanyBranches only)
-        await check_permission(company_id, user_id, None, "drivers.view", db)
+        # Company level (branch_id=None → AllCompanyBranches only): drivers.view or drivers.edit,
+        # the same pair a SpecificBranch caller is held to below.
+        if not await has_any_permission(company_id, user_id, None, _TRANSFER_READ_PERMS, db):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "You do not have permission to perform this action "
+                    f"(required: one of {_TRANSFER_READ_PERMS})."
+                ),
+            )
         return True, []
 
     # SpecificBranch: keep only branches where caller has drivers.view or drivers.edit
@@ -1240,6 +1249,71 @@ async def list_transfer_requests(
     rows = result.mappings().all()
     items = [_row_to_response(dict(r)) for r in rows]
     return TransferListResponse(items=items, total=len(items))
+
+
+async def list_transfer_driver_candidates(
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> list[TransferDriverCandidate]:
+    """Drivers a transfer request can be created for by this caller.
+
+    Authority is the transfer-create authority itself (`drivers.edit` on the source Branch), so
+    an operator who can create transfers needs no `drivers.view` to populate the selector. The
+    eligibility mirrors `create_driver_transfer_request`: a current assignment that is not already
+    ending, no transfer in flight and no pending assignment. The permanent Driver work status is
+    not part of it.
+    """
+    await require_non_driver_subject(company_id, user_id, db)
+    branch_rows = await db.execute(
+        text("SELECT BranchID FROM core.Branches WHERE CompanyID = :cid"), {"cid": company_id},
+    )
+    editable = [
+        int(row["branchid"]) for row in branch_rows.mappings().all()
+        if await has_any_permission(company_id, user_id, int(row["branchid"]), ["drivers.edit"], db)
+    ]
+    if not editable:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You need drivers.edit on at least one branch to start a transfer.",
+        )
+    result = await db.execute(
+        text("""
+            SELECT dr.DriverID, dr.DriverNumber, e.FullName,
+                   a.DriverAssignmentID, a.BranchID, b.BranchName
+            FROM core.Drivers dr
+            JOIN core.Employees e ON e.EmployeeID = dr.EmployeeID AND e.CompanyID = dr.CompanyID
+            JOIN core.DriverAssignments a
+              ON a.DriverAssignmentID = core.fn_EffectiveDriverAssignment(dr.CompanyID, dr.DriverID)
+            JOIN core.Branches b ON b.BranchID = a.BranchID
+            WHERE dr.CompanyID = :cid
+              AND a.EndReason IS NULL
+              AND a.BranchID IN :branch_ids
+              AND NOT EXISTS (
+                  SELECT 1 FROM core.DriverTransferRequests t
+                  WHERE t.DriverID = dr.DriverID AND t.CompanyID = dr.CompanyID
+                    AND core.fn_DriverTransferStatus(t.Status, t.EffectiveAt)
+                            NOT IN ('Completed', 'Cancelled', 'Rejected')
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM core.DriverAssignments x
+                  WHERE x.CompanyID = dr.CompanyID AND x.DriverID = dr.DriverID
+                    AND x.DriverAssignmentID <> a.DriverAssignmentID
+                    AND x.EffectiveFromAt > NOW()
+                    AND (x.EffectiveToAt IS NULL OR x.EffectiveToAt > x.EffectiveFromAt)
+              )
+            ORDER BY e.FullName, dr.DriverID
+        """).bindparams(bindparam("branch_ids", expanding=True)),
+        {"cid": company_id, "branch_ids": editable},
+    )
+    return [
+        TransferDriverCandidate(
+            driver_id=row["driverid"], driver_number=row["drivernumber"], full_name=row["fullname"],
+            driver_assignment_id=row["driverassignmentid"], source_branch_id=row["branchid"],
+            source_branch_name=row["branchname"],
+        )
+        for row in result.mappings().all()
+    ]
 
 
 async def get_transfer_request(

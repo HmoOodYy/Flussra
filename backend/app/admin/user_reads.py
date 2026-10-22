@@ -487,12 +487,16 @@ async def list_employee_link_candidates(
     *,
     q: str | None = None,
     driver_state: str | None = None,
+    employee_id: int | None = None,
     limit: int = 100,
+    offset: int = 0,
 ) -> list[EmployeeLinkCandidate]:
     """Employees that no User is linked to, with the minimum needed to choose one.
 
     Gated by the Access permissions that create or link accounts, never by Workforce
     permissions: an Access administrator can link without being able to read the roster.
+    The result is searchable (`q`), pageable (`limit`/`offset`, stable name order) and can
+    resolve one specific Employee (`employee_id`) wherever it sits in that order.
     """
     await security.ensure_any_permission(
         company_id, user_id, db, "users.create", "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
@@ -521,6 +525,7 @@ async def list_employee_link_candidates(
                   AND NOT EXISTS (
                       SELECT 1 FROM sec.users u
                       WHERE u.companyid = e.companyid AND u.employeeid = e.employeeid)
+                  AND (CAST(:employee_id AS integer) IS NULL OR e.employeeid = :employee_id)
                   AND (CAST(:q AS text) IS NULL
                        OR LOWER(e.fullname) LIKE :q
                        OR LOWER(COALESCE(e.employeekey, '')) LIKE :q)
@@ -530,10 +535,11 @@ async def list_employee_link_candidates(
             FROM candidate c JOIN core.branches b ON b.branchid = c.branchid
             WHERE (CAST(:driver_state AS text) IS NULL OR c.driverstate = :driver_state)
             ORDER BY c.fullname, c.employeeid
-            LIMIT :limit
+            LIMIT :limit OFFSET :offset
         """),
         {"cid": company_id, "q": f"%{q.strip().lower()}%" if q and q.strip() else None,
-         "driver_state": driver_state, "limit": limit},
+         "driver_state": driver_state, "employee_id": employee_id,
+         "limit": limit, "offset": offset},
     )
     return [
         EmployeeLinkCandidate(

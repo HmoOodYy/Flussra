@@ -112,7 +112,7 @@ export function AccessPage() {
         submitCreate={c.submitCreate} submitProvision={c.submitProvision} submitLink={c.submitLink}
         submitEdit={c.submitEdit} submitReset={c.submitReset} submitChangeRole={c.submitChangeRole}
         submitExtraPerms={c.submitExtraPerms} confirmToggleActive={c.confirmToggleActive}
-        submitOwnerTransfer={c.submitOwnerTransfer}
+        submitOwnerTransfer={c.submitOwnerTransfer} loadMoreCandidates={c.loadMoreCandidates}
       />
     </div>
   );
