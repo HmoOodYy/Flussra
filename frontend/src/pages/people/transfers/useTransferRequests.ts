@@ -4,14 +4,14 @@ import type { Branch } from '../../../types/core';
 import { canEditTransfers } from '../../../lib/permissions';
 import {
   listTransfers, approveSource, decideTarget, completeTransfer, cancelTransfer, createTransfer,
-  rescheduleTransfer, listTransferDriverPickerPeople,
+  rescheduleTransfer, listTransferDriverCandidates,
 } from '../../../lib/transferApi';
 import type { TargetDecisionRequest } from '../../../types/transfer';
 import { useAuth } from '../../../store/authStore';
 import { apiError, fmtEffectiveAt, matchesFilter, normalizeUtcDateTimeLocal } from './transferRequestsView';
 import { INITIAL, reducer } from './transferRequestsState';
 
-export function useTransferRequests(branches: Branch[]) {
+export function useTransferRequests(branches: Branch[], newForDriverId: number | null = null) {
   const { user } = useAuth();
   const [st, dispatch] = useReducer(reducer, INITIAL);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -63,23 +63,33 @@ export function useTransferRequests(branches: Branch[]) {
     : false;
 
   // ── Create: load drivers when dialog opens ──
-  const openCreate = useCallback(async () => {
+  const openCreate = useCallback(async (preselectDriverId: number | null = null) => {
     dispatch({ type: 'CREATE_OPEN' });
     dispatch({ type: 'CREATE_DRIVERS_LOADING', val: true });
     try {
-      const r = await listTransferDriverPickerPeople();
-      // Restrict to drivers whose source branch the user can edit, so the form never becomes submit-capable for an unauthorized branch.
-      dispatch({
-        type: 'CREATE_DRIVERS',
-        drivers: r.data.filter(p =>
-          p.driver_id != null && p.driver_status === 'Active' &&
-          (user ? canEditTransfers(user, p.branch_id) : false)
-        ),
-      });
-    } catch {
+      // The backend returns only the Drivers a transfer can be started for by this caller.
+      const drivers = await listTransferDriverCandidates();
+      dispatch({ type: 'CREATE_DRIVERS', drivers });
+      if (preselectDriverId !== null) {
+        if (drivers.some(d => d.driver_id === preselectDriverId)) {
+          dispatch({ type: 'CREATE_FIELD', field: 'driverId', val: preselectDriverId });
+        } else {
+          dispatch({ type: 'CREATE_ERR', err: 'That Driver cannot start a transfer right now (no current assignment, or a transfer is already in progress).' });
+        }
+      }
+    } catch (err) {
       dispatch({ type: 'CREATE_DRIVERS', drivers: [] });
+      dispatch({ type: 'CREATE_ERR', err: `Could not load Drivers: ${apiError(err)}` });
     }
-  }, [user]);
+  }, []);
+
+  // A deep link from a Driver's Workforce detail opens the form with that Driver chosen.
+  const deepLinkHandled = useRef(false);
+  useEffect(() => {
+    if (newForDriverId === null || deepLinkHandled.current || !user) return;
+    deepLinkHandled.current = true;
+    void openCreate(newForDriverId);
+  }, [newForDriverId, user, openCreate]);
 
   // ── Create submit ──
   const submitCreate = useCallback(async (e: FormEvent) => {

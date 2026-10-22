@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
+from app.admin import security as access_security
 from app.workforce import audit as workforce_audit
 from app.workforce.effective import (
     VISIBLE_ASSIGNMENT_JOIN,
@@ -33,6 +34,26 @@ from app.workforce.schemas import (
     EmployeeUpdate,
     UserSummary,
 )
+
+
+async def _may_view_access_accounts(
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> bool:
+    """Whether the caller holds the Access authority that reads accounts (`users.view`).
+
+    Workforce authority never implies it: an Employee's linked account is Access-owned data and
+    is returned to a Workforce reader only when that reader is independently authorized for it.
+    """
+    try:
+        await access_security.ensure_any_permission(
+            company_id, user_id, db, "users.view", *access_security.ADMIN_FALLBACKS)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return False
+        raise
+    return True
 
 
 async def _require_branch_write(
@@ -297,22 +318,24 @@ async def get_employee(
         {"company_id": company_id, "employee_id": employee_id},
     )
     assignments = [_assignment_summary(dict(a)) for a in assignments_result.mappings().all()]
-    user_result = await db.execute(
-        text("""
-            SELECT UserID, Username, DisplayName, IsActive, CanLogin
-            FROM sec.Users WHERE CompanyID = :company_id AND EmployeeID = :employee_id
-            ORDER BY UserID LIMIT 1
-        """),
-        {"company_id": company_id, "employee_id": employee_id},
-    )
-    linked = user_result.mappings().first()
+    linked = None
+    if await _may_view_access_accounts(company_id, user_id, db):
+        user_result = await db.execute(
+            text("""
+                SELECT UserID, Username, DisplayName, IsActive, CanLogin, IsStaged
+                FROM sec.Users WHERE CompanyID = :company_id AND EmployeeID = :employee_id
+                ORDER BY UserID LIMIT 1
+            """),
+            {"company_id": company_id, "employee_id": employee_id},
+        )
+        linked = user_result.mappings().first()
     return EmployeeDetail(
         **summary.model_dump(),
         driver_assignments=assignments,
         linked_user=UserSummary(
             user_id=linked["userid"], username=linked["username"],
             display_name=linked["displayname"], is_active=linked["isactive"],
-            can_login=linked["canlogin"],
+            can_login=linked["canlogin"], is_staged=linked["isstaged"],
         ) if linked else None,
     )
 

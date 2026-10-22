@@ -132,7 +132,7 @@ Exact representation (Phase 1):
 
 ### D8. Frontend shape
 
-A single `/people` page with three tabs: **Workforce** (Employee-centered, default), **Access** (User accounts, including Users without an Employee), **Transfer Requests** (existing). Employee detail shows Driver profile history and an Access panel with explicit Create/Link actions. This reuses the existing tabbed page structure (`PeoplePage.tsx:560-583`) and gives external admin Users a home without making User the primary record.
+A routed **People & Access** hub with three child routes: `/people/workforce` (Employee-centered, the default), `/people/access` (User accounts, including Users without an Employee) and `/people/transfers` (Transfer Requests). `/people` redirects to the first child the operator may enter; the tab bar lists only authorized children and every child route keeps its own gate, so the hub grants nothing itself. Employee detail shows the permanent Driver identity and its assignment history, and a contextual Access summary only for an operator holding Access authority. The Access area gives external admin Users a home without making User the primary record.
 
 ---
 
@@ -553,7 +553,7 @@ Replace the User-centered People page with the Employee-centered Workforce view 
 All backend authority exists (Phases 2–7); the UI can bind to final contracts once.
 
 ### In scope
-- `/people` tabs: **Workforce** (default), **Access**, **Transfer Requests**.
+- `/people/workforce` (default), `/people/access`, `/people/transfers`, each independently authorized; `/people` redirects to the first authorized child.
 - Workforce: Employee list (search, status, branch, driver state); detail with Employee fields, current/pending/historical Driver profiles, Pay Rates link for current profile, Access panel (linked account state: none / staged / provisioned / disabled; actions Create access account, Link existing account, Unlink); actions Add Employee (single submit, optional initial Driver profile), Edit Employee, Add Driver profile, Terminate (confirmation), Request transfer (existing flow).
 - Access: User list (including Users without Employee), detail with login state, role/scope, overrides, link state, staged provisioning action, reset password, owner transfer.
 - Clear separation of labels: "Employment status" vs "Login".
@@ -571,7 +571,7 @@ None.
 None expected; any gap found is a small additive read field.
 
 ### Frontend
-`frontend/src/pages/people/PeoplePage.tsx` (replaced/split into `WorkforceTab.tsx`, `AccessTab.tsx` and modals), `TransferRequestsTab.tsx`, `frontend/src/lib/permissions.ts`, `frontend/src/types/*`, `frontend/src/App.tsx` route guard for `/people` (visible with `employees.view` or `users.view`).
+`frontend/src/pages/people/PeopleHub.tsx` and `peopleHubModel.ts`, `workforce/*`, `access/*`, `transfers/*`, `frontend/src/lib/permissions.ts` (`canViewWorkforce`, `canViewAccess`, `canViewTransfers`, `canViewPeopleHub`), `frontend/src/types/*`, and `frontend/src/App.tsx` (the hub is reachable when at least one child is).
 
 ### Legacy behavior retired
 User list as People; remaining wizard remnants; Driver visibility by role code.

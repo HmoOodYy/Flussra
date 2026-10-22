@@ -22,6 +22,8 @@ export interface UserAdmin {
   user_id: number;
   company_id: number;
   employee_id: number | null;
+  /** The linked Employee's name; null when no Employee is linked. */
+  employee_name: string | null;
   is_staged: boolean;
   username: string;
   display_name: string;
@@ -50,6 +52,20 @@ export interface UserAdmin {
   role_permission_codes: string[];
   /** Extra ALLOW overrides granted directly to this user */
   extra_permission_codes: string[];
+}
+
+/**
+ * An Employee that no User is linked to, with only what an Access administrator needs to choose
+ * one (GET /admin/employee-link-candidates). Not the Workforce roster.
+ */
+export interface EmployeeLinkCandidate {
+  employee_id: number;
+  employee_key: string | null;
+  full_name: string;
+  branch_id: number;
+  branch_name: string;
+  employment_status: string;
+  driver_state: 'current' | 'pending' | 'none';
 }
 
 export interface UserCreate {

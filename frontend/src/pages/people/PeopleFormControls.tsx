@@ -146,11 +146,11 @@ export function ErrMsg({ msg }: { msg: string }) {
   return <div className={styles.errMsg}>{msg}</div>;
 }
 
-export function ModalFoot({ onCancel, loading, label }: { onCancel(): void; loading: boolean; label: string }) {
+export function ModalFoot({ onCancel, loading, label, disabled = false }: { onCancel(): void; loading: boolean; label: string; disabled?: boolean }) {
   return (
     <div className={styles.mf}>
       <button type="button" className={styles.cancelBtn} onClick={onCancel}>Cancel</button>
-      <button type="submit" className={styles.primaryBtn} disabled={loading}>{loading ? 'Saving…' : label}</button>
+      <button type="submit" className={styles.primaryBtn} disabled={loading || disabled}>{loading ? 'Saving…' : label}</button>
     </div>
   );
 }

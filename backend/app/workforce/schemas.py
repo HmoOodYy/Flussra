@@ -86,6 +86,8 @@ class UserSummary(BaseModel):
     display_name: str
     is_active: bool
     can_login: bool
+    # An explicitly staged account has not been provisioned yet.
+    is_staged: bool = False
 
 
 class DriverSummary(BaseModel):

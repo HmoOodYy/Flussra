@@ -98,3 +98,15 @@ class TransferListResponse(BaseModel):
     items: list[DriverTransferResponse]
     total: int
     model_config = ConfigDict(extra="forbid")
+
+
+class TransferDriverCandidate(BaseModel):
+    """A Driver the caller may start a transfer for, with the Branch it would leave."""
+    driver_id: int
+    driver_number: str | None
+    full_name: str
+    driver_assignment_id: int
+    source_branch_id: int
+    source_branch_name: str
+
+    model_config = ConfigDict(extra="forbid")

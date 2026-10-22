@@ -1,5 +1,3 @@
-import type { UserAdmin } from '../../types/admin';
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 export function apiError(err: unknown): string {
@@ -34,13 +32,4 @@ export function scopeLabel(scope: string | null, branchName: string | null): str
   if (scope === 'SpecificBranch') return branchName ? branchName : 'Specific branch';
   if (scope === 'Self') return 'Self';
   return scope;
-}
-
-export type AccessStatus = { label: string; kind: 'ok' | 'warn' | 'err' };
-export function accessStatus(p: UserAdmin): AccessStatus {
-  if (p.is_staged)       return { label: 'Staged',           kind: 'warn' };
-  if (!p.is_active)       return { label: 'Inactive',         kind: 'err'  };
-  if (!p.can_login)       return { label: 'Login disabled',   kind: 'warn' };
-  if (!p.company_role_id) return { label: 'No role assigned', kind: 'warn' };
-  return { label: 'Complete', kind: 'ok' };
 }

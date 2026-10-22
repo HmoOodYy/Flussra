@@ -9,7 +9,7 @@ import {
   canViewCurrentPayroll,
   canViewLedger,
   canViewReview,
-  canViewPeople,
+  canViewPeopleHub,
   canViewPayRates,
   canViewSettings,
   canViewDailyPayItems,
@@ -22,7 +22,11 @@ import styles from './AppShell.module.css';
 
 // ─── Nav data ─────────────────────────────────────────────────────────────────
 
-interface NavItem { to: string; label: string; icon: React.ReactNode; end?: boolean; }
+interface NavItem {
+  to: string; label: string; icon: React.ReactNode; end?: boolean;
+  /** A path prefix that belongs to a different item and must not light this one up. */
+  excludePrefix?: string;
+}
 interface NavGroup { label: string; items: NavItem[]; }
 
 function buildNavGroups(user: UserProfile): NavGroup[] {
@@ -43,8 +47,8 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
     groups.push({ label: 'Payroll', items: payrollItems });
 
   const peopleItems: NavItem[] = [];
-  if (canViewPeople(user))
-    peopleItems.push({ to: '/people', label: 'People & Access', icon: <PeopleIcon />, end: true });
+  if (canViewPeopleHub(user))
+    peopleItems.push({ to: '/people', label: 'People & Access', icon: <PeopleIcon />, end: false, excludePrefix: '/people/pay-rates' });
   if (canViewPayRates(user))
     peopleItems.push({ to: '/people/pay-rates', label: 'Drivers Pay Rate', icon: <PayRatesIcon />, end: false });
   if (peopleItems.length > 0)
@@ -129,6 +133,7 @@ export function AppShell() {
     window.location.href = '/login';
   }
 
+  const location = useLocation();
   const warnings = useWarningsStore((s) => s.warnings);
   const setWarnings = useWarningsStore((s) => s.setWarnings);
   const [warningsOpen, setWarningsOpen] = useState(false);
@@ -194,7 +199,7 @@ export function AppShell() {
                   end={item.end}
                   title={collapsed ? item.label : undefined}
                   className={({ isActive }) =>
-                    isActive ? `${styles.navItem} ${styles.navItemActive}` : styles.navItem
+                    isActive && !(item.excludePrefix && location.pathname.startsWith(item.excludePrefix)) ? `${styles.navItem} ${styles.navItemActive}` : styles.navItem
                   }
                 >
                   {({ isActive }) => (

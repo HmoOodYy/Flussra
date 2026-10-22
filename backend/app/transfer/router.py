@@ -15,6 +15,7 @@ from app.transfer.schemas import (
     RescheduleRequest,
     SourceApprovalRequest,
     TargetDecisionRequest,
+    TransferDriverCandidate,
     TransferListResponse,
 )
 
@@ -53,6 +54,19 @@ async def list_transfers(
         db=db,
         branch_id=branch_id,
         status_filter=status,
+    )
+
+
+@router.get("/driver-candidates", response_model=list[TransferDriverCandidate])
+async def list_driver_candidates(
+    token: TokenDep,
+    db: DbDep,
+) -> list[TransferDriverCandidate]:
+    """Drivers a transfer can be started for under the caller's `drivers.edit` authority."""
+    return await service.list_transfer_driver_candidates(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        db=db,
     )
 
 

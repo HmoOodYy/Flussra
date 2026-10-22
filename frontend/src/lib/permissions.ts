@@ -120,13 +120,29 @@ export function canViewPayRates(user: UserProfile): boolean {
 }
 
 /**
- * People page: company-scoped users.view, or company admin fallback.
+ * People & Access hub, Access area: company-scoped users.view, or company admin fallback.
  * Company-scoped, not driver-gated — a mixed Driver + valid company-admin
  * assignment must still reach this page, so isDriverUser() is deliberately
- * not consulted here.
+ * not consulted here. Independent of Workforce and Transfer authority.
  */
-export function canViewPeople(user: UserProfile): boolean {
+export function canViewAccess(user: UserProfile): boolean {
   return _hasCompanyPermission(user, 'users.view') || _hasCompanyAdminFallback(user);
+}
+
+/**
+ * People & Access hub, Workforce area: employees.view for at least one Branch (the backend
+ * roster is Branch-scoped). Independent of Access and Transfer authority; never DRIVER/Self.
+ */
+export function canViewWorkforce(user: UserProfile): boolean {
+  return !isDriverUser(user) && _hasAnyAuthorityPermission(user, ['employees.view']);
+}
+
+/**
+ * The hub is reachable when at least one of its three independently authorized areas is.
+ * It grants nothing itself: each child route and each action keeps its own gate.
+ */
+export function canViewPeopleHub(user: UserProfile): boolean {
+  return canViewWorkforce(user) || canViewAccess(user) || canViewTransfers(user);
 }
 
 /**
@@ -369,6 +385,21 @@ export function canCreateBranches(user: UserProfile): boolean {
  */
 export function canAccessCompanyBranches(user: UserProfile): boolean {
   return canManageSettingsAdmin(user) || canCreateBranches(user);
+}
+
+// ── Workforce action helpers ──────────────────────────────────────────────────
+
+/**
+ * Create/edit Employees and Drivers, and terminate, for one Branch: employees.manage granted
+ * company-wide or for that Branch — mirrors the backend's per-Branch employees.manage check.
+ */
+export function canManageEmployees(user: UserProfile, branchId: number): boolean {
+  return !isDriverUser(user) && hasAuthorityPermission(user.authority, 'employees.manage', branchId);
+}
+
+/** Show Add Driver / Add Employee: employees.manage for at least one Branch. */
+export function canManageAnyEmployees(user: UserProfile): boolean {
+  return !isDriverUser(user) && hasAuthorityPermissionAnywhere(user.authority, 'employees.manage');
 }
 
 // ── Driver Transfer helpers ───────────────────────────────────────────────────

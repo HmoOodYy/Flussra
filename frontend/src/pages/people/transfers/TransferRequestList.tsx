@@ -6,7 +6,7 @@ import { driverLabel, terminationWarning } from './transferActions';
 import type { Branch } from '../../../types/core';
 import type { TabAction, TabState } from './transferRequestsState';
 import styles from '../PeoplePage.module.css';
-import trStyles from '../TransferRequestsTab.module.css';
+import trStyles from './TransferRequests.module.css';
 
 interface Props {
   st: Pick<TabState, 'requests' | 'selectedId' | 'search' | 'filter'>;

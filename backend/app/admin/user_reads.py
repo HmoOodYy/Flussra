@@ -9,6 +9,7 @@ from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
 from app.admin import security
 from app.admin.schemas import (
+    EmployeeLinkCandidate,
     RoleAssignment,
     UserAdmin,
 )
@@ -255,6 +256,7 @@ def _row_to_user(
         user_id=row["userid"],
         company_id=row["companyid"],
         employee_id=row["employeeid"],
+        employee_name=row["employeename"],
         is_staged=row["isstaged"],
         username=row["username"],
         display_name=row["displayname"],
@@ -295,8 +297,9 @@ async def get_user_by_id_internal(
                 u.userid, u.companyid, u.employeeid, u.isstaged, u.username, u.displayname,
                 u.email, u.phone, u.isactive, u.canlogin,
                 u.mustchangepassword, u.lastloginatutc,
-                u.createdatutc, u.updatedatutc
+                u.createdatutc, u.updatedatutc, e.fullname AS employeename
             FROM  sec.users u
+            LEFT  JOIN core.employees e ON e.employeeid = u.employeeid AND e.companyid = u.companyid
             WHERE u.userid    = :uid
               AND u.companyid = :cid
         """),
@@ -347,8 +350,9 @@ async def list_users(
                 u.userid, u.companyid, u.employeeid, u.isstaged, u.username, u.displayname,
                 u.email, u.phone, u.isactive, u.canlogin,
                 u.mustchangepassword, u.lastloginatutc,
-                u.createdatutc, u.updatedatutc
+                u.createdatutc, u.updatedatutc, e.fullname AS employeename
             FROM  sec.users u
+            LEFT  JOIN core.employees e ON e.employeeid = u.employeeid AND e.companyid = u.companyid
             WHERE u.companyid = :cid
               {filter_clause}
             ORDER BY u.displayname
@@ -474,3 +478,73 @@ async def get_user_driver_info(
         "driver_status":      row["driverstatus"],
         "has_driver":         has_driver,
     }
+
+
+async def list_employee_link_candidates(
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+    *,
+    q: str | None = None,
+    driver_state: str | None = None,
+    employee_id: int | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[EmployeeLinkCandidate]:
+    """Employees that no User is linked to, with the minimum needed to choose one.
+
+    Gated by the Access permissions that create or link accounts, never by Workforce
+    permissions: an Access administrator can link without being able to read the roster.
+    The result is searchable (`q`), pageable (`limit`/`offset`, stable name order) and can
+    resolve one specific Employee (`employee_id`) wherever it sits in that order.
+    """
+    await security.ensure_any_permission(
+        company_id, user_id, db, "users.create", "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
+    result = await db.execute(
+        text("""
+            WITH candidate AS (
+                SELECT e.employeeid, e.employeekey, e.fullname, e.employmentstatus,
+                       COALESCE(a.branchid, e.branchid) AS branchid,
+                       CASE
+                           WHEN d.driverid IS NULL THEN 'none'
+                           WHEN a.driverassignmentid IS NOT NULL THEN 'current'
+                           WHEN EXISTS (
+                               SELECT 1 FROM core.driverassignments x
+                               WHERE x.companyid = e.companyid AND x.driverid = d.driverid
+                                 AND x.effectivefromat > NOW()
+                                 AND (x.effectivetoat IS NULL OR x.effectivetoat > x.effectivefromat)
+                           ) THEN 'pending'
+                           ELSE 'none'
+                       END AS driverstate
+                FROM core.employees e
+                LEFT JOIN core.drivers d
+                       ON d.companyid = e.companyid AND d.employeeid = e.employeeid
+                LEFT JOIN core.driverassignments a
+                       ON a.driverassignmentid = core.fn_EffectiveDriverAssignment(e.companyid, d.driverid)
+                WHERE e.companyid = :cid
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sec.users u
+                      WHERE u.companyid = e.companyid AND u.employeeid = e.employeeid)
+                  AND (CAST(:employee_id AS integer) IS NULL OR e.employeeid = :employee_id)
+                  AND (CAST(:q AS text) IS NULL
+                       OR LOWER(e.fullname) LIKE :q
+                       OR LOWER(COALESCE(e.employeekey, '')) LIKE :q)
+            )
+            SELECT c.employeeid, c.employeekey, c.fullname, c.employmentstatus, c.branchid,
+                   b.branchname, c.driverstate
+            FROM candidate c JOIN core.branches b ON b.branchid = c.branchid
+            WHERE (CAST(:driver_state AS text) IS NULL OR c.driverstate = :driver_state)
+            ORDER BY c.fullname, c.employeeid
+            LIMIT :limit OFFSET :offset
+        """),
+        {"cid": company_id, "q": f"%{q.strip().lower()}%" if q and q.strip() else None,
+         "driver_state": driver_state, "employee_id": employee_id,
+         "limit": limit, "offset": offset},
+    )
+    return [
+        EmployeeLinkCandidate(
+            employee_id=row["employeeid"], employee_key=row["employeekey"],
+            full_name=row["fullname"], branch_id=row["branchid"], branch_name=row["branchname"],
+            employment_status=row["employmentstatus"], driver_state=row["driverstate"])
+        for row in result.mappings().all()
+    ]

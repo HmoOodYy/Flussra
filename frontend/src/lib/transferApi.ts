@@ -1,12 +1,11 @@
 /**
- * Driver Transfer lifecycle operations and its current-Driver People picker.
+ * Driver Transfer lifecycle operations and its Driver picker.
  * Lifecycle routes are under /driver-transfers (backend app/transfer/router.py).
  */
 import apiClient from './apiClient';
-import type { AxiosPromise } from 'axios';
-import type { PersonSummary } from '../types/core';
 import type {
   DriverTransferRequest,
+  TransferDriverCandidate,
   TransferListResponse,
   DriverTransferCreate,
   SourceApprovalRequest,
@@ -16,8 +15,14 @@ import type {
 } from '../types/transfer';
 
 
-export function listTransferDriverPickerPeople(): AxiosPromise<PersonSummary[]> {
-  return apiClient.get<PersonSummary[]>('/core/people?driver_state=current');
+/**
+ * The Drivers a transfer can be requested for. The backend decides eligibility (a current,
+ * not-ending assignment, no transfer in flight, source Branch the caller may edit), under the
+ * transfer-create authority alone: no drivers.view, Workforce or Access permission is needed.
+ */
+export async function listTransferDriverCandidates(): Promise<TransferDriverCandidate[]> {
+  const response = await apiClient.get<TransferDriverCandidate[]>('/driver-transfers/driver-candidates');
+  return response.data;
 }
 
 export async function listTransfers(params?: {

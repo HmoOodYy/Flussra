@@ -6,7 +6,7 @@ import {
 } from './transferActions';
 import { buildTimeline } from './transferTimeline';
 import styles from '../PeoplePage.module.css';
-import trStyles from '../TransferRequestsTab.module.css';
+import trStyles from './TransferRequests.module.css';
 
 interface DetailProps {
   req: DriverTransferRequest;
