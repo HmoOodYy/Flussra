@@ -85,8 +85,7 @@ async def _get(client, tenant, path: str):
 
 def _paths(period: dict) -> list[str]:
     pid = period["payroll_period_id"]
-    return [f"/payroll/periods/{pid}/final-lines",
-            *[f"/payroll/periods/{pid}/reports/{view}" for view in REPORT_VIEWS],
+    return [*[f"/payroll/periods/{pid}/reports/{view}" for view in REPORT_VIEWS],
             *[f"/payroll/finalized/{pid}/{view}" for view in FINALIZED_VIEWS]]
 
 
@@ -177,9 +176,8 @@ async def test_an_extra_final_line_naming_another_snapshot_leaves_no_financial_o
     """, newer=newer, period=period["payroll_period_id"])
     pid = period["payroll_period_id"]
 
-    ledger = await _get(p3c_client, tenant, f"/payroll/periods/{pid}/final-lines")
-    assert ledger.status_code == 422
-    assert ledger.json()["detail"].startswith("PROVENANCE_UNAVAILABLE")
+    retired = await _get(p3c_client, tenant, f"/payroll/periods/{pid}/final-lines")
+    assert retired.status_code == 404
     for view in REPORT_VIEWS:
         response = await _get(p3c_client, tenant, f"/payroll/periods/{pid}/reports/{view}")
         assert response.status_code == 422, view
@@ -210,8 +208,8 @@ async def test_a_finalized_period_without_final_lines_has_no_financial_output(
                   period=period["payroll_period_id"])
     pid = period["payroll_period_id"]
 
-    ledger = await _get(p3c_client, tenant, f"/payroll/periods/{pid}/final-lines")
-    assert ledger.status_code == 422 and ledger.json()["detail"].startswith("FINAL_LINES_EMPTY")
+    retired = await _get(p3c_client, tenant, f"/payroll/periods/{pid}/final-lines")
+    assert retired.status_code == 404
     overview = (await _get(p3c_client, tenant, f"/payroll/finalized/{pid}/overview")).json()
     assert overview["financial_summary"]["total_pay"] is None
     assert overview["section_availability"]["financials"]["state"] == "UNAVAILABLE"

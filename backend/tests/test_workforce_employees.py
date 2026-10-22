@@ -186,11 +186,11 @@ async def test_driver_without_current_or_pending_assignment_cannot_be_edited_but
     )
 
     code_edit = await client.patch(
-        f"/core/drivers/{historical_driver['driver_id']}",
+        f"/workforce/drivers/{historical_driver['driver_id']}",
         json={"driver_number": f"P1B-{suffix()}"}, headers=auth(auth_token),
     )
     cdl_edit = await client.patch(
-        f"/core/drivers/{historical_driver['driver_id']}",
+        f"/workforce/drivers/{historical_driver['driver_id']}",
         json={"cdl_number": "HISTORICAL-CDL"}, headers=auth(auth_token),
     )
     assert code_edit.status_code == 422
@@ -202,15 +202,15 @@ async def test_driver_without_current_or_pending_assignment_cannot_be_edited_but
     )
     pending_driver = pending["driver"]
     changed = await client.patch(
-        f"/core/drivers/{pending_driver['driver_id']}",
+        f"/workforce/drivers/{pending_driver['driver_id']}",
         json={"cdl_number": "PENDING-CDL"}, headers=auth(auth_token),
     )
     assert changed.status_code == 200, changed.text
-    assert changed.json()["cdl_number"] == "PENDING-CDL"
+    assert changed.json()["driver"]["cdl_number"] == "PENDING-CDL"
 
 
 @pytest.mark.asyncio
-async def test_current_instant_driver_remains_editable_through_both_surfaces(
+async def test_current_instant_driver_remains_editable_through_workforce_surface(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int, direct_db,
 ):
     employee = await create_employee(
@@ -230,18 +230,10 @@ async def test_current_instant_driver_remains_editable_through_both_surfaces(
     assert resolved["driverid"] == driver_id
 
     new_number = f"P1B-NULL-{suffix()}"
-    changed = await client.patch(
-        f"/core/drivers/{driver_id}",
-        json={"driver_number": new_number}, headers=auth(auth_token),
-    )
-    assert changed.status_code == 200, changed.text
-    assert changed.json()["driver_number"] == new_number
-    assert changed.json()["driver_assignment_id"] == assignment_id
-
-    # The Workforce surface edits the same permanent Driver.
     workforce_edit = await client.patch(
         f"/workforce/drivers/{driver_id}",
-        json={"cdl_number": "WF-CDL", "driver_status": "OnLeave"}, headers=auth(auth_token),
+        json={"driver_number": new_number, "cdl_number": "WF-CDL", "driver_status": "OnLeave"},
+        headers=auth(auth_token),
     )
     assert workforce_edit.status_code == 200, workforce_edit.text
     assert workforce_edit.json()["driver"]["cdl_number"] == "WF-CDL"
@@ -398,7 +390,7 @@ async def test_employee_view_and_manage_permissions_gate_workforce(
 
 
 @pytest.mark.asyncio
-async def test_core_driver_patch_rejects_employee_fields_and_allows_driver_fields(
+async def test_workforce_driver_patch_rejects_employee_fields_and_allows_driver_fields(
     client: httpx.AsyncClient, auth_token: str, hq_branch_id: int,
 ):
     employee = await create_employee(
@@ -407,11 +399,11 @@ async def test_core_driver_patch_rejects_employee_fields_and_allows_driver_field
     )
     driver_id = employee["driver"]["driver_id"]
     rejected = await client.patch(
-        f"/core/drivers/{driver_id}", json={"full_name": "Not Allowed"}, headers=auth(auth_token),
+        f"/workforce/drivers/{driver_id}", json={"full_name": "Not Allowed"}, headers=auth(auth_token),
     )
     assert rejected.status_code == 422
     changed = await client.patch(
-        f"/core/drivers/{driver_id}", json={"driver_number": f"P1B-{suffix()}"}, headers=auth(auth_token),
+        f"/workforce/drivers/{driver_id}", json={"driver_number": f"P1B-{suffix()}"}, headers=auth(auth_token),
     )
     assert changed.status_code == 200, changed.text
 
@@ -596,19 +588,23 @@ async def test_driver_role_requires_employee_link_before_assignment(
     assert target.status_code in {200, 201}, target.text
     caller_id, target_id = caller.json()["user_id"], target.json()["user_id"]
     role_code = f"P1B_ACCESS_{tag.upper()}"
-    role_id = (await direct_db.execute(text("""
-        INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-        VALUES (:code, :name, 40, FALSE) RETURNING RoleID
-    """), {"code": role_code, "name": role_code})).scalar_one()
-    await direct_db.execute(text("""
-        INSERT INTO sec.RolePermissions (RoleID, PermissionID)
-        SELECT :role_id, PermissionID FROM sec.Permissions WHERE PermissionCode = 'users.edit'
-    """), {"role_id": role_id})
-    await direct_db.execute(text("""
-        INSERT INTO sec.UserBranchRoles
-            (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
-        VALUES (:user_id, 1, NULL, :role_id, NULL, 'AllCompanyBranches', TRUE)
-    """), {"user_id": caller_id, "role_id": role_id})
+    role = await client.post("/admin/company-roles", json={
+        "role_code": role_code, "role_name": role_code, "role_level": 40,
+        "is_default": False, "is_protected": False,
+    }, headers=auth(auth_token))
+    assert role.status_code == 201, role.text
+    role_id = role.json()["company_role_id"]
+    granted = await client.put(
+        f"/admin/company-roles/{role_id}/permissions",
+        json={"permission_codes": ["users.edit"]}, headers=auth(auth_token),
+    )
+    assert granted.status_code == 200, granted.text
+    assigned = await client.post(
+        f"/admin/users/{caller_id}/company-role-assignments",
+        json={"company_role_id": role_id, "scope_type": "AllCompanyBranches"},
+        headers=auth(auth_token),
+    )
+    assert assigned.status_code == 201, assigned.text
     login = await client.post("/auth/login", json={
         "username": f"p1b_access_{tag}", "password": "TestPass123!", "company_code": "DEMO",
     })

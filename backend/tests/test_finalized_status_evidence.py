@@ -50,7 +50,6 @@ async def _status_evidence_reads(client, tenant, period) -> dict[str, dict]:
         "day grid": (f"/payroll/periods/{pid}/day-grid", {"work_date": day(period, 3)}),
         "off drivers (day)": (f"/payroll/periods/{pid}/off-drivers", {"work_date": day(period, 3)}),
         "off drivers (summary)": (f"/payroll/periods/{pid}/off-drivers/summary", {}),
-        "drivers off": (f"/payroll/periods/{pid}/drivers-off", {}),
     }
     evidence = {}
     for label, (path, params) in reads.items():

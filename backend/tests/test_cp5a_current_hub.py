@@ -46,17 +46,12 @@ async def paytest_branch_id(session_db_conn) -> int:
 
 @pytest_asyncio.fixture(scope="session")
 async def paytest_driver_assignment_id(session_client, auth_token, paytest_branch_id) -> int:
-    response = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id": paytest_branch_id,
-            "full_name": f"CP5A Driver {uuid.uuid4().hex[:8]}",
-            "driver_number": f"CP5A-{uuid.uuid4().hex[:10]}",
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, paytest_branch_id,
+        f"CP5A Driver {uuid.uuid4().hex[:8]}", f"CP5A-{uuid.uuid4().hex[:10]}",
     )
-    assert response.status_code == 201, response.text
-    return response.json()["driver_assignment_id"]
+    return driver["driver_assignment_id"]
 
 
 async def _clean(db: AsyncConnection, branch_id: int) -> None:
@@ -476,7 +471,9 @@ class TestCurrentPayrollHub:
         await _clean(direct_db, paytest_branch_id)
         period_id = await _insert_period(direct_db, paytest_branch_id, "Open", "WORKING")
         await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, "DailyStatus", Decimal("1"))
+        await _insert_canonical_status(
+            direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id,
+        )
         await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, "SYS_MIN_TOPUP", Decimal("1"), "System")
 
         response = await _hub(session_client, auth_token, paytest_branch_id)

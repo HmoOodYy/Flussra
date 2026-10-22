@@ -1,8 +1,7 @@
 """
 Local-dev idempotent seed script.
 Creates or repairs the DEMO company (with its default Status rate column), Headquarters
-branch, admin user, legacy PAYROLL_ADMIN global role (for internal auth compat), COMPANY_OWNER
-company role, and the role assignment linking the admin to COMPANY_OWNER.
+branch, admin user, and the CompanyRole assignment linking the admin to COMPANY_OWNER.
 
 Safe to run multiple times — every step uses INSERT ... ON CONFLICT DO NOTHING
 or ON CONFLICT DO UPDATE (upsert) so nothing is duplicated.
@@ -30,23 +29,6 @@ BRANCH_TIME_ZONE_ID = "America/New_York"
 USERNAME     = "admin"
 DISPLAY_NAME = "Admin User"
 PASSWORD     = "TestPass123!"
-ROLE_CODE    = "PAYROLL_ADMIN"
-ROLE_NAME    = "Payroll Admin"
-
-# All permissions required for full frontend testing.
-# Module codes must be lowercase to match the ui_only filter in list_permissions.
-# Names and codes must match migration 0041 (which uses ON CONFLICT DO UPDATE
-# to correct any rows this script inserts with wrong case).
-PERMISSIONS = [
-    ("payroll.entry",        "Enter Payroll Data",           "payroll"),
-    ("payroll.finalize",     "Finalize Payroll",             "payroll"),
-    ("payroll.approve_rate", "Approve Pay Rates",            "payroll"),
-    ("review.decide",        "Approve / Reject Review Items","review"),
-    ("setup.manage",         "Manage Settings",              "settings"),
-    ("drivers.manage",       "Manage Drivers",               "core"),
-]
-
-
 async def main() -> None:
     settings = get_settings()
     dsn = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
@@ -125,42 +107,8 @@ async def main() -> None:
             )
         print(f"[OK] User      id={user_id}  username={USERNAME}  active=True  can_login=True")
 
-        # ── 4. Role ───────────────────────────────────────────────────────────
-        role_id = await conn.fetchval(
-            """
-            INSERT INTO sec.roles (rolecode, rolename, rolelevel, issystemrole)
-            VALUES ($1, $2, 100, TRUE)
-            ON CONFLICT (rolecode) DO UPDATE
-                SET rolename = EXCLUDED.rolename
-            RETURNING roleid
-            """,
-            ROLE_CODE, ROLE_NAME,
-        )
-        print(f"[OK] Role      id={role_id}  code={ROLE_CODE}")
+        # ── 4. Company roles ──────────────────────────────────────────────────
 
-        # ── 5. Permissions + link to role ─────────────────────────────────────
-        for pcode, pname, module in PERMISSIONS:
-            perm_id = await conn.fetchval(
-                """
-                INSERT INTO sec.permissions (permissioncode, permissionname, modulecode)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (permissioncode) DO UPDATE
-                    SET permissionname = EXCLUDED.permissionname
-                RETURNING permissionid
-                """,
-                pcode, pname, module,
-            )
-            await conn.execute(
-                """
-                INSERT INTO sec.rolepermissions (roleid, permissionid)
-                VALUES ($1, $2)
-                ON CONFLICT (roleid, permissionid) DO NOTHING
-                """,
-                role_id, perm_id,
-            )
-            print(f"[OK] Permission  {pcode}")
-
-        # ── 6. Company roles (new system) ─────────────────────────────────────
         # COMPANY_OWNER — default protected, all permissions
         co_role_id = await conn.fetchval(
             """
@@ -205,66 +153,29 @@ async def main() -> None:
         )
         print(f"[OK] CompanyRole  DRIVER         id={driver_role_id}")
 
-        # Remove any lingering auto-mirrored legacy company roles (from migration 0016).
-        # These are custom roles whose rolecode matches a global sec.roles entry.
-        await conn.execute(
-            """
-            UPDATE sec.userbranchroles
-            SET    companyroleId = NULL
-            WHERE  companyroleId IN (
-                SELECT companyroleid FROM sec.companyroles
-                WHERE  companyid    = $1
-                  AND  iscustom     = TRUE
-                  AND  isprotected  = FALSE
-                  AND  isdefault    = FALSE
-                  AND  rolecode IN (SELECT rolecode FROM sec.roles)
-            )
-            """,
-            company_id,
-        )
-        deleted = await conn.fetchval(
-            """
-            WITH deleted AS (
-                DELETE FROM sec.companyroles
-                WHERE  companyid    = $1
-                  AND  iscustom     = TRUE
-                  AND  isprotected  = FALSE
-                  AND  isdefault    = FALSE
-                  AND  rolecode IN (SELECT rolecode FROM sec.roles)
-                RETURNING companyroleid
-            )
-            SELECT COUNT(*) FROM deleted
-            """,
-            company_id,
-        )
-        if deleted:
-            print(f"[OK] Removed {deleted} auto-mirrored legacy role(s) from CompanyRoles")
-
-        # ── 7. Role assignment (AllCompanyBranches) — both old and new path ──
-        # Admin user is assigned the legacy PAYROLL_ADMIN global role (for backward compat)
-        # AND the COMPANY_OWNER company role (for the new permissions system).
+        # ── 5. CompanyRole assignment (AllCompanyBranches) ────────────────────
         existing = await conn.fetchval(
             """
             SELECT userbranchroleid
               FROM sec.userbranchroles
-             WHERE userid    = $1
+             WHERE userid = $1
                AND companyid = $2
-               AND roleid    = $3
+               AND companyroleId = $3
                AND scopetype = 'AllCompanyBranches'
             """,
-            user_id, company_id, role_id,
+            user_id, company_id, co_role_id,
         )
 
         if existing is None:
             await conn.execute(
                 """
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-                VALUES ($1, $2, NULL, $3, $4, 'AllCompanyBranches', TRUE)
+                    (userid, companyid, branchid, companyroleId, scopetype, isactive)
+                VALUES ($1, $2, NULL, $3, 'AllCompanyBranches', TRUE)
                 """,
-                user_id, company_id, role_id, co_role_id,
+                user_id, company_id, co_role_id,
             )
-            print(f"[OK] Role assigned  {ROLE_CODE} -> {USERNAME}  scope=AllCompanyBranches  companyRole=COMPANY_OWNER")
+            print(f"[OK] CompanyRole assigned  COMPANY_OWNER -> {USERNAME}  scope=AllCompanyBranches")
         else:
             await conn.execute(
                 """
@@ -274,8 +185,7 @@ async def main() -> None:
                 """,
                 existing, co_role_id,
             )
-            print(f"[OK] Role confirmed  {ROLE_CODE} -> {USERNAME}  scope=AllCompanyBranches  companyRole=COMPANY_OWNER")
-
+            print(f"[OK] CompanyRole confirmed  COMPANY_OWNER -> {USERNAME}  scope=AllCompanyBranches")
         # ── Summary ───────────────────────────────────────────────────────────
         print()
         print("=" * 50)

@@ -1,21 +1,3 @@
-// ─── Role Assignments ─────────────────────────────────────────────────────────
-
-export interface RoleAssignment {
-  assignment_id: number;
-  user_id: number;
-  role_id: number;
-  role_code: string;
-  role_name: string;
-  scope_type: 'AllCompanyBranches' | 'SpecificBranch' | 'Self';
-  branch_id: number | null;
-  branch_name: string | null;
-  is_active: boolean;
-  granted_by_user_id: number | null;
-  granted_at_utc: string;
-  revoked_at_utc: string | null;
-  notes: string | null;
-}
-
 // ─── Users ────────────────────────────────────────────────────────────────────
 
 export interface UserAdmin {
@@ -35,9 +17,7 @@ export interface UserAdmin {
   last_login_at_utc: string | null;
   created_at_utc: string;
   updated_at_utc: string | null;
-  // NOTE: includes BOTH active and revoked assignments — always filter by is_active before displaying
-  role_assignments: RoleAssignment[];
-  // ── Company-role (new path) ──
+  // ── CompanyRole authority ──
   company_role_assignment_id: number | null;
   company_role_id: number | null;
   company_role_code: string | null;

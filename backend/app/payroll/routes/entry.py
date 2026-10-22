@@ -17,7 +17,6 @@ from app.payroll.schemas import (
     DraftLineSummary,
     DraftLineUpdate,
     DriverPeriodSummary,
-    DriversOffResponse,
     OffDriversSummaryResponse,
     SelectedDayOffDriversResponse,
 )
@@ -160,43 +159,6 @@ async def void_period_line(
         db=db,
     )
     return Response(status_code=204)
-
-
-@off_drivers_router.get(
-    "/periods/{period_id}/drivers-off",
-    response_model=DriversOffResponse,
-    summary="All off-driver records for an entire period (all work dates)",
-    description=(
-        "Returns every DailyStatus line in the period whose status key has "
-        "IsOffReason=TRUE.  Unlike the day-grid which shows only one day's "
-        "off drivers, this endpoint spans the entire period. "
-        "DRIVER/Self users receive 403."
-    ),
-    responses={
-        403: {"description": "DRIVER/Self user or no payroll.view/payroll.entry permission"},
-        404: {"description": "Period not found"},
-    },
-)
-async def get_period_drivers_off(
-    period_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> DriversOffResponse:
-    entries_raw, status_evidence_state = await off_drivers.get_drivers_off(
-        period_id=period_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        db=db,
-    )
-    from app.payroll.schemas import DriversOffEntry
-
-    entries = [DriversOffEntry(**e) for e in entries_raw]
-    return DriversOffResponse(
-        period_id=period_id,
-        entries=entries,
-        total_count=len(entries),
-        status_evidence=status_evidence_state,
-    )
 
 
 @off_drivers_router.get(

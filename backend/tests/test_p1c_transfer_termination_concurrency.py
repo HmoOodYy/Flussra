@@ -209,7 +209,7 @@ async def test_driver_edit_and_transfer_completion_do_not_lose_update(
 
     async def edit():
         return await client.patch(
-            f"/core/drivers/{driver_id}", json={"driver_number": new_number}, headers=auth(auth_token),
+            f"/workforce/drivers/{driver_id}", json={"driver_number": new_number}, headers=auth(auth_token),
         )
 
     async def complete():

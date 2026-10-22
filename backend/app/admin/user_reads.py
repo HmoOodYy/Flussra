@@ -1,81 +1,11 @@
-"""Admin user reads, role-assignment projections, and Driver reads."""
+"""Admin user reads and target CompanyRole / linked Driver projections."""
 
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.access.branch_access import check_branch_access
-from app.access.permissions import check_any_permission
-from app.access.policy import require_non_driver_subject
 from app.admin import security
-from app.admin.schemas import (
-    EmployeeLinkCandidate,
-    RoleAssignment,
-    UserAdmin,
-)
-
-
-async def fetch_role_assignments(
-    company_id: int,
-    user_ids: list[int],
-    db: AsyncConnection,
-) -> dict[int, list[RoleAssignment]]:
-    """
-    Return all role assignments (active and revoked) for the given user list,
-    keyed by user_id.  Fetched in one query to avoid N+1 on list endpoints.
-    """
-    if not user_ids:
-        return {}
-
-    placeholders = ", ".join(f":uid{i}" for i in range(len(user_ids)))
-    params: dict = {
-        "cid": company_id,
-        **{f"uid{i}": uid for i, uid in enumerate(user_ids)},
-    }
-    result = await db.execute(
-        text(f"""
-            SELECT
-                ubr.userbranchroleid   AS assignment_id,
-                ubr.userid,
-                ubr.roleid,
-                r.rolecode,
-                r.rolename,
-                ubr.scopetype,
-                ubr.branchid,
-                b.branchname,
-                ubr.isactive,
-                ubr.grantedbyuserid,
-                ubr.grantedatutc,
-                ubr.revokedatutc,
-                ubr.notes
-            FROM  sec.userbranchroles ubr
-            JOIN  sec.roles r          ON r.roleid    = ubr.roleid
-            LEFT  JOIN core.branches b ON b.branchid  = ubr.branchid
-            WHERE ubr.companyid = :cid
-              AND ubr.userid IN ({placeholders})
-            ORDER BY ubr.userid, ubr.grantedatutc
-        """),
-        params,
-    )
-    groups: dict[int, list[RoleAssignment]] = {}
-    for row in result.mappings().all():
-        ra = RoleAssignment(
-            assignment_id=row["assignment_id"],
-            user_id=row["userid"],
-            role_id=row["roleid"],
-            role_code=row["rolecode"],
-            role_name=row["rolename"],
-            scope_type=row["scopetype"],
-            branch_id=row["branchid"],
-            branch_name=row["branchname"],
-            is_active=row["isactive"],
-            granted_by_user_id=row["grantedbyuserid"],
-            granted_at_utc=row["grantedatutc"],
-            revoked_at_utc=row["revokedatutc"],
-            notes=row["notes"],
-        )
-        groups.setdefault(row["userid"], []).append(ra)
-    return groups
+from app.admin.schemas import EmployeeLinkCandidate, UserAdmin
 
 
 async def _fetch_company_roles_for_users(
@@ -246,7 +176,6 @@ async def _fetch_role_perms_for_roles(
 
 def _row_to_user(
     row,
-    assignments: list[RoleAssignment],
     company_role: dict | None = None,
     driver_id: int | None = None,
     extra_perm_codes: list[str] | None = None,
@@ -268,7 +197,6 @@ def _row_to_user(
         last_login_at_utc=row["lastloginatutc"],
         created_at_utc=row["createdatutc"],
         updated_at_utc=row["updatedatutc"],
-        role_assignments=assignments,
         # Company-role new path
         company_role_assignment_id=company_role["assignment_id"] if company_role else None,
         company_role_id=company_role["companyroleid"] if company_role else None,
@@ -309,7 +237,6 @@ async def get_user_by_id_internal(
     if row is None:
         raise HTTPException(status_code=404, detail="User not found.")
     uid_list = [target_user_id]
-    assignments_map = await fetch_role_assignments(company_id, uid_list, db)
     cr_map = await _fetch_company_roles_for_users(company_id, uid_list, db)
     drv_map = await _fetch_driver_ids_for_users(company_id, uid_list, db)
     extra_map = await _fetch_extra_perms_for_users(company_id, uid_list, db)
@@ -326,7 +253,6 @@ async def get_user_by_id_internal(
     role_perms_map = await _fetch_role_perms_for_roles(company_id, role_ids_set, owner_role_ids, db)
     return _row_to_user(
         row,
-        assignments_map.get(target_user_id, []),
         company_role=cr_info,
         driver_id=drv_map.get(target_user_id),
         extra_perm_codes=extra_map.get(target_user_id),
@@ -363,7 +289,6 @@ async def list_users(
     if not rows:
         return []
     uid_list = [r["userid"] for r in rows]
-    assignments = await fetch_role_assignments(company_id, uid_list, db)
     cr_map = await _fetch_company_roles_for_users(company_id, uid_list, db)
     drv_map = await _fetch_driver_ids_for_users(company_id, uid_list, db)
     extra_map = await _fetch_extra_perms_for_users(company_id, uid_list, db)
@@ -380,7 +305,6 @@ async def list_users(
     return [
         _row_to_user(
             r,
-            assignments.get(r["userid"], []),
             company_role=(cr_info := cr_map.get(r["userid"])),
             driver_id=drv_map.get(r["userid"]),
             extra_perm_codes=extra_map.get(r["userid"]),
@@ -398,86 +322,6 @@ async def get_user_by_id(
 ) -> UserAdmin:
     await security.ensure_any_permission(company_id, caller_id, db, "users.view", *security.ADMIN_FALLBACKS)
     return await get_user_by_id_internal(target_user_id, company_id, db)
-
-
-async def get_user_driver_info(
-    user_id: int,
-    company_id: int,
-    caller_user_id: int,
-    db: AsyncConnection,
-) -> dict:
-    """
-    Return the permanent Driver and its current assignment for a user (target: user_id).
-
-    Security rules:
-      1. DRIVER/Self subjects are denied generic Driver administration.
-      2. Caller must have one of: users.view, payrates.view, payrates.edit,
-         settings.manage, setup.manage.
-      3. If caller has SpecificBranch scope, they may only see targets whose
-         current Driver assignment belongs to their allowed branch.
-    """
-    await require_non_driver_subject(company_id, caller_user_id, db)
-    # Rule 1 — permission gate
-    await check_any_permission(
-        company_id, caller_user_id, None,
-        ["users.view", "payrates.view", "payrates.edit", "settings.manage", "setup.manage"],
-        db,
-    )
-
-    result = await db.execute(
-        text("""
-            SELECT
-                u.userid,
-                u.employeeid,
-                d.driverid,
-                e.fullname       AS driver_name,
-                d.drivernumber,
-                d.driverstatus,
-                a.driverassignmentid,
-                a.branchid,
-                b.branchname
-            FROM   sec.users         u
-            LEFT JOIN core.employees e ON e.employeeid = u.employeeid
-                                      AND e.companyid  = :cid
-            LEFT JOIN core.drivers   d ON d.employeeid = e.employeeid
-                                      AND d.companyid  = :cid
-            LEFT JOIN core.driverassignments a
-                                      ON a.driverassignmentid = core.fn_EffectiveDriverAssignment(
-                                          d.companyid, d.driverid
-                                      )
-            LEFT JOIN core.branches  b ON b.branchid   = a.branchid
-            WHERE  u.userid    = :uid
-              AND  u.companyid = :cid
-        """),
-        {"uid": user_id, "cid": company_id},
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="User not found.")
-
-    # Rule 3 — SpecificBranch scope: verify caller can see the driver's branch
-    if row["branchid"] is not None:
-        # check_branch_access returns (can_see_all, branch_ids)
-        can_see_all, caller_branches = await check_branch_access(company_id, caller_user_id, db)
-        if not can_see_all and row["branchid"] not in caller_branches:
-            raise HTTPException(
-                status_code=403,
-                detail="Access denied to this driver's branch.",
-            )
-
-    has_driver = row["driverid"] is not None
-    return {
-        "user_id":            user_id,
-        "employee_id":        row["employeeid"],
-        "driver_id":          row["driverid"],
-        "driver_assignment_id": row["driverassignmentid"],
-        "driver_name":        row["driver_name"],
-        "driver_number":      row["drivernumber"],
-        "branch_id":          row["branchid"],
-        "branch_name":        row["branchname"],
-        "driver_status":      row["driverstatus"],
-        "has_driver":         has_driver,
-    }
 
 
 async def list_employee_link_candidates(

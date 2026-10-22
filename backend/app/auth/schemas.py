@@ -89,10 +89,8 @@ class UserInfo(BaseModel):
     self_assignments: list[SelfAssignment] = Field(default_factory=list)
     active_permissions: list[str] = Field(default=[], deprecated=True)
     """
-    Distinct permission codes granted to this user across all active role
-    assignments.  Derived from sec.CompanyRolePermissions (new path) and
-    sec.RolePermissions (legacy path) via UNION so both paths work during
-    the transition period.
+    Distinct permission codes granted to this user across active CompanyRole
+    assignments and explicit permission overrides within their scope.
     """
     authority: PermissionAuthority
 

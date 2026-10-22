@@ -111,17 +111,12 @@ async def _create_driver(
     suffix: str = "",
 ) -> int:
     """Create an Employee with a Driver and its first assignment; return the permanent DriverID."""
-    r = await client.post(
-        "/core/drivers",
-        json={
-            "branch_id":   branch_id,
-            "full_name":   f"Transfer WF Driver {suffix or _rnd()}",
-            "driver_number": f"TWF-{suffix or _rnd()}",
-        },
-        headers=auth(token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        client, token, branch_id,
+        f"Transfer WF Driver {suffix or _rnd()}", f"TWF-{suffix or _rnd()}",
     )
-    assert r.status_code == 201, r.text
-    return r.json()["driver_id"]
+    return driver["driver_id"]
 
 
 async def _create_transfer(
@@ -1059,20 +1054,19 @@ async def test_get_user_driver_info_follows_the_same_driver_to_its_new_assignmen
     assert r_c.json()["status"] == "Completed"
     new_assignment_id = r_c.json()["destination_driver_assignment_id"]
 
-    # GET /admin/users/{uid}/driver → the same Driver, now on its new assignment
+    # Workforce remains the Employee/Driver read authority after Access links the account.
     r_info = await session_client.get(
-        f"/admin/users/{uid}/driver",
-        headers=auth(auth_token),
+        f"/workforce/employees/{emp_id}", headers=auth(auth_token),
     )
     assert r_info.status_code == 200, r_info.text
     info = r_info.json()
-    assert info["driver_id"] == drv_id, (
-        f"Expected the same permanent driver_id={drv_id}, got {info.get('driver_id')}"
+    assert info["driver"]["driver_id"] == drv_id, (
+        f"Expected the same permanent driver_id={drv_id}, got {info.get('driver')}"
     )
-    assert info["driver_assignment_id"] == new_assignment_id
-    assert info["branch_id"] == hq_branch_id
-    assert info["driver_status"] in ("Active",), (
-        f"Expected Active status, got {info.get('driver_status')}"
+    assert info["current_or_pending_assignment"]["driver_assignment_id"] == new_assignment_id
+    assert info["current_or_pending_assignment"]["branch_id"] == hq_branch_id
+    assert info["driver"]["driver_status"] == "Active", (
+        f"Expected Active status, got {info['driver'].get('driver_status')}"
     )
 
 
@@ -1580,7 +1574,7 @@ async def test_db_composite_fk_blocks_cross_company_driver(
 
 
 # ---------------------------------------------------------------------------
-# /core/people — transfer-aware: no duplicates, active driver_id surfaced
+# Workforce — transfer-aware Employee and permanent Driver identity
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -1591,11 +1585,8 @@ async def test_people_no_duplicate_after_completed_transfer(
     hq_branch_id: int,
 ):
     """
-    After a transfer completes, GET /core/people must return exactly ONE row
-    per employee — not one per driver profile.
-
-    Before the fix, the plain LEFT JOIN on core.drivers returned two rows for
-    an employee with both a Transferred profile and a new Active profile.
+    After transfer completion, the Workforce Employee read returns one Employee
+    with one permanent Driver and the effective DriverAssignment.
     """
     sfx = _rnd()
     drv_id = await _create_driver(
@@ -1613,8 +1604,9 @@ async def test_people_no_duplicate_after_completed_transfer(
     r_c = await _complete(session_client, auth_token, tid)
     assert r_c.status_code == 200, r_c.text
 
-    # GET /core/people (admin sees all branches)
-    r_p = await session_client.get("/core/people", headers=auth(auth_token))
+    r_p = await session_client.get(
+        "/workforce/employees", params={"q": sfx}, headers=auth(auth_token),
+    )
     assert r_p.status_code == 200, r_p.text
     people = r_p.json()
 
@@ -1654,20 +1646,20 @@ async def test_people_surfaces_effective_source_until_future_transfer_date(
     new_assignment_id = r_c.json()["destination_driver_assignment_id"]
     old_assignment_id = r_c.json()["source_driver_assignment_id"]
 
-    r_p = await session_client.get("/core/people", headers=auth(auth_token))
+    r_p = await session_client.get(
+        "/workforce/employees", params={"q": sfx}, headers=auth(auth_token),
+    )
     assert r_p.status_code == 200
     people = r_p.json()
 
     matching = [p for p in people if sfx in (p.get("full_name") or "")]
     assert len(matching) == 1
     row = matching[0]
-
-    assert row.get("driver_id") == old_drv_id  # the permanent Driver never changes
-    assert row.get("driver_assignment_id") == old_assignment_id
-    assert row.get("driver_assignment_id") != new_assignment_id
-    assert row.get("driver_status") == "Active"
-    assert row.get("driver_state") == "current"
-    assert row.get("branch_id") == paytest_branch_id
+    assert row["driver"]["driver_id"] == old_drv_id  # permanent Driver identity is stable
+    assert row["current_or_pending_assignment"]["driver_assignment_id"] == old_assignment_id
+    assert row["current_or_pending_assignment"]["driver_assignment_id"] != new_assignment_id
+    assert row["driver_state"] == "current"
+    assert row["current_or_pending_assignment"]["branch_id"] == paytest_branch_id
 
 
 # ===========================================================================

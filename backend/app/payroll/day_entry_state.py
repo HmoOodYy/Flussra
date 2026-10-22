@@ -156,84 +156,6 @@ async def _upsert_entry_state(
         )
 
 
-async def _void_entry_state_field(
-    period_id: int,
-    company_id: int,
-    driver_assignment_id: int,
-    work_date: "date",
-    user_id: int,
-    db: AsyncConnection,
-    *,
-    clear_status: bool = False,
-    clear_note: bool = False,
-) -> None:
-    """
-    Update canonical entry-state row when a DailyStatus or DailyNote DraftLine is voided.
-
-    Sets the corresponding field to NULL and recomputes IsVoided (TRUE only when
-    both fields would then be empty).  No-op if the canonical row does not exist.
-    """
-    if not clear_status and not clear_note:
-        return
-
-    before_row = (await db.execute(text("""
-        SELECT e.payrollperioddriverdayentrystateid, e.statuskeyid, e.notetext,
-               sk.statuscode, sk.keyname AS statuslabel
-        FROM payroll.payrollperioddriverdayentrystate e
-        LEFT JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = e.statuskeyid
-        WHERE e.companyid = :cid AND e.payrollperiodid = :pid
-          AND e.driverassignmentid = :did AND e.workdate = :dt AND e.isvoided = FALSE
-    """), {"cid": company_id, "pid": period_id, "did": driver_assignment_id, "dt": work_date})).mappings().first()
-
-    if clear_status and clear_note:
-        set_clause = "statuskeyid = NULL, notetext = NULL, isvoided = TRUE"
-    elif clear_status:
-        set_clause = "statuskeyid = NULL, isvoided = (notetext IS NULL OR notetext = '')"
-    else:
-        set_clause = "notetext = NULL, isvoided = (statuskeyid IS NULL)"
-
-    await db.execute(
-        text(f"""
-            UPDATE payroll.payrollperioddriverdayentrystate
-            SET    {set_clause},
-                   updatedbyuserid = :uid,
-                   updatedatutc    = NOW()
-            WHERE  payrollperiodid = :pid
-              AND  companyid       = :cid
-              AND  driverassignmentid        = :did
-              AND  workdate        = :dt
-              AND  isvoided          = FALSE
-        """),
-        {"pid": period_id, "cid": company_id, "did": driver_assignment_id, "dt": work_date, "uid": user_id},
-    )
-    if before_row is None:
-        return
-    entry_id = int(before_row["payrollperioddriverdayentrystateid"])
-    branch_id = int((await db.execute(text("""
-        SELECT branchid FROM payroll.payrollperiods WHERE payrollperiodid = :pid
-    """), {"pid": period_id})).scalar_one())
-    if clear_status and before_row["statuskeyid"] is not None:
-        await capture_period_audit_evidence(
-            company_id=company_id, branch_id=branch_id, period_id=period_id,
-            domain="STATUS_NOTE", action_code="STATUS_CLEARED",
-            source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
-            user_id=user_id, required_permission_code="payroll.entry", db=db,
-            before_state={
-                "status_key_id": before_row["statuskeyid"], "status_code": before_row["statuscode"],
-                "status_label": before_row["statuslabel"],
-            }, after_state=None, driver_assignment_id=driver_assignment_id, work_date=work_date,
-        )
-    if clear_note and before_row["notetext"]:
-        await capture_period_audit_evidence(
-            company_id=company_id, branch_id=branch_id, period_id=period_id,
-            domain="STATUS_NOTE", action_code="NOTE_CLEARED",
-            source_entity_type="PayrollPeriodDriverDayEntryState", source_entity_id=entry_id,
-            user_id=user_id, required_permission_code="payroll.entry", db=db,
-            before_state={"note": before_row["notetext"]}, after_state=None,
-            driver_assignment_id=driver_assignment_id, work_date=work_date,
-        )
-
-
 async def lock_selected_status_keys(
     selections: list[tuple[int, bool]], company_id: int, db: AsyncConnection,
 ) -> None:
@@ -305,7 +227,7 @@ async def _enforce_status_key_limits(
 
     Counting rules:
       - Only canonical, non-voided PayrollPeriodDriverDayEntryState selections of this Status
-        in this Period are counted. The legacy DailyStatus duplicate is never read.
+        in this Period are counted from canonical entry state only.
       - The batch's own (driver_assignment_id, work_date) pairs are excluded from the
         existing counts (those slots are being overwritten, whatever they held).
       - The batch's new contributions are counted separately and added.

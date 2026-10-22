@@ -66,9 +66,21 @@ async def _get_driver_profile(
     token: str,
     user_id: int,
 ) -> dict:
-    resp = await client.get(f"/admin/users/{user_id}/driver", headers=auth(token))
-    assert resp.status_code == 200, resp.text
-    return resp.json()
+    user_resp = await client.get(f"/admin/users/{user_id}", headers=auth(token))
+    assert user_resp.status_code == 200, user_resp.text
+    employee_id = user_resp.json().get("employee_id")
+    if employee_id is None:
+        return {"has_driver": False}
+    employee_resp = await client.get(f"/workforce/employees/{employee_id}", headers=auth(token))
+    assert employee_resp.status_code == 200, employee_resp.text
+    employee = employee_resp.json()
+    assignment = employee.get("current_or_pending_assignment")
+    return {
+        "has_driver": employee.get("driver") is not None,
+        "driver_id": (employee.get("driver") or {}).get("driver_id"),
+        "branch_id": assignment.get("branch_id") if assignment else None,
+        "driver_assignment_id": assignment.get("driver_assignment_id") if assignment else None,
+    }
 
 
 async def _get_company_id(direct_db, branch_id: int) -> int:

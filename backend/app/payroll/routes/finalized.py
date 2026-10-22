@@ -5,7 +5,6 @@ from fastapi import APIRouter, Query
 from app.payroll import (
     finalized_audit,
     finalized_library_read_model,
-    ledger_read,
 )
 from app.payroll.schemas import (
     FinalizedAuditResponse,
@@ -14,7 +13,6 @@ from app.payroll.schemas import (
     FinalizedOverviewResponse,
     FinalizedPeriodListItem,
     FinalizedRatesUsedResponse,
-    FinalLineSummary,
 )
 
 from .dependencies import DbDep, TokenDep
@@ -141,28 +139,4 @@ async def get_finalized_audit(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
-    )
-
-
-@router.get(
-    "/periods/{period_id}/final-lines",
-    response_model=list[FinalLineSummary],
-    summary="List locked final lines for a period",
-    responses={
-        403: {"description": "No access to this period's branch"},
-        404: {"description": "Period not found"},
-    },
-)
-async def list_final_lines(
-    period_id: int,
-    token: TokenDep,
-    db: DbDep,
-    driver_assignment_id: int | None = Query(None, description="Filter to a specific driver"),
-) -> list[FinalLineSummary]:
-    return await ledger_read.get_final_lines(
-        period_id=period_id,
-        company_id=int(token["cid"]),
-        user_id=int(token["sub"]),
-        db=db,
-        driver_assignment_id=driver_assignment_id,
     )

@@ -330,11 +330,14 @@ async def test_the_old_branch_manager_can_still_read_the_ended_tenures_compensat
         f"/compensation/driver-rate-schedules/{seed.status['void']}",
         f"/compensation/drivers/{driver}/rate-definitions/"
         f"{world.columns[3]['rate_definition_id']}/rate-schedules",
-        f"/core/drivers/{world.driver_id}/assignments",
     ]
     for path in reads:
         response = await client.get(path, headers=headers)
         assert response.status_code == 200, (path, response.status_code, response.text)
+    roster = await client.get(
+        "/core/driver-assignments", params={"branch_id": world.old_branch}, headers=headers,
+    )
+    assert roster.status_code == 200, roster.text
     history = (await client.get(
         f"/compensation/drivers/{driver}/rate-definitions/"
         f"{definition['rate_definition_id']}/rate-schedules", headers=headers)).json()

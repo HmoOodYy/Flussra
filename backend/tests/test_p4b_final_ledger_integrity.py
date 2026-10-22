@@ -131,23 +131,19 @@ async def test_a_locked_period_only_moves_forward_to_archived_and_archived_is_te
 # Ledger read boundary
 # ---------------------------------------------------------------------------
 
-async def test_final_lines_are_served_for_a_finalized_period(
+async def test_raw_final_lines_api_is_retired_while_finalized_summary_retains_frozen_totals(
     p3c_client, p3c_engine, tenant,
 ):
     period = await _finalized_period(p3c_client, p3c_engine, tenant)
     period_id = period["payroll_period_id"]
-    served = await p3c_client.get(f"/payroll/periods/{period_id}/final-lines",
-                                  headers=tenant.admin)
-    assert served.status_code == 200, served.text
-    lines = served.json()
-    assert [Decimal(line["final_amount"]) for line in lines] == [
-        Decimal("0.67"), Decimal("2.00"), Decimal("39.33")]
-    assert all(line["currency_code"] == "USD" and line["currency_minor_unit_digits"] == 2
-               for line in lines)
-    filtered = await p3c_client.get(
-        f"/payroll/periods/{period_id}/final-lines",
-        params={"driver_assignment_id": tenant.driver_a2}, headers=tenant.admin)
-    assert filtered.json() == []
+    retired = await p3c_client.get(f"/payroll/periods/{period_id}/final-lines",
+                                   headers=tenant.admin)
+    assert retired.status_code == 404
+    stored = (await p3c_client.get(f"/payroll/finalized/{period_id}/overview",
+                                   headers=tenant.admin))
+    assert stored.status_code == 200, stored.text
+    assert Decimal(stored.json()["financial_summary"]["total_pay"]) == Decimal("42.00")
+    assert stored.json()["financial_summary"]["final_line_count"] == 3
     listed = await p3c_client.get("/payroll/periods", params={"status": "Locked"},
                                   headers=tenant.admin)
     summary = next(p for p in listed.json() if p["payroll_period_id"] == period_id)
@@ -158,25 +154,11 @@ async def test_final_lines_are_served_for_a_finalized_period(
                                  headers=tenant.admin)).status_code == 404
 
 
-async def test_final_lines_are_not_served_for_a_period_that_is_not_finalized(
-    p3c_client, p3c_engine, tenant,
-):
-    period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
-    period_id = period["payroll_period_id"]
-    for status in ("Open", "Approved"):
-        if status != "Open":
-            force_status(tenant, period_id, status)
-        response = await p3c_client.get(f"/payroll/periods/{period_id}/final-lines",
-                                        headers=tenant.admin)
-        assert response.status_code == 422, (status, response.text)
-
-
 async def test_final_lines_and_finalized_routes_enforce_the_access_boundary(
     p3c_client, p3c_engine, tenant,
 ):
     period = await _finalized_period(p3c_client, p3c_engine, tenant)
     period_id = period["payroll_period_id"]
-    final_lines = f"/payroll/periods/{period_id}/final-lines"
     finalized = [f"/payroll/finalized/{period_id}/overview",
                  f"/payroll/finalized/{period_id}/reports/period-pay",
                  f"/payroll/finalized/{period_id}/off-drivers",
@@ -184,7 +166,6 @@ async def test_final_lines_and_finalized_routes_enforce_the_access_boundary(
                  f"/payroll/finalized/{period_id}/audit"]
 
     viewer = make_user(tenant, ["payroll.view"])
-    assert (await p3c_client.get(final_lines, headers=viewer)).status_code == 200
     denied = {
         "no permission": make_user(tenant, []),
         "driver self": make_driver_self_user(tenant, ["payroll.view", "ledger.view"]),
@@ -193,7 +174,7 @@ async def test_final_lines_and_finalized_routes_enforce_the_access_boundary(
         "other company": build_payroll_tenant(tenant.dsn).admin,
     }
     for label, headers in denied.items():
-        for url in [final_lines, *finalized]:
+        for url in finalized:
             response = await p3c_client.get(url, headers=headers)
             assert response.status_code in (403, 404), (label, url, response.status_code)
             assert period["period_code"] not in response.text, (label, url)

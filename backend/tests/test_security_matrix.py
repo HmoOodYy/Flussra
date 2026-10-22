@@ -44,6 +44,7 @@ from app.payroll_setup.payroll_policy import (
 )
 from tests.builders.access import create_user_with_role_token
 from tests.builders.owned_scope import create_owned_branch
+from tests.builders.workforce import create_workforce_driver
 
 # ---------------------------------------------------------------------------
 # Unique username counter — keeps each test's users separate
@@ -173,17 +174,11 @@ async def _create_driver(
     branch_id: int,
     suffix: str,
 ) -> int:
-    resp = await client.post(
-        "/core/drivers",
-        json={
-            "branch_id": branch_id,
-            "full_name": f"SM Driver {suffix}",
-            "driver_number": f"SMD-{suffix}",
-        },
-        headers=_hdr(token),
+    driver = await create_workforce_driver(
+        client, token, branch_id, full_name=f"SM Driver {suffix}",
+        driver_number=f"SMD-{suffix}",
     )
-    assert resp.status_code == 201, f"Create driver failed: {resp.text}"
-    return resp.json()["driver_assignment_id"]
+    return driver["driver_assignment_id"]
 
 
 async def _cancel_branch_active_periods(
@@ -802,145 +797,6 @@ class TestSecurityMatrix:
         )
         resp = await session_client.get("/review/items", headers=_hdr(tok))
         assert resp.status_code == 403
-
-    # -----------------------------------------------------------------------
-    # 10. Final-lines require payroll read permission
-    # -----------------------------------------------------------------------
-
-    async def test_10_no_payroll_perm_blocked_from_final_lines(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_hq_period_id: int,
-    ):
-        """SpecificBranch user with only drivers.view cannot access final-lines.
-
-        The driver-role block fires first for DRIVER-role users, but this test
-        uses a custom role with 'drivers.view' only (not rolecode='DRIVER').
-        It gets past the driver block but fails the payroll permission check.
-        """
-        no_perm = await _create_role_with_perms(
-            session_client, auth_token, f"SM10NoPerm-{_uid()}", ["drivers.view"]
-        )
-        uname = f"sm10_{_uid()}"
-        user = await _create_user(session_client, auth_token, uname)
-        await _assign_role(
-            session_client, auth_token, user["user_id"], no_perm,
-            scope="SpecificBranch", branch_id=sm_hq_id,
-        )
-        tok = await _login(session_client, uname)
-
-        resp = await session_client.get(
-            f"/payroll/periods/{sm_hq_period_id}/final-lines", headers=_hdr(tok)
-        )
-        assert resp.status_code == 403, (
-            f"No-payroll user must be blocked from final-lines; got {resp.status_code}"
-        )
-
-    # -----------------------------------------------------------------------
-    # 11. Final-lines reject non-Locked/non-Archived periods
-    # -----------------------------------------------------------------------
-
-    async def test_11_final_lines_reject_draft_period(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        direct_db,
-    ):
-        """Final-lines returns 422 for a Draft period."""
-        # Insert a Draft period or find an existing one (Draft slot is unique per branch).
-        try:
-            row = (await direct_db.execute(
-                _sqla_text("""
-                    INSERT INTO payroll.payrollperiods
-                        (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-                    VALUES (1, :bid, 'Draft', 'SM-DRAFT-2097', 'SM Draft 2097', 'Week', :start, :end)
-                    RETURNING payrollperiodid
-                """),
-                {"bid": sm_hq_id,
-                 "start": datetime.date(2097, 1, 6),
-                 "end": datetime.date(2097, 1, 12)},
-            )).mappings().first()
-        except Exception:
-            await direct_db.rollback()
-            row = None
-        if row is None:
-            row = (await direct_db.execute(
-                _sqla_text(
-                    "SELECT payrollperiodid FROM payroll.payrollperiods "
-                    "WHERE companyid = 1 AND branchid = :bid AND status = 'Draft' LIMIT 1"
-                ),
-                {"bid": sm_hq_id},
-            )).mappings().first()
-        pid = row["payrollperiodid"]
-
-        resp = await session_client.get(
-            f"/payroll/periods/{pid}/final-lines",
-            headers=_hdr(auth_token),
-        )
-        assert resp.status_code == 422, (
-            f"Draft period must return 422 for final-lines; got {resp.status_code}"
-        )
-
-    async def test_11_final_lines_reject_open_period(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_period_id: int,
-    ):
-        """Final-lines returns 422 for an Open period."""
-        resp = await session_client.get(
-            f"/payroll/periods/{sm_hq_period_id}/final-lines",
-            headers=_hdr(auth_token),
-        )
-        assert resp.status_code == 422, (
-            f"Open period must return 422 for final-lines; got {resp.status_code}"
-        )
-
-    # -----------------------------------------------------------------------
-    # 12. Driver/DRIVER/Self cannot access final-lines
-    # -----------------------------------------------------------------------
-
-    async def test_12_driver_sb_blocked_from_final_lines(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_driver_role_id: int,
-        sm_hq_period_id: int,
-    ):
-        """Driver+SpecificBranch cannot access final-lines."""
-        tok = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_hq_id
-        )
-        resp = await session_client.get(
-            f"/payroll/periods/{sm_hq_period_id}/final-lines", headers=_hdr(tok)
-        )
-        assert resp.status_code == 403
-
-    async def test_12_driver_self_blocked_from_final_lines(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_driver_role_id: int,
-        sm_hq_period_id: int,
-    ):
-        """DRIVER/Self-scope user cannot access final-lines."""
-        tok = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_hq_id
-        )
-        resp = await session_client.get(
-            f"/payroll/periods/{sm_hq_period_id}/final-lines", headers=_hdr(tok)
-        )
-        assert resp.status_code == 403
-
-    # -----------------------------------------------------------------------
-    # 11b. Final-lines accepted for Locked period
-    #      Advances sm_paytest_period_id through the full lifecycle to Locked.
-    # -----------------------------------------------------------------------
 
     # -----------------------------------------------------------------------
     # 15. The pre-seeded branch_user (PAYROLL_VIEWER_CO + SpecificBranch=HQ)

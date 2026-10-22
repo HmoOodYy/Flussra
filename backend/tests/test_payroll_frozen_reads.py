@@ -314,7 +314,7 @@ async def test_frozen_reads_are_denied_to_users_without_branch_access(
     await decide(p3c_client, tenant, review_item)
     await finalize(p3c_client, tenant, period)
 
-    paths = [f"/payroll/periods/{pid}/reports/drivers", f"/payroll/periods/{pid}/final-lines",
+    paths = [f"/payroll/periods/{pid}/reports/drivers",
              *[f"/payroll/finalized/{pid}/{view}" for view in FINALIZED_VIEWS]]
     for path in paths:
         response = await p3c_client.get(path, headers=other_branch)

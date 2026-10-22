@@ -155,7 +155,8 @@ async def test_account_lifecycle_endpoints_keep_existing_access_permission_gate(
 async def test_staged_login_role_guard_and_password_reset_preserve_state(client, auth_token, db_conn):
     user = await staged_user(client, auth_token)
     uid = user["user_id"]
-    assert user["is_staged"] is True and user["can_login"] is False and not user["role_assignments"]
+    assert user["is_staged"] is True and user["can_login"] is False
+    assert user["company_role_assignment_id"] is None
     login = await client.post("/auth/login", json={"username": user["username"], "password": "TestPass123!", "company_code": "DEMO"})
     assert login.status_code == 403 and login.json()["detail"]["code"] == "account_staged"
     token = create_access_token(user_id=uid, company_id=user["company_id"])
@@ -163,11 +164,10 @@ async def test_staged_login_role_guard_and_password_reset_preserve_state(client,
     assert me.status_code == 403 and me.json()["detail"]["code"] == "account_staged"
 
     role_id = await company_role(client, auth_token, "PAYROLL_VIEWER_CO")
-    legacy_role = (await client.get("/admin/roles", headers=auth(auth_token))).json()[0]["role_id"]
     direct = await client.post(f"/admin/users/{uid}/company-role-assignments", json={"company_role_id": role_id, "scope_type": "AllCompanyBranches"}, headers=auth(auth_token))
     assert direct.status_code == 422
-    direct = await client.post(f"/admin/users/{uid}/roles", json={"role_id": legacy_role, "scope_type": "AllCompanyBranches"}, headers=auth(auth_token))
-    assert direct.status_code == 422
+    direct = await client.post(f"/admin/users/{uid}/roles", json={}, headers=auth(auth_token))
+    assert direct.status_code == 404
     enabled = await client.patch(f"/admin/users/{uid}", json={"can_login": True}, headers=auth(auth_token))
     assert enabled.status_code == 422
     await db_conn.execute(text("UPDATE sec.Users SET IsStaged = FALSE WHERE UserID=:uid"), {"uid": uid})
@@ -211,22 +211,22 @@ async def test_provisioning_atomicity_and_final_role_lifecycle(client, auth_toke
 
 
 @pytest.mark.asyncio
-async def test_provisioned_user_requires_login_disable_before_final_role_revoke(client, auth_token):
+async def test_provisioned_user_requires_login_disable_before_company_role_revoke(client, auth_token):
     role_id = await company_role(client, auth_token, "PAYROLL_VIEWER_CO")
     user = await client.post("/admin/users", json=user_payload(staged=False, role_assignment={"company_role_id": role_id, "scope_type": "AllCompanyBranches"}, can_login=True), headers=auth(auth_token))
     assert user.status_code == 201, user.text
     uid = user.json()["user_id"]
     assignment_id = user.json()["company_role_assignment_id"]
-    global_roles = (await client.get("/admin/roles", headers=auth(auth_token))).json()
-    legacy_role = next(role["role_id"] for role in global_roles if role["role_code"] == "PAYROLL_VIEWER")
-    legacy = await client.post(f"/admin/users/{uid}/roles", json={"role_id": legacy_role, "scope_type": "AllCompanyBranches"}, headers=auth(auth_token))
-    assert legacy.status_code == 201, legacy.text
-    swapped = await client.delete(f"/admin/users/{uid}/company-role-assignments/{assignment_id}", headers=auth(auth_token))
-    assert swapped.status_code == 200
-    rejected = await client.delete(f"/admin/users/{uid}/roles/{legacy.json()['assignment_id']}", headers=auth(auth_token))
+    rejected = await client.delete(
+        f"/admin/users/{uid}/company-role-assignments/{assignment_id}",
+        headers=auth(auth_token),
+    )
     assert rejected.status_code == 422
     await client.patch(f"/admin/users/{uid}", json={"can_login": False}, headers=auth(auth_token))
-    revoked = await client.delete(f"/admin/users/{uid}/roles/{legacy.json()['assignment_id']}", headers=auth(auth_token))
+    revoked = await client.delete(
+        f"/admin/users/{uid}/company-role-assignments/{assignment_id}",
+        headers=auth(auth_token),
+    )
     assert revoked.status_code == 200
     still_staged = await client.get(f"/admin/users/{uid}", headers=auth(auth_token))
     assert still_staged.json()["is_staged"] is True
@@ -254,7 +254,8 @@ async def test_create_modes_and_driver_boundary_are_access_only(client, auth_tok
     pending = await provision(client, auth_token, staged["user_id"], driver_role, scope="Self")
     assert pending.status_code == 422
     still_staged = await client.get(f"/admin/users/{staged['user_id']}", headers=auth(auth_token))
-    assert still_staged.json()["is_staged"] is True and not still_staged.json()["role_assignments"]
+    assert still_staged.json()["is_staged"] is True
+    assert still_staged.json()["company_role_assignment_id"] is None
 
     staged_current = await staged_user(client, auth_token, employee_id=current["employee_id"])
     accepted = await provision(client, auth_token, staged_current["user_id"], driver_role, scope="Self")

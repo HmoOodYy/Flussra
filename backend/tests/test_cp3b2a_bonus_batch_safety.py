@@ -202,22 +202,17 @@ async def cp3b2a_driver_assignment_id(
     session_client: httpx.AsyncClient, auth_token: str, cp3b2a_branch_id: int,
 ) -> int:
     driver_number = f"CP3B2A-DRV-{_BASE_MONDAY.isoformat()}"
-    r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
+    r_list = await session_client.get("/core/driver-assignments", headers=_auth(auth_token))
     if r_list.status_code == 200:
         for d in r_list.json():
-            if d.get("driver_number") == driver_number:
+            if d.get("driver_number") == driver_number and d["branch_id"] == cp3b2a_branch_id:
                 return d["driver_assignment_id"]
-    resp = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id": cp3b2a_branch_id,
-            "full_name": "CP3B2A Bonus Driver",
-            "driver_number": driver_number,
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, cp3b2a_branch_id,
+        "CP3B2A Bonus Driver", driver_number,
     )
-    assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_assignment_id"]
+    return driver["driver_assignment_id"]
 
 
 async def _snapshot_entry(driver_assignment_id: int) -> dict:

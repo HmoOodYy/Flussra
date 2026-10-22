@@ -146,7 +146,8 @@ async def test_provenance_of_another_json_type_or_shape_fails_the_final_lines_cl
             await verify_final_lines(conn, content)
     assert failed.value.code == "FINAL_LINES_INTEGRITY_ERROR", label
 
-    for path in (f"/payroll/periods/{pid}/final-lines", f"/payroll/finalized/{pid}/overview",
+    assert (await p3c_client.get(f"/payroll/periods/{pid}/final-lines", headers=tenant.admin)).status_code == 404
+    for path in (f"/payroll/finalized/{pid}/overview",
                  f"/payroll/finalized/{pid}/reports/drivers", f"/payroll/periods/{pid}/reports/drivers"):
         response = await p3c_client.get(path, headers=tenant.admin)
         assert response.status_code == 422, (label, path, response.status_code)

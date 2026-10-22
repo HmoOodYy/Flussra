@@ -40,11 +40,10 @@ _WRITE_BLOCKED_STATUSES = {"Draft", "InReview", "Approved", "Locked", "Archived"
 class DraftLineSummary(BaseModel):
     """One source row.
 
-    Ordinary PayDefinition rows carry ``payroll_period_definition_id`` (their identity)
-    and no ``line_type``. Their money is never stored: ``calculated_amount`` and
-    ``needs_manager_review`` are DERIVED live from the effective DriverRateSchedule
-    when the row is read (and are NULL / False where a read does not derive them).
-    Temporary Status/internal compatibility rows carry ``line_type`` instead.
+    Ordinary PayDefinition rows carry ``payroll_period_definition_id`` as their identity.
+    Status and notes are exposed through the Day Grid's canonical EntryState contract.
+    Money is derived live from the effective DriverRateSchedule, never read from stored
+    amount columns.
     """
     __module__ = "app.payroll.schemas"
     draft_line_id: int
@@ -62,7 +61,6 @@ class DraftLineSummary(BaseModel):
     input_type: str | None = None
     unit: str | None = None
     calculation_method: str | None = None
-    line_type: str | None = None
     quantity: Decimal
     rate_amount: Decimal | None = None
     calculated_amount: Decimal | None = None
@@ -292,37 +290,6 @@ class DayGridSaveRequest(BaseModel):
     __module__ = "app.payroll.schemas"
     work_date: date
     rows: list[DayGridSaveRow]
-
-
-
-# ---------------------------------------------------------------------------
-# CP-2.5 — Period-level Drivers Off
-# ---------------------------------------------------------------------------
-
-class DriversOffEntry(BaseModel):
-    __module__ = "app.payroll.schemas"
-    driver_assignment_id: int
-    driver_id: int
-    driver_name: str
-    driver_number: str | None = None
-    work_date: date
-    status_key_code: str
-    status_label: str | None = None
-    notes: str | None = None
-
-
-
-class DriversOffResponse(BaseModel):
-    __module__ = "app.payroll.schemas"
-    period_id: int
-    entries: list[DriversOffEntry]
-    total_count: int
-    # Stage B3 Unit 8C-7: set only for Locked/Archived periods, where entries
-    # come from immutable calculation-snapshot evidence rather than live
-    # PayrollStatusKeys. Reuses the same {state, reason_code} shape already
-    # established for Day Grid (Unit 8C-3) and CP-5B Off Drivers (Unit 8C-5).
-    # None for Draft/Open/InReview/Returned/Approved.
-    status_evidence: FinalizedSectionAvailability | None = None
 
 
 

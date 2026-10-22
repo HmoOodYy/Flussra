@@ -72,6 +72,17 @@ async def _link_driver(
     return int(record["driver"]["driver_id"])
 
 
+async def _employee_for_user(client: httpx.AsyncClient, token: str, user_id: int) -> dict:
+    user = await client.get(f"/admin/users/{user_id}", headers=auth(token))
+    assert user.status_code == 200, user.text
+    employee_id = user.json().get("employee_id")
+    if employee_id is None:
+        return {"driver": None, "current_or_pending_assignment": None}
+    response = await client.get(f"/workforce/employees/{employee_id}", headers=auth(token))
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
 # ===========================================================================
 # Driver branch immutability
 # ===========================================================================
@@ -117,13 +128,11 @@ class TestDriverBranchImmutability:
         assert r1.status_code == 201, r1.text
 
         # Get driver info — should be on HQ branch
-        info1 = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
-        assert info1.status_code == 200
-        data1 = info1.json()
-        assert data1["has_driver"] is True
-        assert data1["driver_id"] == original_driver_id
-        assert data1["branch_id"] == hq_branch_id
-        assert data1["driver_assignment_id"] is not None
+        data1 = await _employee_for_user(session_client, auth_token, user_id)
+        assignment1 = data1["current_or_pending_assignment"]
+        assert data1["driver"]["driver_id"] == original_driver_id
+        assert assignment1["branch_id"] == hq_branch_id
+        assert assignment1["driver_assignment_id"] is not None
 
         # Attempt the retired branch-scoped assignment shape.
         r2 = await session_client.post(
@@ -136,14 +145,13 @@ class TestDriverBranchImmutability:
         assert "self scope" in r2.text.lower()
 
         # Verify the rejected role reassignment left the profile unchanged.
-        info2 = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
-        assert info2.status_code == 200
-        data2 = info2.json()
-        assert data2["branch_id"] == hq_branch_id
+        data2 = await _employee_for_user(session_client, auth_token, user_id)
+        assignment2 = data2["current_or_pending_assignment"]
+        assert assignment2["branch_id"] == hq_branch_id
 
         # DriverID and assignment must be unchanged (no duplicate created)
-        assert data2["driver_id"] == original_driver_id
-        assert data2["driver_assignment_id"] == data1["driver_assignment_id"]
+        assert data2["driver"]["driver_id"] == original_driver_id
+        assert assignment2["driver_assignment_id"] == assignment1["driver_assignment_id"]
 
     @pytest.mark.asyncio
     async def test_non_driver_role_no_profile_created(
@@ -185,8 +193,7 @@ class TestDriverBranchImmutability:
         assert assign_resp.status_code == 201, assign_resp.text
 
         # Admin checks driver info for the new user — should have no driver profile
-        info = await session_client.get(f"/admin/users/{user_id}/driver", headers=auth(auth_token))
-        assert info.status_code == 200
-        assert info.json()["has_driver"] is False, (
+        info = await _employee_for_user(session_client, auth_token, user_id)
+        assert info["driver"] is None, (
             "Assigning a non-DRIVER role must not create a driver profile"
         )

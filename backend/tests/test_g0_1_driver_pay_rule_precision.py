@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from app.payroll.schemas import DriverPayRuleCreate
 from tests.builders.pay_rules import ensure_branch_pay_calendar
+from tests.builders.workforce import create_workforce_driver
 
 
 def _create_payload(amount: str) -> dict:
@@ -42,17 +43,11 @@ async def test_typed_driver_pay_rule_amount_is_normalized_persisted_and_audited(
     direct_db,
 ):
     suffix = random.randint(100000, 999999)
-    driver_response = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id": paytest_branch_id,
-            "full_name": f"G0.1 precision {suffix}",
-            "driver_number": f"G01-{suffix}",
-        },
-        headers={"Authorization": f"Bearer {auth_token}"},
+    driver = await create_workforce_driver(
+        session_client, auth_token, paytest_branch_id,
+        full_name=f"G0.1 precision {suffix}", driver_number=f"G01-{suffix}",
     )
-    assert driver_response.status_code == 201, driver_response.text
-    driver_id = driver_response.json()["driver_id"]
+    driver_id = driver["driver_id"]
     await ensure_branch_pay_calendar(direct_db, 1, paytest_branch_id)
 
     response = await session_client.post(
@@ -93,17 +88,11 @@ async def test_pay_rule_amount_that_rounds_to_zero_creates_no_row_or_audit(
     direct_db,
 ):
     suffix = random.randint(100000, 999999)
-    driver_response = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id": paytest_branch_id,
-            "full_name": f"G0.1 rejected precision {suffix}",
-            "driver_number": f"G01R-{suffix}",
-        },
-        headers={"Authorization": f"Bearer {auth_token}"},
+    driver = await create_workforce_driver(
+        session_client, auth_token, paytest_branch_id,
+        full_name=f"G0.1 rejected precision {suffix}", driver_number=f"G01R-{suffix}",
     )
-    assert driver_response.status_code == 201, driver_response.text
-    driver_id = driver_response.json()["driver_id"]
+    driver_id = driver["driver_id"]
     await ensure_branch_pay_calendar(direct_db, 1, paytest_branch_id)
     effective_from = date(2192, 1, 1)
 

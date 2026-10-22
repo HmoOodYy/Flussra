@@ -59,19 +59,13 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
 }
 
 
-# What makes a period non-empty for submit and resubmit: a non-voided payroll source line, an
-# Active Bonus event, or a canonical Status selection (a non-void day entry that holds a Status).
-# A note is never payroll content: the DailyNote compatibility row a note save writes, and a day
-# entry that only carries a note, are excluded. The canonical selection is the Status
-# authority; a legacy DailyStatus row still counts as a source line so that a Status that exists
-# only as that legacy row reaches (and is refused by) the canonicalization blocker, but it is
-# never required for a canonical Status to count. An ordinary pay line has no line type (NULL),
-# so the note row is excluded with IS DISTINCT FROM, which keeps a NULL line type counted.
+# A period has payroll content only when it has an ordinary measured source quantity,
+# an Active Bonus event, or a canonical Status selection. Notes alone are not content.
 _PERIOD_CONTENT_SQL = """
     SELECT (
         SELECT COUNT(*) FROM payroll.payrolldraftlines
         WHERE  payrollperiodid = :pid AND companyid = :cid
-          AND  status != 'Void' AND linetype IS DISTINCT FROM 'DailyNote'
+          AND  status != 'Void' AND payrollperioddefinitionid IS NOT NULL
     ) + (
         SELECT COUNT(*) FROM payroll.payrollbonusevents
         WHERE  payrollperiodid = :pid AND companyid = :cid
