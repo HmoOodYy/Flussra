@@ -25,6 +25,7 @@ from tests.compensation_database_fixtures import (  # noqa: F401 - register fixt
     p3b_database,
 )
 from tests.payroll_runtime_fixtures import (
+    add_driver,
     build_payroll_tenant,
     open_period_with_grid,
     query,
@@ -523,6 +524,125 @@ async def test_a_semantic_edit_of_an_already_used_status_is_still_refused(
     finally:
         conn.close()
     assert _status_state(tenant, flip)[0] is False
+
+
+# ---------------------------------------------------------------------------
+# Moving a row to another slot
+# ---------------------------------------------------------------------------
+#
+# The slot of the rule is (period, assignment, date). Nothing makes those columns immutable, so
+# the database must judge the destination of a move exactly as it judges an insert there.
+
+_MOVE_ENTRY = ("UPDATE payroll.payrollperioddriverdayentrystate SET {sets} "
+               "WHERE payrollperiodid = %s AND driverassignmentid = %s AND workdate = %s")
+_MOVE_WORK = ("UPDATE payroll.payrolldraftlines SET {sets} "
+              "WHERE payrollperiodid = %s AND driverassignmentid = %s AND workdate = %s "
+              "AND payrollperioddefinitionid IS NOT NULL AND status <> 'Void'")
+
+
+def _move_entry(cur, period, driver, from_offset, **to):
+    sets = ", ".join(f"{column} = %s" for column in to)
+    cur.execute(_MOVE_ENTRY.format(sets=sets),
+                (*[_day_or(period, value) for value in to.values()],
+                 period["payroll_period_id"], driver, _day(period, from_offset)))
+
+
+def _move_work(cur, period, driver, from_offset, **to):
+    sets = ", ".join(f"{column} = %s" for column in to)
+    cur.execute(_MOVE_WORK.format(sets=sets),
+                (*[_day_or(period, value) for value in to.values()],
+                 period["payroll_period_id"], driver, _day(period, from_offset)))
+    assert cur.rowcount == 1
+
+
+def _day_or(period, value):
+    """A WorkDate given as a day offset becomes its date; anything else is used as is."""
+    return _day(period, value[1]) if isinstance(value, tuple) else value
+
+
+async def test_an_off_status_cannot_be_moved_onto_a_day_that_has_ordinary_work(
+    p3c_client, p3c_engine, tenant,
+):
+    period, ppd = await _scene(p3c_client, p3c_engine, tenant)
+    driver = tenant.driver_a
+    assert (await _add_line(p3c_client, tenant, period, ppd, "5", offset=1)).status_code == 201
+    conn = _connect(tenant)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            _insert_off_selection(cur, tenant, period, driver, 0)
+            with pytest.raises(psycopg2.errors.CheckViolation, match=CONFLICT):
+                _move_entry(cur, period, driver, 0, workdate=("day", 1))
+    finally:
+        conn.close()
+    assert _status_of(tenant, period, driver, 0) == "OFF"
+    assert _status_of(tenant, period, driver, 1) is None
+    assert _quantity_of(tenant, period, driver, ppd, 1) == 5
+
+
+async def test_ordinary_work_cannot_be_moved_onto_a_full_day_off(p3c_client, p3c_engine, tenant):
+    period, ppd = await _scene(p3c_client, p3c_engine, tenant)
+    driver = tenant.driver_a
+    assert (await _add_line(p3c_client, tenant, period, ppd, "5", offset=1)).status_code == 201
+    conn = _connect(tenant)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            _insert_off_selection(cur, tenant, period, driver, 0)
+            with pytest.raises(psycopg2.errors.CheckViolation, match=CONFLICT):
+                _move_work(cur, period, driver, 1, workdate=("day", 0))
+    finally:
+        conn.close()
+    assert _status_of(tenant, period, driver, 0) == "OFF"
+    assert _quantity_of(tenant, period, driver, ppd, 1) == 5
+    assert not _quantity_of(tenant, period, driver, ppd, 0)
+
+
+async def test_a_move_to_a_slot_that_does_not_conflict_still_succeeds(
+    p3c_client, p3c_engine, tenant,
+):
+    period, ppd = await _scene(p3c_client, p3c_engine, tenant)
+    driver = tenant.driver_a
+    assert (await _add_line(p3c_client, tenant, period, ppd, "5", offset=1)).status_code == 201
+    conn = _connect(tenant)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            _insert_off_selection(cur, tenant, period, driver, 0)
+            _move_entry(cur, period, driver, 0, workdate=("day", 2))     # onto an empty day
+            _move_work(cur, period, driver, 1, workdate=("day", 3))      # onto an empty day
+    finally:
+        conn.close()
+    assert _status_of(tenant, period, driver, 2) == "OFF" and _status_of(tenant, period, driver, 0) is None
+    assert _quantity_of(tenant, period, driver, ppd, 3) == 5 and not _quantity_of(tenant, period, driver, ppd, 1)
+
+
+async def test_a_row_moved_to_another_assignment_is_judged_in_the_destination_slot(
+    p3c_client, p3c_engine, tenant,
+):
+    """The assignment is part of the slot: handing a worked day's row to the assignment that is
+    off that day, or the off Status to the assignment that works that day, is refused."""
+    other = add_driver(tenant)            # a further Driver of the Branch, on the period roster
+    period, ppd = await _scene(p3c_client, p3c_engine, tenant)
+    driver = tenant.driver_a
+    assert (await _add_line(p3c_client, tenant, period, ppd, "5", offset=0, driver=other)
+            ).status_code == 201
+    conn = _connect(tenant)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            _insert_off_selection(cur, tenant, period, driver, 0)
+            # The other assignment's work moved onto the assignment that is off that day.
+            with pytest.raises(psycopg2.errors.CheckViolation, match=CONFLICT):
+                _move_work(cur, period, other, 0, driverassignmentid=driver)
+            # The off Status moved onto the assignment that works that day.
+            with pytest.raises(psycopg2.errors.CheckViolation, match=CONFLICT):
+                _move_entry(cur, period, driver, 0, driverassignmentid=other)
+    finally:
+        conn.close()
+    assert _status_of(tenant, period, driver, 0) == "OFF"
+    assert _quantity_of(tenant, period, other, ppd, 0) == 5
+    assert not _quantity_of(tenant, period, driver, ppd, 0)
 
 
 async def test_concurrent_application_writers_never_leave_an_off_day_with_work(

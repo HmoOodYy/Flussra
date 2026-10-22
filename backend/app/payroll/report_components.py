@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll.period_definitions import list_period_definition_rows
@@ -84,8 +85,56 @@ def summarize_status_entries(statuses: list[dict[str, Any]]) -> dict[int, list[d
                         for key, count in values.items()] for driver_assignment_id, values in grouped.items()}
 
 
-def frozen_operational_rows(content: dict[str, Any]) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
-    """Drivers and per-day work of a frozen period: identity and source lines of the snapshot."""
+def _status_only_assignment_ids(content: dict[str, Any]) -> set[int]:
+    """DriverAssignments that the frozen Status evidence names but no Driver total does."""
+    with_totals = {int(total["DriverAssignmentID"]) for total in content["DriverTotals"]}
+    return {
+        int(entry["DriverAssignmentID"]) for entry in content["ReportEvidence"]["StatusEntries"]
+    } - with_totals
+
+
+async def frozen_status_only_identities(
+    content: dict[str, Any], *, period_id: int, company_id: int, branch_id: int,
+    db: AsyncConnection,
+) -> dict[int, dict[str, Any]]:
+    """Number and name of the Drivers that only frozen Status evidence represents.
+
+    A Driver whose Statuses are all non-monetary has Status evidence but no Driver total, so the
+    snapshot holds no number or name for it. They come from the period's frozen eligibility
+    roster (DriverNumberSnapshot / DriverNameSnapshot), the same frozen source the finalized
+    Off-drivers and library readers use for a Driver without totals; nothing is read from the
+    live Driver or Employee.
+    """
+    ids = sorted(_status_only_assignment_ids(content))
+    if not ids:
+        return {}
+    rows = (await db.execute(text("""
+        SELECT driverassignmentid, drivernumbersnapshot, drivernamesnapshot
+        FROM payroll.payrollperioddrivereligibility
+        WHERE payrollperiodid = :period_id AND companyid = :company_id
+          AND branchid = :branch_id AND driverassignmentid = ANY(:ids)
+    """), {"period_id": period_id, "company_id": company_id, "branch_id": branch_id,
+           "ids": ids})).mappings().all()
+    return {
+        int(row["driverassignmentid"]): {
+            "driver_number": row["drivernumbersnapshot"],
+            "driver_name": row["drivernamesnapshot"],
+        } for row in rows
+    }
+
+
+def frozen_operational_rows(
+    content: dict[str, Any],
+    status_only_identities: dict[int, dict[str, Any]] | None = None,
+) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
+    """Drivers and per-day work of a frozen period: identity and source lines of the snapshot.
+
+    The roster is every Driver the verified frozen evidence represents: the Drivers with a total,
+    and the Drivers that only a frozen Status entry names (all their Statuses non-monetary). The
+    latter have no total, component or work line; they appear with their frozen Status entries
+    and their financial sections stay empty. ``status_only_identities`` supplies their frozen
+    number and name (see ``frozen_status_only_identities``).
+    """
     drivers: dict[int, dict[str, Any]] = {}
     work: list[dict[str, Any]] = []
     for total in content["DriverTotals"]:
@@ -107,6 +156,16 @@ def frozen_operational_rows(content: dict[str, Any]) -> tuple[dict[int, dict[str
                     "definition_name": names.get(line["PayrollPeriodDefinitionID"]),
                     "quantity": line["Quantity"], "line_scope": "Daily",
                 })
+    identities = status_only_identities or {}
+    for entry in content["ReportEvidence"]["StatusEntries"]:
+        assignment_id = int(entry["DriverAssignmentID"])
+        if assignment_id not in drivers:
+            identity = identities.get(assignment_id, {})
+            drivers[assignment_id] = {
+                "driver_assignment_id": assignment_id, "driver_id": int(entry["DriverID"]),
+                "driver_number": identity.get("driver_number"),
+                "driver_name": identity.get("driver_name"),
+            }
     return drivers, work
 
 

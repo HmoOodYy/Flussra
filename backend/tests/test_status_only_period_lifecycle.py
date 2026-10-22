@@ -41,7 +41,11 @@ from tests.compensation_database_fixtures import (  # noqa: F401 - register fixt
     p3b_database,
 )
 from tests.db_state import replica_replication_role
-from tests.payroll_runtime_fixtures import build_payroll_tenant, seed_status_key
+from tests.payroll_runtime_fixtures import (
+    add_driver,
+    build_payroll_tenant,
+    seed_status_key,
+)
 
 pytestmark = pytest.mark.asyncio
 D = Decimal
@@ -418,3 +422,114 @@ async def test_a_snapshot_with_neither_a_component_nor_status_evidence_cannot_be
     assert period_status(tenant, period) == "Approved"
     assert rows(tenant, "SELECT count(*) FROM payroll.payrollfinallines "
                         "WHERE payrollperiodid = %s", period["payroll_period_id"]) == [(0,)]
+
+
+# ---------------------------------------------------------------------------
+# Frozen reports list a Driver that only non-monetary Status evidence represents
+# ---------------------------------------------------------------------------
+
+REPORT_VIEWS = ("drivers", "period-work", "period-pay", "mixed")
+
+
+async def _get_ok(client, tenant, path: str) -> dict:
+    response = await client.get(path, headers=tenant.admin)
+    assert response.status_code == 200, (path, response.text)
+    return response.json()
+
+
+def _roster_identity(tenant, period, assignment_id: int) -> tuple:
+    """The frozen number and name of a Driver on the period's eligibility roster."""
+    return rows(tenant, """
+        SELECT drivernumbersnapshot, drivernamesnapshot
+        FROM payroll.payrollperioddrivereligibility
+        WHERE payrollperiodid = %s AND driverassignmentid = %s
+    """, period["payroll_period_id"], assignment_id)[0]
+
+
+def _assert_evidence_only_driver(body: dict, tenant, period) -> None:
+    (driver,) = body["drivers"]
+    number, name = _roster_identity(tenant, period, tenant.driver_a)
+    assert driver["driver_assignment_id"] == tenant.driver_a
+    assert (driver["driver_number"], driver["driver_name"]) == (number, name)
+    (entry,) = driver["work"]["status_entries"]
+    assert (entry["code"], entry["label"], entry["is_off"]) == ("UNPAID", "UNPAID", True)
+    assert D(str(entry["hours_value"])) == D("8") and entry["category"] == "Other"
+    assert driver["work"]["daily_rows"] == []
+    assert driver["pay"] is None and driver["bonus_events"] == []
+    # The financial sections stay empty: nothing was fabricated for the Driver.
+    assert all(D(str(value)) == 0 for value in body["pay_totals"].values())
+    assert body["work_totals"] == []
+
+
+async def test_approved_period_reports_list_a_driver_represented_only_by_status_evidence(
+    p3c_client, p3c_engine, tenant,
+):
+    period, snapshot_id = await _approved_non_monetary_period(p3c_client, p3c_engine, tenant)
+    pid = period["payroll_period_id"]
+
+    for view in REPORT_VIEWS:
+        body = await _get_ok(p3c_client, tenant, f"/payroll/periods/{pid}/reports/{view}")
+        assert body["metadata"]["snapshot_id"] == snapshot_id
+        assert body["metadata"]["report_evidence_available"] is True
+        _assert_evidence_only_driver(body, tenant, period)
+
+    # No total, component or FinalLine was created for the Driver.
+    assert rows(tenant, """
+        SELECT (SELECT count(*) FROM payroll.payrollcalculationdrivertotals
+                WHERE payrollcalculationsnapshotid = %s),
+               (SELECT count(*) FROM payroll.payrollcalculationsnapshotcomponents
+                WHERE payrollcalculationsnapshotid = %s),
+               (SELECT count(*) FROM payroll.payrollfinallines WHERE payrollperiodid = %s)
+    """, snapshot_id, snapshot_id, pid) == [(0, 0, 0)]
+
+
+async def test_finalized_reports_list_the_driver_from_the_frozen_evidence_only(
+    p3c_client, p3c_engine, tenant,
+):
+    period, snapshot_id = await _approved_non_monetary_period(p3c_client, p3c_engine, tenant)
+    pid = period["payroll_period_id"]
+    await finalize(p3c_client, tenant, period)
+    # Live changes after finalization must not reach the report: the Status is renamed and the
+    # Driver's roster identity in the live Employee record changes.
+    rows(tenant, "UPDATE payroll.payrollstatuskeys SET keyname = 'Renamed', "
+                 "normalizedkeyname = 'renamed' WHERE statuscode = 'UNPAID' RETURNING 1")
+    rows(tenant, """
+        UPDATE core.employees SET fullname = 'Renamed After Finalization'
+        WHERE employeeid = (SELECT employeeid FROM core.driverassignments
+                            WHERE driverassignmentid = %s) RETURNING 1
+    """, tenant.driver_a)
+
+    for view in REPORT_VIEWS:
+        body = await _get_ok(p3c_client, tenant, f"/payroll/finalized/{pid}/reports/{view}")
+        assert body["metadata"]["snapshot_id"] == snapshot_id
+        assert body["metadata"]["section_availability"]["report_evidence"]["state"] == "AVAILABLE"
+        _assert_evidence_only_driver(body, tenant, period)
+
+
+async def test_a_monetary_driver_and_an_evidence_only_driver_share_one_frozen_report(
+    p3c_client, p3c_engine, tenant,
+):
+    """The roster grows by the evidence-only Driver only: the monetary Driver keeps its pay, and
+    the evidence-only Driver has no pay section."""
+    other = add_driver(tenant)
+    status_pay_setup(tenant, "25")
+    seed_status_key(tenant, "UNPAID", off=True, hoursvalue=D("8"))
+    period, _, _ = await open_period(p3c_client, p3c_engine, tenant)
+    await enter(p3c_client, tenant, period, 0, status_key="PAID")
+    await enter(p3c_client, tenant, period, 0, status_key="UNPAID", driver=other)
+    allow_self_approval(tenant)
+    await submit(p3c_client, tenant, period)
+    await decide(p3c_client, tenant, await pending_review_item(tenant, period))
+    pid = period["payroll_period_id"]
+
+    for path in (f"/payroll/periods/{pid}/reports/mixed", f"/payroll/periods/{pid}/reports/period-work"):
+        body = await _get_ok(p3c_client, tenant, path)
+        by_id = {d["driver_assignment_id"]: d for d in body["drivers"]}
+        assert set(by_id) == {tenant.driver_a, other}
+        assert by_id[other]["pay"] is None
+        assert by_id[other]["work"]["status_entries"][0]["code"] == "UNPAID"
+        assert [e["code"] for e in by_id[tenant.driver_a]["work"]["status_entries"]] == ["PAID"]
+    mixed = await _get_ok(p3c_client, tenant, f"/payroll/periods/{pid}/reports/mixed")
+    monetary = next(d for d in mixed["drivers"] if d["driver_assignment_id"] == tenant.driver_a)
+    assert D(str(monetary["pay"]["status_pay"])) == D("25.00")
+    assert D(str(mixed["pay_totals"]["total_pay"])) == D("25.00")

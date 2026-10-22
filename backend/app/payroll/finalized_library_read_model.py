@@ -42,6 +42,7 @@ from app.payroll.report_components import (
     aggregate_definition_amounts,
     frozen_financial_packet,
     frozen_operational_rows,
+    frozen_status_only_identities,
     load_financial_definition_columns,
     load_report_columns,
     summarize_status_entries,
@@ -555,7 +556,10 @@ async def build_finalized_report(
     evidence_hash: str | None = None
     evidence_availability = _availability("UNAVAILABLE", provenance["reason_code"])
     if snapshot is not None:
-        frozen_drivers, work_rows = frozen_operational_rows(snapshot["content"])
+        frozen_drivers, work_rows = frozen_operational_rows(
+            snapshot["content"], await frozen_status_only_identities(
+                snapshot["content"], period_id=int(period["payrollperiodid"]),
+                company_id=int(period["companyid"]), branch_id=int(period["branchid"]), db=db))
         evidence_available, evidence_version, evidence_hash, statuses, bonuses = _snapshot_evidence(
             snapshot,
         )

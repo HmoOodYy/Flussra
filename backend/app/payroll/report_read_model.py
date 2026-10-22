@@ -33,6 +33,7 @@ from app.payroll.report_components import (
 from app.payroll.report_components import (
     frozen_financial_packet,
     frozen_operational_rows,
+    frozen_status_only_identities,
 )
 from app.payroll.report_components import (
     load_financial_definition_columns as _definition_columns,
@@ -261,9 +262,13 @@ async def build_report(*, report_type: str, period_id: int, company_id: int, use
         _definition_amounts(lines, definition_column_ids)
         per_driver_definitions, definition_total_map = _official_definition_amounts(
             financial_totals, definition_column_ids)
-    operational_drivers, work_rows = (
-        frozen_operational_rows(frozen) if frozen is not None
-        else await _operational_rows(period, db))
+    if frozen is not None:
+        operational_drivers, work_rows = frozen_operational_rows(
+            frozen, await frozen_status_only_identities(
+                frozen, period_id=int(period["payrollperiodid"]), company_id=company_id,
+                branch_id=int(period["branchid"]), db=db))
+    else:
+        operational_drivers, work_rows = await _operational_rows(period, db)
     drivers = {**operational_drivers}
     for driver_assignment_id, total in financial_totals.items():
         drivers.setdefault(driver_assignment_id, {"driver_assignment_id": driver_assignment_id, "driver_id": total.get("driver_id"), "driver_number": total.get("driver_number"), "driver_name": total.get("driver_name")})

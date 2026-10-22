@@ -819,13 +819,20 @@ BEGIN
 END
 $function$;
 
+-- The slot of the rule is (PayrollPeriodID, DriverAssignmentID, WorkDate), and nothing makes any
+-- of the three immutable on either table, so a row can be moved into another slot by an UPDATE
+-- of only those columns. The triggers therefore also fire when they change, and the function
+-- checks the destination slot with the row's new values exactly as for an insert. A move out of
+-- a slot cannot create a conflict, so only the destination is judged, under its slot lock.
 CREATE TRIGGER trg_PayrollDraftLines_StatusOffWork
-    AFTER INSERT OR UPDATE OF Quantity, Status, PayrollPeriodDefinitionID
+    AFTER INSERT OR UPDATE OF Quantity, Status, PayrollPeriodDefinitionID,
+                              PayrollPeriodID, DriverAssignmentID, WorkDate
     ON payroll.PayrollDraftLines
     FOR EACH ROW EXECUTE FUNCTION payroll.fn_guard_status_off_work();
 
 CREATE TRIGGER trg_PayrollPeriodDriverDayEntryState_StatusOffWork
-    AFTER INSERT OR UPDATE OF StatusKeyID, IsVoided
+    AFTER INSERT OR UPDATE OF StatusKeyID, IsVoided,
+                              PayrollPeriodID, DriverAssignmentID, WorkDate
     ON payroll.PayrollPeriodDriverDayEntryState
     FOR EACH ROW EXECUTE FUNCTION payroll.fn_guard_status_off_work();
 
