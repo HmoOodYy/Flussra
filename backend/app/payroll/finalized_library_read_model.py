@@ -360,7 +360,17 @@ async def _finalized_used_rate_definitions(
         for total in snapshot["content"]["DriverTotals"]
         for component in total["Components"] if component["ComponentKind"] == "STATUS"
     }
+    # The shape and tier values of a used rate are the verified evidence, read as frozen.
+    frozen_rates = {
+        rate["DefinitionFingerprint"]: rate for rate in snapshot["content"]["UsedRates"]}
     definitions = [{
+        "rate_shape": frozen_rates[row["definitionfingerprint"]]["RateShape"],
+        "rate_tiers": [{
+            "sequence_no": tier["SequenceNo"],
+            "rate_component_definition_id": tier["RateComponentDefinitionID"],
+            "ordinal_from": tier["OrdinalFrom"], "ordinal_to": tier["OrdinalTo"],
+            "amount": tier["Amount"],
+        } for tier in frozen_rates[row["definitionfingerprint"]]["Components"] or ()],
         "used_rate_definition_id": int(row["payrollcalculationsnapshotusedratedefinitionid"]),
         "driver_assignment_id": int(row["driverassignmentid"]), "driver_id": int(row["driverid"]),
         "driver_name": row["drivernamesnapshot"],

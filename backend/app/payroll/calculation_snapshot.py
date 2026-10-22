@@ -162,6 +162,16 @@ def _line_content(line: _CalculationPacketLine) -> dict[str, Any]:
         # Descriptors of the rate the line used, for the used-rate evidence. The evidence
         # rows themselves are hashed and the line links to its row by fingerprint.
         "RateComponentDefinitionID": line.rate_component_definition_id,
+        "RateValues": [
+            {
+                "SequenceNo": value.sequence_no,
+                "RateComponentDefinitionID": value.rate_component_definition_id,
+                "OrdinalFrom": value.ordinal_from,
+                "OrdinalTo": value.ordinal_to,
+                "Amount": value.amount,
+            }
+            for value in line.rate_values
+        ],
         "ScheduleStatus": line.schedule_status,
         "ScheduleEffectiveFrom": line.schedule_effective_from,
         "ScheduleEffectiveTo": line.schedule_effective_to,

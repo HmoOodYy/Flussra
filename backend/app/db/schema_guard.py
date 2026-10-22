@@ -270,12 +270,13 @@ def _trigger_exists_and_enabled(cur, trigger_name: str, table_schema: str, table
 # Payroll trust guard — checks all Phase 1–9 required objects
 # ---------------------------------------------------------------------------
 
-# Immutable calculation evidence (migrations 0089 and 0090): the tables of the evidence shape,
-# the columns the writer and the readers depend on, and the objects that protect them.
+# Immutable calculation evidence (migrations 0089, 0090 and 0091): the tables of the evidence
+# shape, the columns the writer and the readers depend on, and the objects that protect them.
 _EVIDENCE_TABLES = (
     "payrollcalculationsnapshotcomponents",
     "payrollcalculationsnapshotminmaxevaluations",
     "payrollcalculationsnapshotminmaxrules",
+    "payrollcalculationsnapshotusedratecomponents",
 )
 _EVIDENCE_COLUMNS = (
     ("payrollcalculationsnapshots", "periodstartdate"),
@@ -297,6 +298,10 @@ _EVIDENCE_COLUMNS = (
     ("payrollcalculationsnapshotusedratedefinitions", "statusratecolumnid"),
     ("payrollcalculationsnapshotstatusentries", "statushoursvaluesnapshot"),
     ("payrollcalculationsnapshotstatusentries", "statuscategorysnapshot"),
+    # Calculation contract v4 (migration 0091): the shape and tier values of a used rate.
+    ("payrollcalculationsnapshotusedratedefinitions", "rateshapesnapshot"),
+    ("payrollcalculationsnapshotusedratecomponents", "amountsnapshot"),
+    ("paydefinitionrequests", "ordinaltiers"),
 )
 _EVIDENCE_RETIRED_COLUMNS = (
     ("payrollcalculationsnapshotlines", "payitemid"),
@@ -311,6 +316,12 @@ _EVIDENCE_IMMUTABLE_TRIGGERS = (
     ("trg_payrollcalculationsnapshotcomponents_immutable", "payrollcalculationsnapshotcomponents"),
     ("trg_payrollcalculationsnapshotminmaxevaluations_immutable", "payrollcalculationsnapshotminmaxevaluations"),
     ("trg_payrollcalculationsnapshotminmaxrules_immutable", "payrollcalculationsnapshotminmaxrules"),
+    ("trg_payrollcalculationsnapshotusedratecomponents_immutable",
+     "payrollcalculationsnapshotusedratecomponents"),
+    ("trg_payrollcalculationsnapshotusedratecomponents_shape",
+     "payrollcalculationsnapshotusedratecomponents"),
+    ("trg_payrollcalculationsnapshotusedratedefinitions_tiers",
+     "payrollcalculationsnapshotusedratedefinitions"),
 )
 _EVIDENCE_FUNCTIONS = (
     "payroll.fn_driverrateusedinfinalizedpayroll(bigint)",
@@ -343,8 +354,8 @@ def _check_calculation_evidence(cur) -> list[str]:
         "AND c.conname = 'ck_payrollcalculationsnapshots_calculationversion'"
     )
     version_check = cur.fetchone()
-    if version_check is None or "payroll-calculation-v3" not in version_check[0]:
-        errors.append("The calculation snapshot version check is not payroll-calculation-v3.")
+    if version_check is None or "payroll-calculation-v4" not in version_check[0]:
+        errors.append("The calculation snapshot version check is not payroll-calculation-v4.")
     return errors
 
 

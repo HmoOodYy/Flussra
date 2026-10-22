@@ -83,7 +83,7 @@ async def test_a_snapshot_freezes_versions_currency_identity_and_totals(
     frozen = await capture(p3c_engine, tenant, period)
     content = await _content(p3c_engine, frozen.snapshot_id)
 
-    assert content["CalculationVersion"] == CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v3"
+    assert content["CalculationVersion"] == CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v4"
     assert (content["PayableRoundingVersion"], content["MinMaxProrationVersion"]) == (
         "payable-rounding-v1", "minmax-proration-v1")
     assert (content["CurrencyCode"], content["CurrencyMinorUnitDigits"]) == ("USD", 2)

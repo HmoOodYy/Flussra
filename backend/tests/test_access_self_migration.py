@@ -204,7 +204,7 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT version_num FROM public.alembic_version")
-            assert cur.fetchone()[0] == "0090"
+            assert cur.fetchone()[0] == "0091"
             cur.execute("""
                 SELECT pg_get_constraintdef(oid)
                 FROM pg_constraint

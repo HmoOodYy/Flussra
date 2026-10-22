@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 MAX_CODE_LENGTH = 50
 MAX_NAME_LENGTH = 200
@@ -81,12 +81,25 @@ class _DefinitionFieldValidators(BaseModel):
         return _method(value)
 
 
+class OrdinalTierInput(BaseModel):
+    """One tier of an OrdinalTier definition's topology: the ordinal positions it covers.
+
+    The last tier has no ``ordinal_to`` (open-ended). Whether the tiers together are a valid
+    topology is decided when the definition is submitted, approved or created.
+    """
+
+    ordinal_from: StrictInt
+    ordinal_to: StrictInt | None = None
+
+
 class DraftFields(_DefinitionFieldValidators):
     definition_code: str | None = None
     definition_name: str | None = None
     input_type: str | None = None
     unit: str | None = None
     calculation_method: str | None = None
+    # The ordered topology of an OrdinalTier definition; absent for PerUnit.
+    ordinal_tiers: list[OrdinalTierInput] | None = None
     notes: str | None = None
 
 
@@ -121,6 +134,7 @@ class PayDefinitionDirectCreate(_DefinitionFieldValidators):
     input_type: str
     unit: str | None = None
     calculation_method: str
+    ordinal_tiers: list[OrdinalTierInput] | None = None
 
 
 class PayDefinitionRequestSummary(BaseModel):
@@ -134,6 +148,7 @@ class PayDefinitionRequestSummary(BaseModel):
     input_type: str | None = None
     unit: str | None = None
     calculation_method: str | None = None
+    ordinal_tiers: list[OrdinalTierInput] | None = None
     notes: str | None = None
     status: str
     revision: int
@@ -413,18 +428,29 @@ class BulkBranchConfigResult(BaseModel):
 
 
 class ScheduleBrief(BaseModel):
+    """One schedule of a Driver and rate definition: its lifecycle, window and every value.
+
+    ``values`` holds one entry per component of the definition (in sequence order), whatever
+    its shape, with a missing value as ``None`` rather than zero. ``amount`` is the one value of
+    a scalar schedule and ``None`` for any other shape.
+    """
+
     driver_rate_schedule_id: int
     status: str
     effective_from: date
     effective_to: date | None = None
     amount: Decimal | None = None
+    values: list[ScheduleValue] = []
 
 
 class DriverPayRateRow(BaseModel):
-    """One authorable PayDefinition or Status rate column and a Driver's scalar rate state.
+    """One authorable PayDefinition or Status rate column and a Driver's rate state.
 
     ``kind`` is "PayDefinition" or "StatusRateColumn". A Status row has no PayDefinition and no
-    code, is labelled by its column name and has no Branch applicability.
+    code, is labelled by its column name and has no Branch applicability. ``rate_shape`` says
+    what a schedule holds: ``Scalar`` (one value, ``rate_component_definition_id`` names its
+    component) or ``OrdinalTierSchedule`` (one value per tier of ``components``, no single
+    component).
     """
 
     kind: str = "PayDefinition"
@@ -435,8 +461,11 @@ class DriverPayRateRow(BaseModel):
     definition_name: str
     input_type: str
     unit: str | None = None
+    calculation_method: str | None = None
+    rate_shape: str = "Scalar"
     rate_definition_id: int
-    rate_component_definition_id: int
+    rate_component_definition_id: int | None = None
+    components: list[RateComponentSummary] = []
     # False when the definition has no active Branch configuration in the Branch of the
     # Driver's context tenure on the reference date (None when the Driver has no tenure
     # that day). Authoring is still allowed; the flag only warns.

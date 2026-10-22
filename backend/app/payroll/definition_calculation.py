@@ -12,13 +12,15 @@ without changing the resolver contract, the period snapshot or any consumer.
 
 Method dispatch is keyed by the FROZEN (method, version) pair of the period
 definition, never by the method name alone and never by live PayDefinition metadata:
-  ("PerUnit", 1)  -> implemented (quantity * the one scalar component, via the CP-4A kernel)
-  ("OrdinalTier", any) and any unregistered pair -> not operational: fails closed with
-  METHOD_NOT_READY. An unknown or future version of PerUnit never runs the V1 algorithm.
+  ("PerUnit", 1)     -> implemented (quantity * the one scalar component, via the CP-4A kernel)
+  ("OrdinalTier", 1) -> implemented (progressive per ordinal unit across the ordered tiers)
+  any other pair     -> not operational: fails closed with METHOD_NOT_READY. An unknown or
+                        future version of a method never runs the V1 algorithm.
 
 Missing, zero and invalid are distinct:
   no authoritative schedule                 -> MISSING_RATE
   schedule but a required value is absent -> INCOMPLETE_RATE
+  quantity the method cannot accept         -> INVALID_QUANTITY
   amount 0                                  -> a valid rate; the result is 0
 """
 
@@ -27,7 +29,14 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 
+from app.compensation.ordinal_topology import topology_error
 from app.compensation.schemas import ResolvedCompensation
+from app.payroll.calculation.ordinal_tier import (
+    ORDINAL_TIER_CALCULATION_VERSION,
+    OrdinalTier,
+    OrdinalTierContribution,
+    calculate_ordinal_tier,
+)
 from app.payroll.calculation.per_unit import (
     PER_UNIT_CALCULATION_VERSION,
     PerUnitInput,
@@ -39,6 +48,7 @@ class CalculationStatus(StrEnum):
     CALCULATED = "Calculated"
     MISSING_RATE = "MissingRate"
     INCOMPLETE_RATE = "IncompleteRate"
+    INVALID_QUANTITY = "InvalidQuantity"
     METHOD_NOT_READY = "MethodNotReady"
 
 
@@ -60,15 +70,31 @@ class PeriodDefinition:
 
 
 @dataclass(frozen=True)
+class UsedRateValue:
+    """One schedule value a multi-component method used, with the component it belongs to."""
+
+    sequence_no: int
+    rate_component_definition_id: int
+    ordinal_from: int | None
+    ordinal_to: int | None
+    amount: Decimal
+
+
+@dataclass(frozen=True)
 class DefinitionCalculation:
     """The outcome of one calculation.
 
     ``amount`` is set only when ``status`` is CALCULATED. ``driver_rate_schedule_id``
     identifies the whole schedule that was used (None when none applied). When
-    CALCULATED, ``rate_amount`` is the rate the method actually used and
-    ``rate_component_definition_id`` the schedule value it came from, with the schedule's
-    status and effective window as resolved; they describe the calculation and never
-    change it.
+    CALCULATED, the schedule's status and effective window are those it resolved with, and
+    the rate the method used is described by exactly one of two shapes:
+
+    * a single-value method (PerUnit): ``rate_amount`` and ``rate_component_definition_id``;
+    * a multi-value method (OrdinalTier): ``rate_values``, every component value of the
+      schedule in sequence order, and ``tier_contributions``, the per-tier expansion of the
+      amount. ``rate_amount`` has no meaning there and stays None.
+
+    They describe the calculation and never change it.
     """
 
     status: CalculationStatus
@@ -80,6 +106,8 @@ class DefinitionCalculation:
     schedule_status: str | None = None
     schedule_effective_from: date | None = None
     schedule_effective_to: date | None = None
+    rate_values: tuple[UsedRateValue, ...] = ()
+    tier_contributions: tuple[OrdinalTierContribution, ...] = ()
 
     @property
     def is_calculated(self) -> bool:
@@ -118,6 +146,57 @@ def _calculate_per_unit(
     )
 
 
+def _calculate_ordinal_tier(
+    resolved: ResolvedCompensation | None, quantity: Decimal,
+) -> DefinitionCalculation:
+    if resolved is None:
+        return DefinitionCalculation(CalculationStatus.MISSING_RATE)
+    schedule_id = resolved.driver_rate_schedule_id
+    components = resolved.components
+    incomplete = DefinitionCalculation(
+        CalculationStatus.INCOMPLETE_RATE, driver_rate_schedule_id=schedule_id)
+    if resolved.rate_shape != "OrdinalTierSchedule" or not components:
+        return incomplete
+    if any(
+        component.amount is None or component.amount < 0 or component.ordinal_from is None
+        for component in components
+    ):
+        return incomplete
+    if topology_error([(c.ordinal_from, c.ordinal_to) for c in components]) is not None:
+        return incomplete
+    if (
+        not quantity.is_finite() or quantity < 0
+        or quantity != quantity.to_integral_value()
+    ):
+        return DefinitionCalculation(
+            CalculationStatus.INVALID_QUANTITY, driver_rate_schedule_id=schedule_id)
+    tiers = [
+        OrdinalTier(
+            sequence_no=component.sequence_no, ordinal_from=component.ordinal_from,
+            ordinal_to=component.ordinal_to, rate_amount=component.amount)
+        for component in components
+    ]
+    result = calculate_ordinal_tier(quantity, tiers)
+    return DefinitionCalculation(
+        CalculationStatus.CALCULATED,
+        amount=result.calculated_amount,
+        calculation_version=ORDINAL_TIER_CALCULATION_VERSION,
+        driver_rate_schedule_id=schedule_id,
+        schedule_status=resolved.schedule_status,
+        schedule_effective_from=resolved.effective_from,
+        schedule_effective_to=resolved.effective_to,
+        rate_values=tuple(
+            UsedRateValue(
+                sequence_no=component.sequence_no,
+                rate_component_definition_id=component.rate_component_definition_id,
+                ordinal_from=component.ordinal_from, ordinal_to=component.ordinal_to,
+                amount=component.amount)
+            for component in components
+        ),
+        tier_contributions=result.contributions,
+    )
+
+
 def calculate_scalar_rate(
     resolved: ResolvedCompensation | None, quantity: Decimal,
 ) -> DefinitionCalculation:
@@ -133,6 +212,7 @@ def calculate_scalar_rate(
 # Future methods and versions attach here, not in the consumers.
 _CALCULATORS = {
     ("PerUnit", 1): _calculate_per_unit,
+    ("OrdinalTier", 1): _calculate_ordinal_tier,
 }
 
 

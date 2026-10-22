@@ -257,18 +257,21 @@ async def test_a_missing_component_value_is_an_incomplete_rate():
     assert wrong_count.status is CalculationStatus.INCOMPLETE_RATE
 
 
-async def test_ordinal_tier_fails_closed_as_method_not_ready():
+async def test_an_unregistered_ordinal_tier_version_fails_closed_as_method_not_ready():
     assert is_method_operational("PerUnit", 1)
-    assert not is_method_operational("OrdinalTier", 1)
-    definition = _definition("OrdinalTier", "OrdinalTierSchedule")
+    assert is_method_operational("OrdinalTier", 1)
     resolved = _resolved(Decimal("10"), Decimal("0"), Decimal("7.5"),
                          shape="OrdinalTierSchedule", method="OrdinalTier")
-    result = calculate_definition_input(definition, resolved, Decimal("12"))
-    assert result.status is CalculationStatus.METHOD_NOT_READY
-    assert result.amount is None and result.needs_attention
-    # Not-ready is independent of whether a schedule exists.
-    assert calculate_definition_input(definition, None, Decimal("12")).status \
-        is CalculationStatus.METHOD_NOT_READY
+    for version in (0, 2, 99):
+        assert not is_method_operational("OrdinalTier", version)
+        definition = _definition("OrdinalTier", "OrdinalTierSchedule", version=version)
+        result = calculate_definition_input(definition, resolved, Decimal("12"))
+        assert result.status is CalculationStatus.METHOD_NOT_READY
+        assert result.amount is None and result.needs_attention
+        # Not-ready is independent of whether a schedule exists.
+        assert calculate_definition_input(definition, None, Decimal("12")).status             is CalculationStatus.METHOD_NOT_READY
+    # A method that is not registered at all is never operational.
+    assert not is_method_operational("RangeBracket", 1)
 
 
 async def test_quantity_validation_follows_the_frozen_input_type():

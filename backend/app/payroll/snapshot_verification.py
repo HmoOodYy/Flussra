@@ -22,6 +22,13 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.compensation.ordinal_topology import topology_error
+from app.payroll.calculation.ordinal_tier import (
+    ORDINAL_TIER_CALCULATION_VERSION,
+    OrdinalTier,
+    calculate_ordinal_tier,
+    contribution_evidence,
+)
 from app.payroll.calculation.payable_rounding import PAYABLE_ROUNDING_VERSION, round_payable
 from app.payroll.calculation.per_unit import PerUnitInput, calculate_per_unit
 from app.payroll.snapshot_hash import (
@@ -29,6 +36,7 @@ from app.payroll.snapshot_hash import (
     UnsupportedCalculationVersionError,
     calculate_report_evidence_hash,
     calculate_snapshot_hash,
+    canonicalize,
     require_supported_calculation_version,
     strict_json_equal,
     used_rate_fingerprint,
@@ -156,12 +164,19 @@ async def load_snapshot_content(
         SELECT payrollcalculationsnapshotusedratedefinitionid, companyid, branchid,
                payrollperiodid, driverassignmentid, driverid, definitionfingerprint,
                evidencekind, sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
-               paydefinitionid, statusratecolumnid, ratecomponentdefinitionid,
+               paydefinitionid, statusratecolumnid, rateshapesnapshot, ratecomponentdefinitionid,
                rateamountsnapshot, effectivefromsnapshot, effectivetosnapshot,
                ratestatussnapshot, currencycodesnapshot, currencyminorunitdigitssnapshot
         FROM payroll.payrollcalculationsnapshotusedratedefinitions
         WHERE payrollcalculationsnapshotid = :snapshot_id
         ORDER BY payrollcalculationsnapshotusedratedefinitionid
+    """), params)).mappings().all()
+    used_rate_components = (await db.execute(text("""
+        SELECT payrollcalculationsnapshotusedratedefinitionid, sequenceno,
+               ratecomponentdefinitionid, ordinalfrom, ordinalto, amountsnapshot
+        FROM payroll.payrollcalculationsnapshotusedratecomponents
+        WHERE payrollcalculationsnapshotid = :snapshot_id
+        ORDER BY payrollcalculationsnapshotusedratedefinitionid, sequenceno
     """), params)).mappings().all()
     status_entries = (await db.execute(text("""
         SELECT payrollperioddriverdayentrystateid, companyid, branchid, payrollperiodid,
@@ -264,6 +279,16 @@ async def load_snapshot_content(
             "SourceEvidenceJSONB": row["sourceevidencejsonb"],
         })
 
+    tiers_by_used_rate: dict[int, list[dict[str, Any]]] = {}
+    for row in used_rate_components:
+        tiers_by_used_rate.setdefault(
+            int(row["payrollcalculationsnapshotusedratedefinitionid"]), []).append({
+                "SequenceNo": int(row["sequenceno"]),
+                "RateComponentDefinitionID": int(row["ratecomponentdefinitionid"]),
+                "OrdinalFrom": int(row["ordinalfrom"]),
+                "OrdinalTo": row["ordinalto"],
+                "Amount": _decimal(row["amountsnapshot"]),
+            })
     used_rate_content = [{
         "PayrollCalculationSnapshotUsedRateDefinitionID":
             int(row["payrollcalculationsnapshotusedratedefinitionid"]),
@@ -279,8 +304,11 @@ async def load_snapshot_content(
         "RateDefinitionID": row["ratedefinitionid"],
         "PayDefinitionID": row["paydefinitionid"],
         "StatusRateColumnID": row["statusratecolumnid"],
+        "RateShape": row["rateshapesnapshot"],
         "RateComponentDefinitionID": row["ratecomponentdefinitionid"],
         "RateAmount": _optional_decimal(row["rateamountsnapshot"]),
+        "Components": tiers_by_used_rate.get(
+            int(row["payrollcalculationsnapshotusedratedefinitionid"])),
         "EffectiveFrom": row["effectivefromsnapshot"],
         "EffectiveTo": row["effectivetosnapshot"],
         "RateStatus": row["ratestatussnapshot"],
@@ -538,6 +566,39 @@ def _used_rate_error(message: str) -> SnapshotEvidenceError:
     return SnapshotEvidenceError("USED_RATE_EVIDENCE_INTEGRITY_ERROR", message)
 
 
+def _reconcile_used_rate_shape(rate: dict[str, Any]) -> None:
+    """A used-rate row is of one shape and carries exactly what that shape needs.
+
+    A ``Scalar`` row names its one component and amount and has no tier values. An
+    ``OrdinalTierSchedule`` row (ordinary lines only) names neither and carries the tier values
+    of the whole schedule: in sequence order, each with a non-negative value, forming a valid
+    topology (1-based, no gap, no overlap, the last tier open-ended and only that one).
+    """
+    shape = rate["RateShape"]
+    components = rate["Components"]
+    if shape == "Scalar":
+        if (
+            components is not None or rate["RateComponentDefinitionID"] is None
+            or rate["RateAmount"] is None
+        ):
+            raise _used_rate_error("a scalar used-rate row does not carry exactly one rate.")
+        return
+    if shape != "OrdinalTierSchedule":
+        raise _used_rate_error("a used-rate row has an unknown rate shape.")
+    if (
+        rate["SourceType"] != "DraftLine" or rate["RateComponentDefinitionID"] is not None
+        or rate["RateAmount"] is not None or not components
+    ):
+        raise _used_rate_error("a tiered used-rate row does not carry exactly its tier values.")
+    if (
+        [c["SequenceNo"] for c in components] != list(range(1, len(components) + 1))
+        or len({c["RateComponentDefinitionID"] for c in components}) != len(components)
+        or any(c["Amount"] < 0 for c in components)
+        or topology_error([(c["OrdinalFrom"], c["OrdinalTo"]) for c in components]) is not None
+    ):
+        raise _used_rate_error("a tiered used-rate row does not hold a valid tier topology.")
+
+
 def reconcile_used_rate_evidence(content: dict[str, Any]) -> None:
     """The used-rate evidence is self-consistent and agrees with the lines that link to it.
 
@@ -569,6 +630,7 @@ def reconcile_used_rate_evidence(content: dict[str, Any]) -> None:
             raise _used_rate_error("a used-rate row is outside the snapshot scope.")
         if (rate["PayDefinitionID"] is None) == (rate["StatusRateColumnID"] is None):
             raise _used_rate_error("a used-rate row does not have exactly one owner.")
+        _reconcile_used_rate_shape(rate)
 
     used: set[str] = set()
     for total in content["DriverTotals"]:
@@ -609,6 +671,61 @@ def reconcile_used_rate_evidence(content: dict[str, Any]) -> None:
             used.add(fingerprint)
     if used != set(by_fingerprint):
         raise _used_rate_error("a used-rate row is not used by any line of the snapshot.")
+
+
+def _tier_error(message: str) -> SnapshotEvidenceError:
+    return SnapshotEvidenceError("TIER_EVIDENCE_INTEGRITY_ERROR", message)
+
+
+def reconcile_method_evidence(content: dict[str, Any]) -> None:
+    """The frozen result of each ordinary line follows from the evidence of its own method.
+
+    An ordinary line's component freezes the calculation method and version, and its used-rate
+    row freezes the shape of the schedule. They must agree: a PerUnit line uses a scalar rate and
+    an OrdinalTier line the tier values. An OrdinalTier line is recomputed from nothing but its
+    frozen quantity and the frozen tier topology and values of its used-rate row: its calculation
+    version, amount and expanded per-tier explanation must equal that recomputation exactly, so
+    tampered or internally inconsistent tier evidence fails closed.
+
+    Raises ``SnapshotEvidenceError`` (TIER_EVIDENCE_INTEGRITY_ERROR).
+    """
+    rates = {rate["DefinitionFingerprint"]: rate for rate in content.get("UsedRates", [])}
+    for total in content["DriverTotals"]:
+        label = f"DriverAssignment {total['DriverAssignmentID']}"
+        components = {c["PayrollCalculationSnapshotComponentID"]: c for c in total["Components"]}
+        for line in total["Lines"]:
+            if line["SourceType"] != "DraftLine":
+                continue
+            component = components[line["PayrollCalculationSnapshotComponentID"]]
+            rate = rates[line["UsedRateFingerprint"]]
+            method = (component["CalculationMethod"], component["CalculationMethodVersion"])
+            if method != ("OrdinalTier", 1):
+                if rate["RateShape"] != "Scalar":
+                    raise _tier_error(f"{label}: a line of a single-rate method uses tier values.")
+                continue
+            if rate["RateShape"] != "OrdinalTierSchedule" or line["ResolvedRateAmount"] is not None:
+                raise _tier_error(f"{label}: an OrdinalTier line does not use tier values.")
+            if line["CalculationVersion"] != ORDINAL_TIER_CALCULATION_VERSION:
+                raise _tier_error(f"{label}: an OrdinalTier line has another calculation version.")
+            tiers = [
+                OrdinalTier(
+                    sequence_no=c["SequenceNo"], ordinal_from=c["OrdinalFrom"],
+                    ordinal_to=c["OrdinalTo"], rate_amount=c["Amount"])
+                for c in rate["Components"]
+            ]
+            try:
+                result = calculate_ordinal_tier(line["Quantity"], tiers)
+            except (TypeError, ValueError) as exc:
+                raise _tier_error(
+                    f"{label}: an OrdinalTier line cannot be recomputed from its evidence: {exc}"
+                ) from exc
+            if result.calculated_amount != line["CalculatedAmount"]:
+                raise _tier_error(
+                    f"{label}: an OrdinalTier line amount is not its quantity applied to its tiers.")
+            expected = {"TierContributions": canonicalize(contribution_evidence(result.contributions))}
+            if not strict_json_equal(line["SourceEvidenceJSONB"], expected):
+                raise _tier_error(
+                    f"{label}: an OrdinalTier line explanation is not its frozen tier expansion.")
 
 
 def _report_error(code: str, message: str) -> SnapshotEvidenceError:
@@ -753,8 +870,9 @@ async def verify_snapshot(
 
     Checks, in order: the scope, the calculation version, the report evidence version, the
     recomputed financial hash over the evidence and the rates it used (SNAPSHOT_HASH_MISMATCH),
-    the arithmetic of the evidence, the used-rate links, the report evidence hash and its
-    overlaps with the financial evidence. Returns the loaded and verified content, including the
+    the arithmetic of the evidence, the used-rate links, the method evidence of each ordinary
+    line (an OrdinalTier line is recomputed from its frozen tiers), the report evidence hash and
+    its overlaps with the financial evidence. Returns the loaded and verified content, including the
     report evidence, so a reader never queries the evidence tables itself.
     """
     content = await load_snapshot_content(
@@ -770,5 +888,6 @@ async def verify_snapshot(
         )
     reconcile_snapshot_content(content)
     reconcile_used_rate_evidence(content)
+    reconcile_method_evidence(content)
     reconcile_report_evidence(content)
     return content

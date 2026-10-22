@@ -22,6 +22,7 @@ from tests.payroll_runtime_fixtures import (
     get_grid,
     query,
     rated_definition,
+    rated_ordinal_definition,
     seed_status_key,
     seed_status_rate,
     set_employment,
@@ -53,6 +54,23 @@ async def open_period(client, engine, tenant, *, mask: int = 0, hire_offset: int
     period = await create_period(client, tenant, tenant.branch_a)
     if pay_definition is None:
         return period, None, None
+    grid = await get_grid(client, tenant, period)
+    return period, grid["columns"][0]["payroll_period_definition_id"], pay_definition
+
+
+async def open_tier_period(
+    client, engine, tenant, *, amounts=("3", "4", "5"), mask: int = 0,
+    hire_offset: int | None = None, **definition,
+) -> tuple[dict, int, dict]:
+    """An Open Branch A period with one OrdinalTier definition (tiers 1, 2 and 3+) and the
+    Driver's complete tier schedule (``amounts=None``: no schedule): returns the period, its
+    frozen definition id and the PayDefinition."""
+    if hire_offset is not None:
+        set_employment(tenant, tenant.driver_a,
+                       hire_date=setup_anchor() + timedelta(days=hire_offset))
+    pay_definition = await rated_ordinal_definition(client, tenant, amounts=amounts, **definition)
+    await assign_weekly_setup(engine, tenant, tenant.branch_a, mask=mask)
+    period = await create_period(client, tenant, tenant.branch_a)
     grid = await get_grid(client, tenant, period)
     return period, grid["columns"][0]["payroll_period_definition_id"], pay_definition
 

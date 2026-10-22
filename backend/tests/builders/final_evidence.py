@@ -94,7 +94,7 @@ _SNAPSHOT = """
          reportevidenceversion, reportevidencehash, currencycode, currencyminorunitdigits,
          periodstartdate, periodenddate, payableroundingversion, minmaxprorationversion,
          scheduledworkdates, warnings)
-    VALUES ({company}, {branch}, {period}, {revision}, 'payroll-calculation-v3',
+    VALUES ({company}, {branch}, {period}, {revision}, 'payroll-calculation-v4',
             {source_hash}, {snapshot_hash}, {user}, {amount},
             {evidence_version}, {evidence_hash}, {currency}, {digits},
             {start}, {end}, 'payable-rounding-v1', 'minmax-proration-v1', '{{}}', '{{}}')
@@ -126,12 +126,12 @@ _USED_RATE = """
     INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions
         (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid, driverassignmentid,
          driverid, definitionfingerprint, evidencekind, sourcetypesnapshot, driverratescheduleid,
-         ratedefinitionid, statusratecolumnid, ratecomponentdefinitionid, rateamountsnapshot,
-         effectivefromsnapshot, ratestatussnapshot, currencycodesnapshot,
+         ratedefinitionid, statusratecolumnid, rateshapesnapshot, ratecomponentdefinitionid,
+         rateamountsnapshot, effectivefromsnapshot, ratestatussnapshot, currencycodesnapshot,
          currencyminorunitdigitssnapshot)
     VALUES ({snapshot}, {company}, {branch}, {period}, {assignment}, {driver}, {fingerprint},
             'DriverRateSchedule', 'StatusEntryState', {schedule}, {rate_definition},
-            {status_column}, {rate_component}, {rate_amount},
+            {status_column}, 'Scalar', {rate_component}, {rate_amount},
             CURRENT_DATE, 'Approved', {currency}, {digits})
     RETURNING payrollcalculationsnapshotusedratedefinitionid
 """

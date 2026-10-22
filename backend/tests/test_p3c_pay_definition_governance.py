@@ -152,22 +152,6 @@ async def test_same_code_in_two_companies_but_not_twice_in_one(p3c_client, tenan
     assert duplicate.json()["detail"]["code"] == "DEFINITION_CODE_CONFLICT"
 
 
-async def test_ordinal_tier_is_not_authorable_yet(p3c_client, tenant):
-    response = await p3c_client.post(
-        "/compensation/pay-definitions",
-        json={"definition_name": "Tiered", "input_type": "WholeNumber",
-              "calculation_method": "OrdinalTier"},
-        headers=tenant.admin)
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "CALCULATION_METHOD_NOT_AVAILABLE"
-
-    draft = (await _draft(p3c_client, tenant, calculation_method="OrdinalTier",
-                          input_type="WholeNumber")).json()
-    submit = await _submit(p3c_client, tenant, draft)
-    assert submit.status_code == 422
-    assert submit.json()["detail"]["code"] == "CALCULATION_METHOD_NOT_AVAILABLE"
-
-
 @pytest.mark.parametrize("bad", [
     {"input_type": "Time"}, {"calculation_method": "Fixed"}, {"definition_name": "  "},
     {"calculation_method": "RangeBracket"},
