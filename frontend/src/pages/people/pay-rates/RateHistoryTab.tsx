@@ -2,6 +2,8 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { HistoryRow } from './payRatesView';
 import { fmtAmount, statusBadgeClass } from './payRatesView';
 import { RETIRED_LABEL, canVoidHistoryRow } from './payRatesHistory';
+import { isTieredSchedule, scalarAmount } from './payRatesTiers';
+import { TierValueList } from './TierValueList';
 import styles from './PayRatesPage.module.css';
 
 type RateHistoryTabProps = {
@@ -25,12 +27,14 @@ export function RateHistoryTab({ historyRows, loadingHistory, canEditMatrix, cur
         <div className={styles.emptySection}>No rate history for this driver.</div>
       ) : (
         <table className={styles.rateTable}>
-          <thead><tr><th>Pay Item</th><th>Amount</th><th>Effective</th><th>Status</th>{canEditMatrix && <th>Actions</th>}</tr></thead>
+          <thead><tr><th>Pay Item</th><th>Amount / Tier Values</th><th>Effective</th><th>Status</th>{canEditMatrix && <th>Actions</th>}</tr></thead>
           <tbody>
             {historyRows.map((r) => (
               <tr key={r.driver_rate_schedule_id}>
-                <td><strong>{r.definition_name}</strong>{r.retired && <span className={styles.statusBadge} style={{ marginLeft: '0.4rem' }}>{RETIRED_LABEL}</span>}{r.void_reason && <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.void_reason}</div>}</td>
-                <td>{fmtAmount(r.values[0]?.amount ?? null, r.unit, currencyCode, currencyDigits)}</td>
+                <td><strong>{r.definition_name}</strong>{isTieredSchedule(r.values) && <span className={styles.statusBadge} style={{ marginLeft: '0.4rem' }}>Tiered</span>}{r.retired && <span className={styles.statusBadge} style={{ marginLeft: '0.4rem' }}>{RETIRED_LABEL}</span>}{r.void_reason && <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{r.void_reason}</div>}</td>
+                <td>{isTieredSchedule(r.values)
+                  ? <TierValueList values={r.values} unit={r.unit} currencyCode={currencyCode} currencyDigits={currencyDigits} />
+                  : fmtAmount(scalarAmount(r.values), r.unit, currencyCode, currencyDigits)}</td>
                 <td>{r.effective_from}{r.effective_to ? ` – ${r.effective_to}` : ''}</td>
                 <td><span className={statusBadgeClass(r.status)}>{r.status}</span></td>
                 {canEditMatrix && <td>{canVoidHistoryRow(r, canEditMatrix) && <button className={styles.btnVoid} onClick={() => { setVoidTarget(r); setVoidReason(''); setVoidError(''); }}>Void</button>}</td>}

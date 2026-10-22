@@ -4,8 +4,10 @@ import type {
   RateOwnerKind,
   ScheduleBrief,
   ScheduleSummary,
+  ScheduleValue,
 } from '../../../types/compensation.ts';
 import { historyDefinitionName, isRetiredDefinition } from './payRatesHistory.ts';
+import { hasCompleteValues, isTieredSchedule, scalarAmount } from './payRatesTiers.ts';
 
 /**
  * Pending ordinary schedules are discovered from the Driver's schedule summary and history
@@ -27,8 +29,13 @@ export interface PendingScheduleRow {
   retired: boolean;
   effectiveFrom: string;
   effectiveTo: string | null;
-  /** The Pending schedule's scalar amount; null while it has no value yet. */
+  /** The Pending schedule's scalar amount; null while it has no value yet, and always null for a
+   *  tiered schedule, which has no single amount. */
   amount: string | null;
+  /** True for an OrdinalTier schedule: its values are listed tier by tier from `values`. */
+  tiered: boolean;
+  /** Every value of the schedule, as the backend returned them (all tiers of a tiered one). */
+  values: ScheduleValue[];
   /** True for a definition the authoring matrix lists (Active); false for a retired one. */
   inMatrix: boolean;
   /** The current rate from the matrix, when the definition is in it. */
@@ -57,7 +64,9 @@ export function buildPendingScheduleRows(
         retired: isRetiredDefinition(item),
         effectiveFrom: schedule.effective_from,
         effectiveTo: schedule.effective_to,
-        amount: schedule.values[0]?.amount ?? null,
+        amount: scalarAmount(schedule.values),
+        tiered: isTieredSchedule(schedule.values),
+        values: schedule.values,
         inMatrix: inMatrix !== undefined,
         current: inMatrix?.current ?? null,
       });
@@ -74,6 +83,14 @@ export function buildPendingScheduleRows(
  */
 export function canApprovePendingRow(row: PendingScheduleRow, canEditDriver: boolean): boolean {
   return canEditDriver && !row.retired;
+}
+
+/**
+ * A Pending schedule can be approved only when every value it holds is set. A tiered schedule is
+ * approved only from the screen that lists all of its tiers, so none is concealed.
+ */
+export function isPendingRowComplete(row: PendingScheduleRow): boolean {
+  return hasCompleteValues(row.values);
 }
 
 /** Discarding follows the backend's discard authority alone, retired or orphaned or not. */

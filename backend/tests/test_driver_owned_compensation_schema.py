@@ -426,7 +426,7 @@ def test_0088_applies_over_a_roster_without_compensation(pre_0088_database):
     assert _alembic(env, "upgrade", "head").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         cursor.execute("SELECT version_num FROM public.alembic_version")
-        assert cursor.fetchone() == ("0090",)
+        assert cursor.fetchone() == ("0091",)
         cursor.execute("SELECT count(*) FROM core.driverassignments")
         assert cursor.fetchone() == (1,)
 
@@ -440,7 +440,7 @@ def test_0088_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0090",)
+    assert cur.fetchone() == ("0091",)
 
     def columns(table: str) -> set[str]:
         cur.execute("""

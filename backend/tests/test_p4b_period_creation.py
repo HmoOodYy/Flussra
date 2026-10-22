@@ -55,8 +55,8 @@ async def _structure_locked(engine, rate_definition_id: int) -> bool:
 
 
 async def _direct_definition(engine, tenant, *, method="PerUnit", active=True, branch_id=None):
-    """A definition created straight in the database (the governance flow does not author
-    OrdinalTier yet), with its complete RateDefinition structure."""
+    """A definition created straight in the database, with its complete RateDefinition
+    structure (an OrdinalTier one gets the tiers 1, 2 and 3+)."""
     async with engine.begin() as conn:
         pd = (await conn.execute(text("""
             INSERT INTO payroll.paydefinitions
@@ -249,13 +249,42 @@ async def test_period_days_definitions_and_eligibility_are_one_atomic_unit(
 
 
 # ---------------------------------------------------------------------------
-# Calculation methods that are not operational
+# Calculation methods and versions that are not operational
 # ---------------------------------------------------------------------------
 
-async def test_an_active_ordinal_tier_definition_fails_period_creation_closed(
+async def test_an_active_ordinal_tier_definition_is_frozen_into_the_period(
     p3c_client, p3c_engine, tenant,
 ):
-    await _direct_definition(p3c_engine, tenant, method="OrdinalTier", active=True)
+    """OrdinalTier is an operational method: its definition freezes with its method, version
+    and shape like any other, and the Day Grid offers it as an entry column."""
+    definition = await _direct_definition(p3c_engine, tenant, method="OrdinalTier", active=True)
+    assert not await _structure_locked(p3c_engine, definition["rate_definition_id"])
+    await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
+    period = await create_period(p3c_client, tenant, tenant.branch_a)
+    assert period["result"] == "CREATED"
+    # The first authoritative period reference locks the tier structure.
+    assert await _structure_locked(p3c_engine, definition["rate_definition_id"])
+    async with p3c_engine.connect() as conn:
+        frozen = (await conn.execute(text("""
+            SELECT paydefinitionid, inputtypesnapshot, calculationmethodsnapshot,
+                   calculationmethodversionsnapshot, rateshapesnapshot, isactiveinperiod
+            FROM payroll.payrollperioddefinitions WHERE payrollperiodid = :p
+        """), {"p": period["payroll_period_id"]})).all()
+    assert [tuple(row) for row in frozen] == [(
+        definition["pay_definition_id"], "WholeNumber", "OrdinalTier", 1,
+        "OrdinalTierSchedule", True)]
+    grid = await p3c_client.get(
+        f"/payroll/periods/{period['payroll_period_id']}/day-grid", headers=tenant.admin)
+    assert grid.status_code == 200, grid.text
+    assert [c["pay_definition_id"] for c in grid.json()["columns"]] == [
+        definition["pay_definition_id"]]
+
+
+async def test_an_active_ordinal_tier_definition_with_an_unsupported_version_fails_closed(
+    p3c_client, p3c_engine, tenant,
+):
+    definition = await _direct_definition(p3c_engine, tenant, method="OrdinalTier", active=True)
+    await _set_method_version(p3c_engine, definition, tenant, 2)
     await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
     key = await _candidate_key(p3c_client, tenant, tenant.branch_a)
     response = await p3c_client.post(

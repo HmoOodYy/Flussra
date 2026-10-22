@@ -11,7 +11,7 @@ export const INPUT_TYPE_LABELS: Record<PayDefinitionInputType, string> = {
 
 export const METHOD_LABELS: Record<string, string> = {
   PerUnit: 'Per unit',
-  OrdinalTier: 'Ordinal tier (not yet available)',
+  OrdinalTier: 'Ordinal tier',
 };
 
 export type RequestFilter = PayDefinitionRequestStatus | 'all';

@@ -13,6 +13,16 @@ export type PayDefinitionRequestStatus =
 
 export type PayDefinitionDecisionAction = 'ReturnToDraft' | 'Reject' | 'Approve';
 
+/**
+ * One tier of an OrdinalTier definition's topology: the ordinal positions it covers. The last
+ * tier is open-ended (`ordinal_to` null); a valid topology is 1-based, gapless and has exactly
+ * that one open-ended tier.
+ */
+export interface OrdinalTierInput {
+  ordinal_from: number;
+  ordinal_to: number | null;
+}
+
 export interface PayDefinitionRequestSummary {
   request_id: string;
   company_id: number;
@@ -22,6 +32,7 @@ export interface PayDefinitionRequestSummary {
   input_type: PayDefinitionInputType | null;
   unit: string | null;
   calculation_method: PayDefinitionCalculationMethod | null;
+  ordinal_tiers: OrdinalTierInput[] | null;
   notes: string | null;
   status: PayDefinitionRequestStatus;
   revision: number;
@@ -54,6 +65,7 @@ export interface PayDefinitionRequestCreatePayload {
   input_type?: PayDefinitionInputType | null;
   unit?: string | null;
   calculation_method?: PayDefinitionCalculationMethod | null;
+  ordinal_tiers?: OrdinalTierInput[] | null;
   notes?: string | null;
 }
 
@@ -64,6 +76,7 @@ export interface PayDefinitionRequestUpdatePayload {
   input_type?: PayDefinitionInputType | null;
   unit?: string | null;
   calculation_method?: PayDefinitionCalculationMethod | null;
+  ordinal_tiers?: OrdinalTierInput[] | null;
   notes?: string | null;
 }
 
@@ -88,6 +101,7 @@ export interface PayDefinitionDirectCreatePayload {
   input_type: PayDefinitionInputType;
   unit?: string | null;
   calculation_method: PayDefinitionCalculationMethod;
+  ordinal_tiers?: OrdinalTierInput[] | null;
 }
 
 export interface PayDefinitionProvenance {
@@ -196,7 +210,10 @@ export interface ScheduleBrief {
   status: ScheduleStatus;
   effective_from: string;
   effective_to: string | null;
+  /** The one value of a scalar schedule; null for any other shape (see `values`). */
   amount: string | null;
+  /** One entry per component of the definition, a missing value as null (never zero). */
+  values: ScheduleValue[];
 }
 
 /** What owns a rate definition: a PayDefinition, or a Company Status rate column. */
@@ -232,8 +249,13 @@ export interface DriverPayRateRow {
   definition_name: string;
   input_type: PayDefinitionInputType;
   unit: string | null;
+  calculation_method: PayDefinitionCalculationMethod | null;
+  /** 'Scalar' (one value) or 'OrdinalTierSchedule' (one value per tier in `components`). */
+  rate_shape: 'Scalar' | 'OrdinalTierSchedule';
   rate_definition_id: number;
-  rate_component_definition_id: number;
+  /** The component of a scalar rate; null for a tiered one (see `components`). */
+  rate_component_definition_id: number | null;
+  components: RateComponentSummary[];
   /**
    * False when the definition has no active Branch configuration in the Branch of the Driver's
    * context tenure on the reference date; null when the Driver has no tenure that day.

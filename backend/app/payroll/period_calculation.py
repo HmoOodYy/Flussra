@@ -40,12 +40,13 @@ from app.company_currency import CompanyCurrency, currency_error, get_company_cu
 from app.payroll import bonus as payroll_bonus
 from app.payroll.calculation import minmax_proration as minmax
 from app.payroll.calculation.minmax_proration import MINMAX_PRORATION_VERSION
+from app.payroll.calculation.ordinal_tier import OrdinalTierContribution, contribution_evidence
 from app.payroll.calculation.payable_rounding import (
     PAYABLE_ROUNDING_VERSION,
     is_payable_precision,
     round_payable,
 )
-from app.payroll.definition_calculation import CalculationStatus
+from app.payroll.definition_calculation import CalculationStatus, UsedRateValue
 from app.payroll.eligibility import (
     _is_snapshot_row_eligible_for_workdate,
     require_period_eligibility_snapshot,
@@ -154,6 +155,9 @@ _CALCULATION_BLOCKER_REASONS: dict[CalculationStatus, str] = {
     CalculationStatus.INCOMPLETE_RATE: (
         "The effective rate assignment is missing a required value."
     ),
+    CalculationStatus.INVALID_QUANTITY: (
+        "The quantity is not valid for this pay definition's calculation method."
+    ),
     CalculationStatus.METHOD_NOT_READY: (
         "This pay definition uses a calculation method that is not operational yet."
     ),
@@ -199,6 +203,8 @@ class _CalculationPacketLine:
     # The rate an ordinary line used, as resolved for its WorkDate: the target definition,
     # the whole schedule, the schedule value and its status and window. ``resolved_rate_amount``
     # is the rate amount itself. A Status line carries its Status rate column in ``rate_column_id``.
+    # A multi-value method (OrdinalTier) has no single rate: it carries every schedule value
+    # in ``rate_values`` and the per-tier expansion of its amount in ``tier_contributions``.
     rate_definition_id: int | None = None
     driver_rate_schedule_id: int | None = None
     rate_component_definition_id: int | None = None
@@ -206,6 +212,8 @@ class _CalculationPacketLine:
     schedule_effective_from: date | None = None
     schedule_effective_to: date | None = None
     calculation_version: str | None = None
+    rate_values: tuple[UsedRateValue, ...] = ()
+    tier_contributions: tuple[OrdinalTierContribution, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -918,6 +926,11 @@ async def _build_live_calculation_packet(
             schedule_effective_from=calc.schedule_effective_from,
             schedule_effective_to=calc.schedule_effective_to,
             calculation_version=calc.calculation_version,
+            rate_values=calc.rate_values,
+            tier_contributions=calc.tier_contributions,
+            source_evidence=(
+                {"TierContributions": contribution_evidence(calc.tier_contributions)}
+                if calc.tier_contributions else None),
         ))
 
     # ── Status pay, derived live from the canonical Status selections (hours x the Driver's

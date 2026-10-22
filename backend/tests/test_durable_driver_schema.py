@@ -263,7 +263,7 @@ def test_0087_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0090",)
+    assert cur.fetchone() == ("0091",)
 
     def columns(table: str, schema: str = "core") -> set[str]:
         cur.execute("""

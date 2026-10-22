@@ -20,8 +20,10 @@ from tests.compensation_api_fixtures import (
     PERMISSIONS,
     Tenant,
     approve_schedule,
+    authored_tier_schedule,
     build_tenant,
     create_definition,
+    create_ordinal_definition,
     create_pending,
     grant_applicability,
     set_scalar_value,
@@ -128,6 +130,35 @@ async def rated_definition(
             client, tenant, definition, rate, effective_from=effective_from,
             driver_assignment_id=driver_assignment_id)
     return definition
+
+
+async def rated_ordinal_definition(
+    client: httpx.AsyncClient, tenant: Tenant, *, amounts=("3", "4", "5"),
+    effective_from: str = "2020-01-01", activate: bool = True, branch_id: int | None = None,
+    driver_assignment_id: int | None = None, **overrides,
+) -> dict:
+    """An arbitrary OrdinalTier definition (tiers 1, 2 and 3+), applicable to the Branch, with an
+    approved tier schedule for the Driver. ``amounts=None`` leaves the Driver without a schedule."""
+    definition = await create_ordinal_definition(client, tenant, **overrides)
+    if activate:
+        grant_applicability(tenant, definition, branch_id or tenant.branch_a)
+    if amounts is not None:
+        await approve_tier_rate(
+            client, tenant, definition, amounts, effective_from=effective_from,
+            driver_assignment_id=driver_assignment_id)
+    return definition
+
+
+async def approve_tier_rate(
+    client: httpx.AsyncClient, tenant: Tenant, definition: dict, amounts, *,
+    effective_from: str, effective_to: str | None = None, driver_assignment_id: int | None = None,
+) -> dict:
+    """Approve one complete tier schedule for the Driver of ``driver_assignment_id``."""
+    driver_id = (driver_id_of(tenant, driver_assignment_id)
+                 if driver_assignment_id is not None else None)
+    return await authored_tier_schedule(
+        client, tenant, definition, amounts, driver_id=driver_id,
+        effective_from=effective_from, effective_to=effective_to)
 
 
 def driver_id_of(tenant: Tenant, driver_assignment_id: int) -> int:

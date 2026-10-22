@@ -37,7 +37,9 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
   async function saveTargetRow(row: DriverPayRateRow, approve: boolean) {
     const id = row.rate_definition_id;
     const draft = targetDrafts[id];
+    const componentId = row.rate_component_definition_id;
     if (!selectedDriverId || !draft || draft.amount === '' || !draft.effective_from) return;
+    if (componentId === null) return; // a tiered rate is not edited as one scalar value
     const driverId = selectedDriverId;
     setTargetSavingId(id);
     setTargetErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
@@ -56,7 +58,7 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
         scheduleId = created.driver_rate_schedule_id;
       }
       await replaceScheduleValues(scheduleId, [{
-        rate_component_definition_id: row.rate_component_definition_id, amount: draft.amount,
+        rate_component_definition_id: componentId, amount: draft.amount,
       }]);
       if (approve) {
         phase = 'approve';

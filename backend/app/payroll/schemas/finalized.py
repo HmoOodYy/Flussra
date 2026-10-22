@@ -198,13 +198,25 @@ class FinalizedOffDriversResponse(BaseModel):
 
 
 
+class FinalizedUsedRateTier(BaseModel):
+    """One tier of an OrdinalTier schedule as frozen: its ordinal range and the value it had."""
+    __module__ = "app.payroll.schemas"
+    sequence_no: int
+    rate_component_definition_id: int
+    ordinal_from: int
+    ordinal_to: int | None = None
+    amount: Decimal
+
+
 class FinalizedUsedRateDefinition(BaseModel):
     """A rate the finalized snapshot used, or a Min/Max rule it evaluated, as frozen.
 
     ``evidence_kind`` is DriverRateSchedule (a target schedule: ``source_type`` DraftLine for an
     ordinary PayDefinition rate, StatusEntryState for a Status rate column rate) or DriverPayRule
     (a Min/Max rule of the frozen evaluation). For a rule
-    ``used_rate_definition_id`` is the id of its evidence row.
+    ``used_rate_definition_id`` is the id of its evidence row. A schedule of shape ``Scalar`` has
+    one ``rate_amount``; a schedule of shape ``OrdinalTierSchedule`` has none and lists its
+    ``rate_tiers`` (the frozen ordinal range and value of every tier) instead.
     """
     __module__ = "app.payroll.schemas"
     used_rate_definition_id: int
@@ -225,6 +237,8 @@ class FinalizedUsedRateDefinition(BaseModel):
     unit_name: str | None = None
     driver_pay_rule_id: int | None = None
     rate_amount: Decimal | None = None
+    rate_shape: str | None = None
+    rate_tiers: list[FinalizedUsedRateTier] = []
     effective_from: date | None = None
     effective_to: date | None = None
     rate_status: str | None = None

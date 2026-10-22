@@ -89,6 +89,7 @@ from .finalized import (
     FinalizedReportMetadata,
     FinalizedSnapshotProvenance,
     FinalizedUsedRateDefinition,
+    FinalizedUsedRateTier,
     FinalizedWorkflowAuditEvent,
     FinalLineSummary,
 )
@@ -233,6 +234,7 @@ __all__ = (
     'FinalizedSectionAvailability',
     'FinalizedSnapshotProvenance',
     'FinalizedUsedRateDefinition',
+    'FinalizedUsedRateTier',
     'FinalizedWorkflowAuditEvent',
     'FullyOffDriverSummary',
     'MixedReportResponse',

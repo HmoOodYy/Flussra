@@ -42,7 +42,7 @@ def _content(**overrides):
     total.update(overrides)
     return {
         "CompanyID": 1, "BranchID": 1, "PayrollPeriodID": 1,
-        "CalculationVersion": "payroll-calculation-v3", "SourceConfigHash": "0" * 64,
+        "CalculationVersion": "payroll-calculation-v4", "SourceConfigHash": "0" * 64,
         "DriverTotals": [total],
     }
 

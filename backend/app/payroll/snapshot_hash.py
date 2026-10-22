@@ -24,7 +24,7 @@ from typing import Any
 # meaning or set of canonical hashed components, or the source/provenance
 # semantics inside the hash. New rates, company setup, wording and report
 # formatting do not bump it.
-CURRENT_PAYROLL_CALCULATION_VERSION = "payroll-calculation-v3"
+CURRENT_PAYROLL_CALCULATION_VERSION = "payroll-calculation-v4"
 CURRENT_REPORT_EVIDENCE_VERSION = 3
 
 # The label of the source/configuration packet hashed into SourceConfigHash.
@@ -147,14 +147,25 @@ _USED_RATE_FIELDS = (
     "DriverRateScheduleID",
     "RateDefinitionID",
     "PayDefinitionID",
+    "RateShape",
     "RateComponentDefinitionID",
     "StatusRateColumnID",
     "RateAmount",
+    "Components",
     "EffectiveFrom",
     "EffectiveTo",
     "RateStatus",
     "CurrencyCodeSnapshot",
     "CurrencyMinorUnitDigitsSnapshot",
+)
+# One tier value of an OrdinalTierSchedule used-rate row: the ordinal range the definition owns
+# and the value the Driver's schedule gave it. A Scalar row has no components (None).
+_USED_RATE_COMPONENT_FIELDS = (
+    "SequenceNo",
+    "RateComponentDefinitionID",
+    "OrdinalFrom",
+    "OrdinalTo",
+    "Amount",
 )
 _COMPONENT_KIND_ORDER = {
     "ORDINARY": 0,
@@ -321,14 +332,28 @@ def _projection(value: Mapping[str, Any], fields: Sequence[str]) -> dict[str, An
     return {field: value.get(field) for field in fields}
 
 
+def _used_rate_fields(descriptor: Mapping[str, Any]) -> dict[str, Any]:
+    """The financial fields of a used-rate descriptor, its tier values in sequence order."""
+    fields = _projection(descriptor, _USED_RATE_FIELDS)
+    components = fields["Components"]
+    if components is not None:
+        if not isinstance(components, Sequence) or isinstance(components, (str, bytes, bytearray)):
+            raise TypeError("used-rate Components must be a sequence")
+        fields["Components"] = sorted(
+            (_projection(component, _USED_RATE_COMPONENT_FIELDS) for component in components),
+            key=lambda component: component["SequenceNo"],
+        )
+    return fields
+
+
 def used_rate_fingerprint(descriptor: Mapping[str, Any]) -> str:
     """The identity of one used-rate descriptor: the hash of its financial fields only."""
-    return sha256_hex(_projection(descriptor, _USED_RATE_FIELDS))
+    return sha256_hex(_used_rate_fields(descriptor))
 
 
 def _used_rate_projection(used_rate: Mapping[str, Any]) -> dict[str, Any]:
     return {
-        **_projection(used_rate, _USED_RATE_FIELDS),
+        **_used_rate_fields(used_rate),
         "DefinitionFingerprint": used_rate.get("DefinitionFingerprint"),
     }
 

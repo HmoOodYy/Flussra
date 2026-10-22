@@ -210,8 +210,8 @@ def test_canonical_serialization_rejects_floats_and_unknown_types():
 
 def test_only_the_current_calculation_version_is_supported():
     require_supported_calculation_version(CURRENT_PAYROLL_CALCULATION_VERSION)
-    assert CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v3"
-    for version in ("payroll-calculation-v1", "payroll-calculation-v2", None, ""):
+    assert CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v4"
+    for version in ("payroll-calculation-v1", "payroll-calculation-v2", "payroll-calculation-v3", "payroll-calculation-v5", None, ""):
         with pytest.raises(UnsupportedCalculationVersionError):
             require_supported_calculation_version(version)
 

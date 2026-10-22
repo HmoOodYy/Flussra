@@ -10,6 +10,7 @@ Transactions are owned by the get_db dependency: they commit on success and
 roll back when an exception propagates.
 """
 
+import json
 import uuid as _uuid
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from app.compensation.guards import (
     require_definition_company_edit,
     require_definition_company_read,
 )
+from app.compensation.ordinal_topology import topology_error
 from app.compensation.schemas import (
     DecisionAction,
     PayDefinitionDirectCreate,
@@ -38,6 +40,7 @@ from app.compensation.schemas import (
     PayDefinitionRequestSubmit,
     PayDefinitionRequestSummary,
     PayDefinitionRequestUpdate,
+    PayDefinitionStructureUpdate,
     PayDefinitionSummary,
     RateComponentSummary,
 )
@@ -46,8 +49,9 @@ from app.rate_definition_concurrency import lock_rate_definition_structure
 GOVERNANCE_SCHEMA_VERSION = 1
 CALCULATION_METHOD_VERSION = 1
 
-# Methods whose structure and assignment authoring exist in this release.
-AUTHORABLE_METHODS = frozenset({"PerUnit"})
+# The first-production methods: each has its structure, schedule authoring, calculation and
+# evidence. A method is not authorable merely because the database can store its shape.
+AUTHORABLE_METHODS = frozenset({"PerUnit", "OrdinalTier"})
 
 _REQUEST_COLUMNS = """
     r.paydefinitionrequestid AS request_id,
@@ -58,6 +62,7 @@ _REQUEST_COLUMNS = """
     r.inputtype              AS input_type,
     r.unit                   AS unit,
     r.calculationmethod      AS calculation_method,
+    r.ordinaltiers           AS ordinal_tiers,
     r.notes                  AS notes,
     r.status                 AS status,
     r.revision               AS revision,
@@ -79,6 +84,15 @@ _DRAFT_COLUMNS = {
     "calculation_method": "calculationmethod",
     "notes": "notes",
 }
+
+
+def _tiers_json(tiers: list | None) -> str | None:
+    """The stored form of a topology: an ordered JSON array of ordinal ranges."""
+    if tiers is None:
+        return None
+    return json.dumps([
+        {"ordinal_from": tier.ordinal_from, "ordinal_to": tier.ordinal_to} for tier in tiers
+    ])
 
 
 def _request_not_found() -> HTTPException:
@@ -142,13 +156,15 @@ async def create_draft(
         text("""
             INSERT INTO payroll.paydefinitionrequests
                 (companyid, requestingbranchid, definitioncode, definitionname, inputtype,
-                 unit, calculationmethod, notes, createdbyuserid)
-            VALUES (:cid, :bid, :code, :name, :input_type, :unit, :method, :notes, :uid)
+                 unit, calculationmethod, ordinaltiers, notes, createdbyuserid)
+            VALUES (:cid, :bid, :code, :name, :input_type, :unit, :method,
+                    CAST(:tiers AS jsonb), :notes, :uid)
             RETURNING paydefinitionrequestid
         """),
         {"cid": company_id, "bid": data.requesting_branch_id, "code": data.definition_code,
          "name": data.definition_name, "input_type": data.input_type, "unit": data.unit,
-         "method": data.calculation_method, "notes": data.notes, "uid": user_id},
+         "method": data.calculation_method, "tiers": _tiers_json(data.ordinal_tiers),
+         "notes": data.notes, "uid": user_id},
     )).scalar_one()
     await _insert_event(db, request_id, "DraftCreated", None, "Draft", user_id, 1)
     return await _summary(company_id, request_id, db)
@@ -254,6 +270,9 @@ async def update_draft(
         if field in data.model_fields_set:
             set_parts.append(f"{column} = :{field}")
             params[field] = getattr(data, field)
+    if "ordinal_tiers" in data.model_fields_set:
+        set_parts.append("ordinaltiers = CAST(:ordinal_tiers AS jsonb)")
+        params["ordinal_tiers"] = _tiers_json(data.ordinal_tiers)
     updated = (await db.execute(
         text(f"""
             UPDATE payroll.paydefinitionrequests
@@ -278,6 +297,8 @@ def _missing_fields(row: dict) -> list[str]:
         missing.append("input_type")
     if not row["calculation_method"]:
         missing.append("calculation_method")
+    if row["calculation_method"] == "OrdinalTier" and not row["ordinal_tiers"]:
+        missing.append("ordinal_tiers")
     return missing
 
 
@@ -286,9 +307,42 @@ def _require_authorable(method: str | None, action: str) -> None:
         raise compensation_error(
             "CALCULATION_METHOD_NOT_AVAILABLE",
             f"CalculationMethod '{method}' is not available for {action}. "
-            "Only PerUnit definitions can be created at this time.",
+            f"Only {' and '.join(sorted(AUTHORABLE_METHODS))} definitions can be created.",
             422,
         )
+
+
+def _tier_bounds(tiers: list | None) -> list[tuple[int, int | None]]:
+    """The ordered (from, to) bounds of a stored or submitted topology."""
+    return [
+        (tier.get("ordinal_from"), tier.get("ordinal_to")) if isinstance(tier, dict)
+        else (tier.ordinal_from, tier.ordinal_to)
+        for tier in tiers or []
+    ]
+
+
+def _require_valid_structure(
+    method: str, input_type: str, tiers: list | None, action: str,
+) -> None:
+    """The method-specific structure a definition must have to be created.
+
+    PerUnit has no topology. OrdinalTier needs WholeNumber input and a valid ordered topology:
+    1-based, gapless, no overlap, exactly one open-ended tier and it is the last.
+    """
+    _require_authorable(method, action)
+    if method == "PerUnit":
+        if tiers:
+            raise compensation_error(
+                "TIERS_NOT_APPLICABLE", "A PerUnit definition has no ordinal tiers.", 422)
+        return
+    if input_type != "WholeNumber":
+        raise compensation_error(
+            "ORDINAL_TIER_REQUIRES_WHOLE_NUMBER",
+            "An OrdinalTier definition counts whole ordinal units and requires WholeNumber input.",
+            422)
+    problem = topology_error(_tier_bounds(tiers))
+    if problem is not None:
+        raise compensation_error("INVALID_TIER_TOPOLOGY", problem, 422)
 
 
 async def submit_draft(
@@ -302,7 +356,8 @@ async def submit_draft(
         raise compensation_error(
             "REQUEST_INCOMPLETE",
             f"Cannot submit: missing required fields: {', '.join(missing)}.", 422)
-    _require_authorable(pre["calculation_method"], "submission")
+    _require_valid_structure(
+        pre["calculation_method"], pre["input_type"], pre["ordinal_tiers"], "submission")
 
     prior = (await db.execute(
         text("""
@@ -373,14 +428,48 @@ def _generated_code() -> str:
     return f"PD{_uuid.uuid4().hex[:12].upper()}"
 
 
+async def _insert_components(
+    db: AsyncConnection, rate_definition_id: int, method: str, tiers: list | None,
+) -> None:
+    """The components a method requires: the one scalar component of PerUnit, or the ordered
+    tier components of an OrdinalTier topology (the definition owns the topology, a Driver
+    schedule only supplies the values). Then the structure must be complete: for OrdinalTier
+    a valid topology."""
+    if method == "OrdinalTier":
+        for sequence_no, (ordinal_from, ordinal_to) in enumerate(_tier_bounds(tiers), start=1):
+            await db.execute(
+                text("""
+                    INSERT INTO payroll.ratecomponentdefinitions
+                        (ratedefinitionid, shape, sequenceno, ordinalfrom, ordinalto)
+                    VALUES (:rid, 'OrdinalTierSchedule', :seq, :low, :high)
+                """),
+                {"rid": rate_definition_id, "seq": sequence_no, "low": ordinal_from,
+                 "high": ordinal_to},
+            )
+    else:
+        await db.execute(
+            text("""
+                INSERT INTO payroll.ratecomponentdefinitions (ratedefinitionid, shape, sequenceno)
+                VALUES (:rid, 'Scalar', 1)
+            """),
+            {"rid": rate_definition_id},
+        )
+    await db.execute(
+        text("SELECT payroll.fn_AssertRateStructureComplete(:rid)"),
+        {"rid": rate_definition_id},
+    )
+
+
 async def _create_definition_structure(
     db: AsyncConnection, *, company_id: int, user_id: int, code: str | None, name: str,
-    input_type: str, unit: str | None, method: str,
+    input_type: str, unit: str | None, method: str, tiers: list | None = None,
 ) -> tuple[int, int]:
-    """Create the PayDefinition with its scalar RateDefinition and required component.
+    """Create the PayDefinition with its RateDefinition and the components its method requires.
 
-    The governed event is the first authoritative use of the structure, so the
-    canonical RateDefinitions.StructureLockedAtUtc is set here and nowhere else.
+    The structure is created unlocked. The canonical RateDefinitions.StructureLockedAtUtc is
+    set by the first authoritative use (the first Approved schedule or the first payroll
+    period that references the RateDefinition), never by creation: until then
+    ``change_structure`` may correct the method and topology.
     """
     pay_definition_id = (await db.execute(
         text("""
@@ -401,18 +490,7 @@ async def _create_definition_structure(
         """),
         {"cid": company_id, "pid": pay_definition_id, "method": method},
     )).scalar_one()
-    await db.execute(
-        text("""
-            INSERT INTO payroll.ratecomponentdefinitions (ratedefinitionid, shape, sequenceno)
-            VALUES (:rid, 'Scalar', 1)
-        """),
-        {"rid": rate_definition_id},
-    )
-    await db.execute(
-        text("UPDATE payroll.ratedefinitions SET structurelockedatutc = now() "
-             "WHERE ratedefinitionid = :rid"),
-        {"rid": rate_definition_id},
-    )
+    await _insert_components(db, int(rate_definition_id), method, tiers)
     return int(pay_definition_id), int(rate_definition_id)
 
 
@@ -434,13 +512,14 @@ async def _approve_request(
         raise compensation_error(
             "REQUEST_INCOMPLETE",
             f"Cannot approve: missing required fields: {', '.join(missing)}.", 422)
-    _require_authorable(row["calculation_method"], "approval")
+    _require_valid_structure(
+        row["calculation_method"], row["input_type"], row["ordinal_tiers"], "approval")
 
     try:
         pay_definition_id, _ = await _create_definition_structure(
             db, company_id=company_id, user_id=user_id, code=row["definition_code"],
             name=row["definition_name"], input_type=row["input_type"], unit=row["unit"],
-            method=row["calculation_method"])
+            method=row["calculation_method"], tiers=row["ordinal_tiers"])
     except DBAPIError as exc:
         translated = translate_database_error(exc)
         if translated is not None:
@@ -501,15 +580,18 @@ async def copy_rejected(
         text("""
             INSERT INTO payroll.paydefinitionrequests
                 (companyid, requestingbranchid, definitioncode, definitionname, inputtype,
-                 unit, calculationmethod, notes, copiedfromrequestid, createdbyuserid)
-            VALUES (:cid, :bid, :code, :name, :input_type, :unit, :method, :notes, :src, :uid)
+                 unit, calculationmethod, ordinaltiers, notes, copiedfromrequestid,
+                 createdbyuserid)
+            VALUES (:cid, :bid, :code, :name, :input_type, :unit, :method,
+                    CAST(:tiers AS jsonb), :notes, :src, :uid)
             RETURNING paydefinitionrequestid
         """),
         {"cid": company_id, "bid": source["requesting_branch_id"],
          "code": source["definition_code"], "name": source["definition_name"],
          "input_type": source["input_type"], "unit": source["unit"],
-         "method": source["calculation_method"], "notes": source["notes"],
-         "src": str(request_id), "uid": user_id},
+         "method": source["calculation_method"],
+         "tiers": None if source["ordinal_tiers"] is None else json.dumps(source["ordinal_tiers"]),
+         "notes": source["notes"], "src": str(request_id), "uid": user_id},
     )).scalar_one()
     await _insert_event(db, new_id, "CopiedFromRejected", None, "Draft", user_id, 1)
     return await _summary(company_id, new_id, db)
@@ -519,12 +601,13 @@ async def create_direct(
     company_id: int, user_id: int, data: PayDefinitionDirectCreate, db: AsyncConnection,
 ) -> PayDefinitionSummary:
     await require_definition_company_edit(company_id, user_id, db)
-    _require_authorable(data.calculation_method, "direct creation")
+    _require_valid_structure(
+        data.calculation_method, data.input_type, data.ordinal_tiers, "direct creation")
     try:
         pay_definition_id, _ = await _create_definition_structure(
             db, company_id=company_id, user_id=user_id, code=data.definition_code,
             name=data.definition_name, input_type=data.input_type, unit=data.unit,
-            method=data.calculation_method)
+            method=data.calculation_method, tiers=data.ordinal_tiers)
         await db.execute(
             text("""
                 INSERT INTO payroll.paydefinitionprovenance
@@ -595,6 +678,113 @@ async def _load_definition(
     if provenance is not None:
         summary["provenance"] = PayDefinitionProvenance.model_validate(dict(provenance))
     return PayDefinitionSummary.model_validate(summary)
+
+
+async def change_structure(
+    company_id: int, user_id: int, pay_definition_id: int, data: PayDefinitionStructureUpdate,
+    db: AsyncConnection,
+) -> PayDefinitionSummary:
+    """Replace the method, input type and topology of a PayDefinition before its first use.
+
+    The PayDefinition keeps its identity. The structure may change only while its
+    RateDefinition is unlocked (no Approved schedule and no payroll period references it yet)
+    and no Pending schedule exists (discard it first); the first Approved schedule or the first
+    period reference locks it for good. The change is one transaction under the same
+    RateDefinition structure lock every schedule and period writer takes, so it is wholly
+    before or wholly after any Pending creation, approval or period creation. Components of the
+    old structure are replaced, never edited; no schedule exists that could reference them.
+
+    Raises RATE_STRUCTURE_LOCKED / RATE_STRUCTURE_PENDING_SCHEDULE (409), or the structure
+    errors of creation (422).
+    """
+    await require_definition_company_edit(company_id, user_id, db)
+    _require_valid_structure(
+        data.calculation_method, data.input_type, data.ordinal_tiers, "a structure change")
+    # Lock order as retirement: the RateDefinition structure lock first (resolved with a plain
+    # read), then the PayDefinition row.
+    rate_definition_id = (await db.execute(
+        text("""
+            SELECT rd.ratedefinitionid
+            FROM   payroll.ratedefinitions rd
+            WHERE  rd.paydefinitionid = :pid AND rd.companyid = :cid
+        """),
+        {"pid": pay_definition_id, "cid": company_id},
+    )).scalar_one_or_none()
+    if rate_definition_id is None:
+        raise compensation_error("DEFINITION_NOT_FOUND", "PayDefinition not found.", 404)
+    locked = await lock_rate_definition_structure(rate_definition_id, db)
+    row = (await db.execute(
+        text("""
+            SELECT status, calculationmethod, inputtype FROM payroll.paydefinitions
+            WHERE  paydefinitionid = :pid AND companyid = :cid
+            FOR UPDATE
+        """),
+        {"pid": pay_definition_id, "cid": company_id},
+    )).mappings().first()
+    if row is None:
+        raise compensation_error("DEFINITION_NOT_FOUND", "PayDefinition not found.", 404)
+    if row["status"] != "Active":
+        raise compensation_error(
+            "PAY_DEFINITION_NOT_ACTIVE", "Only an Active PayDefinition can change structure.", 422)
+    if locked:
+        raise compensation_error(
+            "RATE_STRUCTURE_LOCKED",
+            "The structure is locked: an approved schedule or a payroll period already uses it.",
+            409)
+    pending = (await db.execute(
+        text("SELECT 1 FROM payroll.driverrateschedules "
+             "WHERE ratedefinitionid = :rid AND status = 'Pending' LIMIT 1"),
+        {"rid": rate_definition_id},
+    )).scalar_one_or_none()
+    if pending is not None:
+        raise compensation_error(
+            "RATE_STRUCTURE_PENDING_SCHEDULE",
+            "Discard the Pending schedule before changing the compensation structure.", 409)
+
+    try:
+        # Old components first (they reference the old shape), then the method, input type and
+        # shape together, then the components the new method requires.
+        await db.execute(
+            text("DELETE FROM payroll.ratecomponentdefinitions WHERE ratedefinitionid = :rid"),
+            {"rid": rate_definition_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE payroll.paydefinitions
+                SET    calculationmethod = :method, inputtype = :input_type,
+                       updatedbyuserid = :uid, updatedatutc = now()
+                WHERE  paydefinitionid = :pid
+            """),
+            {"method": data.calculation_method, "input_type": data.input_type,
+             "uid": user_id, "pid": pay_definition_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE payroll.ratedefinitions
+                SET    shape = payroll.fn_shapeforcalculationmethod(:method)
+                WHERE  ratedefinitionid = :rid
+                  AND  shape IS DISTINCT FROM payroll.fn_shapeforcalculationmethod(:method)
+            """),
+            {"method": data.calculation_method, "rid": rate_definition_id},
+        )
+        await _insert_components(
+            db, int(rate_definition_id), data.calculation_method, data.ordinal_tiers)
+    except DBAPIError as exc:
+        translated = translate_database_error(exc)
+        if translated is not None:
+            raise translated from exc
+        raise
+    await write_audit(
+        db, company_id=company_id, branch_id=None, user_id=user_id,
+        action_code="PAY_DEFINITION_STRUCTURE_CHANGED", entity_name="PayDefinitions",
+        entity_id=str(pay_definition_id),
+        old_value={"calculation_method": row["calculationmethod"],
+                   "input_type": row["inputtype"]},
+        new_value={"calculation_method": data.calculation_method,
+                   "input_type": data.input_type,
+                   "ordinal_tiers": [dict(zip(("ordinal_from", "ordinal_to"), bounds))
+                                     for bounds in _tier_bounds(data.ordinal_tiers)]})
+    return await _load_definition(company_id, pay_definition_id, db)
 
 
 async def get_definition(

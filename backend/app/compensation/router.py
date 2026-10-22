@@ -38,6 +38,7 @@ from app.compensation.schemas import (
     PayDefinitionRequestSubmit,
     PayDefinitionRequestSummary,
     PayDefinitionRequestUpdate,
+    PayDefinitionStructureUpdate,
     PayDefinitionSummary,
     ResolvedCompensation,
     ScheduleCreate,
@@ -165,6 +166,15 @@ async def get_pay_definition(
 ) -> PayDefinitionSummary:
     company_id, user_id = _ids(token)
     return await definitions.get_definition(company_id, user_id, pay_definition_id, db)
+
+
+@router.put("/pay-definitions/{pay_definition_id}/structure", response_model=PayDefinitionSummary,
+            summary="Replace the method and topology of a PayDefinition before its first use")
+async def change_pay_definition_structure(
+    token: TokenDep, db: DbDep, pay_definition_id: int, body: PayDefinitionStructureUpdate,
+) -> PayDefinitionSummary:
+    company_id, user_id = _ids(token)
+    return await definitions.change_structure(company_id, user_id, pay_definition_id, body, db)
 
 
 @router.post("/pay-definitions/{pay_definition_id}/retire", response_model=PayDefinitionSummary,

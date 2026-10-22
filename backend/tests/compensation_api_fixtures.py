@@ -257,3 +257,56 @@ async def authored_schedule(
     approved = await approve_schedule(client, tenant, pending)
     assert approved.status_code == 200, approved.text
     return approved.json()
+
+
+ORDINAL_TIERS = [
+    {"ordinal_from": 1, "ordinal_to": 1},
+    {"ordinal_from": 2, "ordinal_to": 2},
+    {"ordinal_from": 3, "ordinal_to": None},
+]
+
+
+async def create_ordinal_definition(
+    client: httpx.AsyncClient, tenant: Tenant, **overrides,
+) -> dict:
+    """An OrdinalTier definition through direct creation (tiers 1, 2 and 3+ unless overridden)."""
+    body = {
+        "definition_code": "T" + uuid4().hex[:10],
+        "definition_name": "Tiered definition",
+        "input_type": "WholeNumber",
+        "unit": "stop",
+        "calculation_method": "OrdinalTier",
+        "ordinal_tiers": ORDINAL_TIERS,
+    } | overrides
+    response = await client.post("/compensation/pay-definitions", json=body, headers=tenant.admin)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+async def set_tier_values(
+    client: httpx.AsyncClient, tenant: Tenant, schedule: dict, definition: dict, amounts,
+    headers: dict | None = None,
+) -> httpx.Response:
+    """Replace a Pending schedule's value set: one amount per tier of the definition."""
+    return await client.put(
+        f"/compensation/driver-rate-schedules/{schedule['driver_rate_schedule_id']}/values",
+        json={"values": [
+            {"rate_component_definition_id": component["rate_component_definition_id"],
+             "amount": amount}
+            for component, amount in zip(definition["components"], amounts, strict=True)
+        ]},
+        headers=headers or tenant.admin,
+    )
+
+
+async def authored_tier_schedule(
+    client: httpx.AsyncClient, tenant: Tenant, definition: dict, amounts=("3", "4", "5"),
+    **kwargs,
+) -> dict:
+    """Create, fill and approve one complete OrdinalTier schedule through the API."""
+    pending = await create_pending(client, tenant, definition, **kwargs)
+    filled = await set_tier_values(client, tenant, pending, definition, amounts)
+    assert filled.status_code == 200, filled.text
+    approved = await approve_schedule(client, tenant, pending)
+    assert approved.status_code == 200, approved.text
+    return approved.json()

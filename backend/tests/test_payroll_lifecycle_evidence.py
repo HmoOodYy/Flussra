@@ -87,7 +87,7 @@ async def test_submit_freezes_one_snapshot_and_binds_it_to_the_pending_review_it
     item_id = await pending_review_item(tenant, period)
     assert bound_snapshot_id(tenant, item_id) == snapshot_id
     frozen = _snapshot_row(tenant, snapshot_id)
-    assert (frozen["revision"], frozen["version"]) == (1, "payroll-calculation-v3")
+    assert (frozen["revision"], frozen["version"]) == (1, "payroll-calculation-v4")
     assert frozen["total"] == D("42.00")
     # The submission is evidenced: workflow action bound to the snapshot, and an audit entry.
     assert rows(tenant, """
@@ -342,7 +342,7 @@ async def test_a_calculation_snapshot_of_another_version_is_never_consumed(
     allow_self_approval(tenant)
     await submit(p3c_client, tenant, period)
     item_id = await pending_review_item(tenant, period)
-    monkeypatch.setattr(snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v4")
+    monkeypatch.setattr(snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v5")
 
     refused = await decide(p3c_client, tenant, item_id, expect=422)
     assert refused.json()["detail"].startswith("UNSUPPORTED_CALCULATION_VERSION")
@@ -350,7 +350,7 @@ async def test_a_calculation_snapshot_of_another_version_is_never_consumed(
 
     monkeypatch.undo()
     await decide(p3c_client, tenant, item_id)
-    monkeypatch.setattr(snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v4")
+    monkeypatch.setattr(snapshot_hash, "CURRENT_PAYROLL_CALCULATION_VERSION", "payroll-calculation-v5")
     for response in (await finalization_preview(p3c_client, tenant, period, expect=422),
                      await finalize(p3c_client, tenant, period, expect=422)):
         assert response.json()["detail"].startswith("UNSUPPORTED_CALCULATION_VERSION")

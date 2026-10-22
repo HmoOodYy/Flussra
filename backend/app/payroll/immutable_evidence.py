@@ -159,15 +159,23 @@ def _schedule_descriptor(line: dict[str, Any]) -> dict[str, Any]:
     """The target DriverRateSchedule a line used, as the packet resolved it.
 
     An ordinary line is owned by a PayDefinition, a Status line by a Status rate column; the
-    descriptor records whichever owner the line has, never both.
+    descriptor records whichever owner the line has, never both. A line of a single-rate method
+    records the one schedule value and its amount (shape ``Scalar``); a line of a multi-value
+    method (OrdinalTier) has ``RateValues`` and records every tier value of the schedule
+    instead (shape ``OrdinalTierSchedule``), with no single amount.
     """
     source_type = line["SourceType"]
     owner_field = "PayDefinitionID" if source_type == "DraftLine" else "StatusRateColumnID"
+    rate_values = line.get("RateValues") or None
+    if rate_values is not None and source_type != "DraftLine":
+        raise HTTPException(
+            status_code=422,
+            detail="Cannot submit: a Status line carries tier values instead of one rate.",
+        )
     required = (
-        "DriverRateScheduleID", "RateDefinitionID", owner_field,
-        "RateComponentDefinitionID", "ResolvedRateAmount", "ScheduleStatus",
+        "DriverRateScheduleID", "RateDefinitionID", owner_field, "ScheduleStatus",
         "ScheduleEffectiveFrom",
-    )
+    ) + (() if rate_values is not None else ("RateComponentDefinitionID", "ResolvedRateAmount"))
     if any(line.get(field) is None for field in required):
         raise HTTPException(
             status_code=422,
@@ -188,8 +196,11 @@ def _schedule_descriptor(line: dict[str, Any]) -> dict[str, Any]:
             int(line["PayDefinitionID"]) if source_type == "DraftLine" else None),
         "StatusRateColumnID": (
             int(line["StatusRateColumnID"]) if source_type == "StatusEntryState" else None),
-        "RateComponentDefinitionID": int(line["RateComponentDefinitionID"]),
-        "RateAmount": line["ResolvedRateAmount"],
+        "RateShape": "Scalar" if rate_values is None else "OrdinalTierSchedule",
+        "RateComponentDefinitionID": (
+            int(line["RateComponentDefinitionID"]) if rate_values is None else None),
+        "RateAmount": line["ResolvedRateAmount"] if rate_values is None else None,
+        "Components": None if rate_values is None else [dict(value) for value in rate_values],
         "EffectiveFrom": line["ScheduleEffectiveFrom"],
         "EffectiveTo": line["ScheduleEffectiveTo"],
         "RateStatus": line["ScheduleStatus"],
@@ -204,8 +215,8 @@ def build_used_rate_evidence(
     """The rates actually used by the snapshot's lines, one descriptor per distinct rate.
 
     Ordinary and Status lines record the target DriverRateSchedule they used (schedule,
-    definition and owner, the schedule value and its amount, status and effective window)
-    exactly as the calculation packet resolved them. Bonus lines use no rate. DriverPayRules
+    definition and owner, the schedule value and its amount or, for OrdinalTier, every tier
+    value, status and effective window) exactly as the calculation packet resolved them. Bonus lines use no rate. DriverPayRules
     are not captured here: the Min/Max rule evidence of the snapshot is their one authority.
 
     Returns the distinct descriptors (each with its ``DefinitionFingerprint``) and, per input
@@ -244,7 +255,8 @@ async def insert_used_rate_evidence(
                 (payrollcalculationsnapshotid, companyid, branchid, payrollperiodid,
                  driverassignmentid, driverid, definitionfingerprint, evidencekind,
                  sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
-                 paydefinitionid, statusratecolumnid, ratecomponentdefinitionid,
+                 paydefinitionid, statusratecolumnid, rateshapesnapshot,
+                 ratecomponentdefinitionid,
                  rateamountsnapshot, effectivefromsnapshot, effectivetosnapshot,
                  ratestatussnapshot, currencycodesnapshot,
                  currencyminorunitdigitssnapshot)
@@ -252,7 +264,7 @@ async def insert_used_rate_evidence(
                 (:snapshot_id, :company_id, :branch_id, :period_id,
                  :driver_assignment_id, :driver_id, :fingerprint, :evidence_kind,
                  :source_type, :schedule_id, :rate_definition_id, :pay_definition_id,
-                 :status_rate_column_id, :component_id,
+                 :status_rate_column_id, :rate_shape, :component_id,
                  :rate_amount, :effective_from, :effective_to, :rate_status,
                  :currency_code, :currency_minor)
             RETURNING payrollcalculationsnapshotusedratedefinitionid
@@ -270,6 +282,7 @@ async def insert_used_rate_evidence(
             "rate_definition_id": descriptor.get("RateDefinitionID"),
             "pay_definition_id": descriptor.get("PayDefinitionID"),
             "status_rate_column_id": descriptor.get("StatusRateColumnID"),
+            "rate_shape": descriptor["RateShape"],
             "component_id": descriptor.get("RateComponentDefinitionID"),
             "rate_amount": descriptor["RateAmount"],
             "effective_from": descriptor["EffectiveFrom"],
@@ -278,5 +291,25 @@ async def insert_used_rate_evidence(
             "currency_code": descriptor["CurrencyCodeSnapshot"],
             "currency_minor": descriptor["CurrencyMinorUnitDigitsSnapshot"],
         })
-        ids[descriptor["DefinitionFingerprint"]] = int(result.scalar_one())
+        used_rate_id = int(result.scalar_one())
+        ids[descriptor["DefinitionFingerprint"]] = used_rate_id
+        for component in descriptor.get("Components") or ():
+            await db.execute(text("""
+                INSERT INTO payroll.payrollcalculationsnapshotusedratecomponents
+                    (payrollcalculationsnapshotusedratedefinitionid, payrollcalculationsnapshotid,
+                     ratedefinitionid, sequenceno, ratecomponentdefinitionid, ordinalfrom,
+                     ordinalto, amountsnapshot)
+                VALUES
+                    (:used_rate_id, :snapshot_id, :rate_definition_id, :sequence_no,
+                     :component_id, :ordinal_from, :ordinal_to, :amount)
+            """), {
+                "used_rate_id": used_rate_id,
+                "snapshot_id": snapshot_id,
+                "rate_definition_id": descriptor["RateDefinitionID"],
+                "sequence_no": component["SequenceNo"],
+                "component_id": component["RateComponentDefinitionID"],
+                "ordinal_from": component["OrdinalFrom"],
+                "ordinal_to": component["OrdinalTo"],
+                "amount": component["Amount"],
+            })
     return ids

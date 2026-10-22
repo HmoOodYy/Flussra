@@ -87,7 +87,8 @@ async def test_direct_create_builds_one_scalar_structure_and_provenance(p3c_clie
     assert len(created["components"]) == 1
     assert created["components"][0]["sequence_no"] == 1
     assert created["components"][0]["ordinal_from"] is None
-    assert created["structure_locked_at_utc"] is not None
+    # Creation is not a use: the structure stays unlocked until the first authoritative use.
+    assert created["structure_locked_at_utc"] is None
     provenance = created["provenance"]
     assert provenance["creation_mode"] == "DirectCreate"
     assert provenance["created_by_user_id"] == tenant.owner
@@ -152,22 +153,6 @@ async def test_same_code_in_two_companies_but_not_twice_in_one(p3c_client, tenan
     assert duplicate.json()["detail"]["code"] == "DEFINITION_CODE_CONFLICT"
 
 
-async def test_ordinal_tier_is_not_authorable_yet(p3c_client, tenant):
-    response = await p3c_client.post(
-        "/compensation/pay-definitions",
-        json={"definition_name": "Tiered", "input_type": "WholeNumber",
-              "calculation_method": "OrdinalTier"},
-        headers=tenant.admin)
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "CALCULATION_METHOD_NOT_AVAILABLE"
-
-    draft = (await _draft(p3c_client, tenant, calculation_method="OrdinalTier",
-                          input_type="WholeNumber")).json()
-    submit = await _submit(p3c_client, tenant, draft)
-    assert submit.status_code == 422
-    assert submit.json()["detail"]["code"] == "CALCULATION_METHOD_NOT_AVAILABLE"
-
-
 @pytest.mark.parametrize("bad", [
     {"input_type": "Time"}, {"calculation_method": "Fixed"}, {"definition_name": "  "},
     {"calculation_method": "RangeBracket"},
@@ -206,7 +191,7 @@ async def test_request_approval_creates_the_definition_and_full_provenance(
         f"/compensation/pay-definitions/{definition_id}", headers=tenant.admin)).json()
     assert definition["definition_code"] == "ITEM_ALPHA"
     assert definition["status"] == "Active"
-    assert definition["structure_locked_at_utc"] is not None
+    assert definition["structure_locked_at_utc"] is None
     provenance = definition["provenance"]
     assert provenance["creation_mode"] == "Request"
     assert provenance["source_request_id"] == request["request_id"]
