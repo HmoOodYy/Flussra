@@ -4,7 +4,7 @@ import type { PayRateTab } from './payRatesDrivers';
 import { compensationErrorMessage } from './payRatesErrors';
 
 export interface EditRow {
-  amount: string;
+  values: Record<number, string>;
   effective_from: string;
 }
 

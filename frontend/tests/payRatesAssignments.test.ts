@@ -4,19 +4,16 @@ import { test } from 'node:test';
 const read = (name: string) => readFileSync(
   new URL(`../src/pages/people/pay-rates/${name}`, import.meta.url), 'utf8');
 
-test('the Pay Rates roster is built from the assignment roster grouped by Driver', () => {
+test('the Pay Rates roster is built from the assignment roster and uses permanent Driver links', () => {
   assert.match(read('driverAssignmentsApi.ts'), /\/core\/driver-assignments/);
   const context = read('usePayRateDriverContext.ts');
   assert.match(context, /listDriverAssignmentRoster\(\)/);
   assert.match(context, /groupRosterByDriver\(roster\)/);
   assert.match(context, /filterDrivers\(drivers/);
-  // Deep links: ?driverId=, ?driverAssignmentId= resolved to its Driver, and ?driverUserId=.
+  // External navigation addresses the permanent Driver; no User or assignment translation is needed.
   assert.match(context, /idParam\('driverId'\)/);
-  assert.match(context, /idParam\('driverAssignmentId'\)/);
-  assert.match(context, /roster\.find\(\(row\) => row\.driver_assignment_id === linkedAssignmentId\)/);
-  assert.match(context, /linkedAssignment\?\.driver_id/);
+  assert.doesNotMatch(context, /driverUserId|driverAssignmentId|linkedAssignment/);
   assert.doesNotMatch(context, /tenureById|statusAssignment|selectStatusAssignment/); // no rate is tied to an assignment
-  assert.match(context, /has_driver: boolean; driver_id: number \| null/);
 });
 
 test('every rate and the pay rules are read and written by driver_id; Status rates are rate column schedules', () => {

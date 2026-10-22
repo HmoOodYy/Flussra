@@ -907,3 +907,16 @@
   font-size: 0.76rem;
   color: #6b7280;
 }
+.tierRateEditor {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 10rem;
+}
+
+.tierRateInput {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(5rem, 1fr);
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.78rem;
+}

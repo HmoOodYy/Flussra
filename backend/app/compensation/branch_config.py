@@ -33,6 +33,7 @@ from app.compensation.schemas import (
     BulkBranchConfigBranchResult,
     BulkBranchConfigResult,
     BulkBranchConfigUpdate,
+    RateComponentSummary,
 )
 
 _CONFIG_EDIT = ["payitems.edit", "setup.manage"]
@@ -289,6 +290,8 @@ def _state(row, current, pending, *, has_open_periods: bool = False) -> BranchPa
         input_type=row["inputtype"],
         unit=row["unit"],
         calculation_method=row["calculationmethod"],
+        components=[RateComponentSummary.model_validate(component) for component in row["components"]],
+        structure_locked_at_utc=row["structurelockedatutc"],
         definition_status=row["status"],
         rate_definition_id=row["ratedefinitionid"],
         is_configured=current is not None,
@@ -302,7 +305,17 @@ def _state(row, current, pending, *, has_open_periods: bool = False) -> BranchPa
 
 _DEFINITION_COLUMNS = """
     pd.paydefinitionid, pd.definitioncode, pd.definitionname, pd.inputtype, pd.unit,
-    pd.calculationmethod, pd.status, rd.ratedefinitionid
+    pd.calculationmethod, pd.status, rd.ratedefinitionid, rd.structurelockedatutc,
+    COALESCE((
+        SELECT jsonb_agg(jsonb_build_object(
+            'rate_component_definition_id', rcd.ratecomponentdefinitionid,
+            'sequence_no', rcd.sequenceno,
+            'ordinal_from', rcd.ordinalfrom,
+            'ordinal_to', rcd.ordinalto
+        ) ORDER BY rcd.sequenceno)
+        FROM payroll.ratecomponentdefinitions rcd
+        WHERE rcd.ratedefinitionid = rd.ratedefinitionid
+    ), '[]'::jsonb) AS components
 """
 
 

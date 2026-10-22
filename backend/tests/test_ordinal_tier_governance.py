@@ -117,6 +117,24 @@ async def test_perunit_and_ordinal_tier_definitions_coexist_with_arbitrary_names
         "ITEM_ALPHA": "PerUnit", "HOURS": "OrdinalTier"}
 
 
+async def test_branch_applicability_read_exposes_canonical_structure_to_branch_operators(
+    p3c_client, tenant,
+):
+    created = await create_ordinal_definition(
+        p3c_client, tenant, definition_code="BRANCH_TIERS", definition_name="Branch tiers")
+    response = await p3c_client.get(
+        f"/compensation/branches/{tenant.branch_a}/pay-definitions",
+        headers=tenant.headers(tenant.branch_user))
+    assert response.status_code == 200
+    branch_definition = next(
+        item for item in response.json() if item["pay_definition_id"] == created["pay_definition_id"])
+    assert branch_definition["calculation_method"] == "OrdinalTier"
+    assert branch_definition["input_type"] == "WholeNumber"
+    assert [(component["ordinal_from"], component["ordinal_to"])
+            for component in branch_definition["components"]] == _bounds(created)
+    assert branch_definition["structure_locked_at_utc"] is None
+
+
 @pytest.mark.parametrize(("name", "tiers"), [
     ("a gap", [(1, 1), (3, None)]),
     ("an overlap", [(1, 3), (3, None)]),

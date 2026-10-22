@@ -9,12 +9,14 @@ import {
 } from '../../../lib/compensationApi';
 import type {
   PayDefinitionDecisionAction,
+  PayDefinitionCalculationMethod,
   PayDefinitionInputType,
+  OrdinalTierInput,
   PayDefinitionRequestEvent,
   PayDefinitionRequestSummary,
 } from '../../../types/compensation';
 import { saveAndSubmitDraft } from './requestDraftWorkflow';
-import { apiError, type RequestFilter } from './payItemsModel';
+import { apiError, validatePayMethod, type RequestFilter } from './payItemsModel';
 
 interface UsePayDefinitionRequestsArgs {
   selectedBranchId: number | null;
@@ -43,6 +45,8 @@ export function usePayDefinitionRequests({
   const [draftTarget, setDraftTarget] = useState<PayDefinitionRequestSummary | null>(null);
   const [draftName, setDraftName] = useState('');
   const [draftInputType, setDraftInputType] = useState<PayDefinitionInputType>('Decimal');
+  const [draftCalculationMethod, setDraftCalculationMethodState] = useState<PayDefinitionCalculationMethod>('PerUnit');
+  const [draftOrdinalTiers, setDraftOrdinalTiers] = useState<OrdinalTierInput[]>([{ ordinal_from: 1, ordinal_to: null }]);
   const [draftUnit, setDraftUnit] = useState('');
   const [draftNotes, setDraftNotes] = useState('');
   const [draftSaving, setDraftSaving] = useState(false);
@@ -103,6 +107,9 @@ export function usePayDefinitionRequests({
     setDraftTarget(request);
     setDraftName(request.definition_name ?? '');
     setDraftInputType(request.input_type ?? 'Decimal');
+    const method = request.calculation_method ?? 'PerUnit';
+    setDraftCalculationMethodState(method);
+    setDraftOrdinalTiers(request.ordinal_tiers?.map((tier) => ({ ...tier })) ?? [{ ordinal_from: 1, ordinal_to: null }]);
     setDraftUnit(request.unit ?? '');
     setDraftNotes(request.notes ?? '');
     setDraftError('');
@@ -114,12 +121,20 @@ export function usePayDefinitionRequests({
       setDraftError('Pay item name is required.');
       return;
     }
+    const methodError = validatePayMethod(draftCalculationMethod, draftInputType,
+      draftCalculationMethod === 'OrdinalTier' ? draftOrdinalTiers : []);
+    if (methodError) {
+      setDraftError(methodError);
+      return;
+    }
     setDraftSaving(true);
     setDraftError('');
     try {
       const result = await saveAndSubmitDraft(
         { updatePayDefinitionRequest, submitPayDefinitionRequest }, draftTarget,
         { definition_name: draftName.trim(), input_type: draftInputType,
+          calculation_method: draftCalculationMethod,
+          ...(draftCalculationMethod === 'OrdinalTier' ? { ordinal_tiers: draftOrdinalTiers } : { ordinal_tiers: null }),
           unit: draftUnit.trim(), notes: draftNotes.trim() });
       setDraftTarget(null);
       setRequestKey(k => k + 1);
@@ -163,6 +178,8 @@ export function usePayDefinitionRequests({
     decideTarget, setDecideTarget, decideAction, decideReason, setDecideReason,
     decideSaving, decideError, openDecide, executeDecide,
     draftTarget, setDraftTarget, draftName, setDraftName, draftInputType, setDraftInputType,
+    draftCalculationMethod, setDraftCalculationMethod: setDraftCalculationMethodState,
+    draftOrdinalTiers, setDraftOrdinalTiers,
     draftUnit, setDraftUnit, draftNotes, setDraftNotes, draftSaving, draftError,
     openDraftEdit, executeDraftEdit, copyRejected, toggleRequestHistory,
   };

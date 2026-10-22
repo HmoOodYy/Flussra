@@ -1,12 +1,12 @@
 # Flussra Compensation Architecture Modernization — Master Implementation Plan
 
-**Status:** APPROVED TARGET ARCHITECTURE — P5b (OrdinalTier completion) is the current implementation work unit
+**Status:** APPROVED TARGET ARCHITECTURE — P5b backend OrdinalTier authority and P7a are closed; P7b final Compensation / Settings UI is implemented and awaiting independent review/merge
 **Document role:** Authoritative Compensation target architecture and implementation dependency plan
 **Repository:** `HmoOodYy/Flussra`
-**Current baseline:** `main @ 0abc0832a8cc5092b67dc56d6748bc1a4a799168` (PR #63 merge, P5a closed); Alembic head `0090` before P5b. Earlier baseline: `main @ 83234d46b5ab357c1e7062d77aff4e4ad3d9e711` (PR #48 merge, P4a closed), head `0084`. Previous baseline: `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c` (PR #47 merge, P3c closed), head `0083`. Historical post-G0 baseline: `main @ f2937bfdcbe1266a00716905a8712f3fe29baff2` (PR #45 merge), head `0081`. Historical earlier baseline: `main @ f671a2ee61e9d31b0804af95eaff9973978a94af`, with P2c PR #28 merged as `af00a22915f93810d123aadea18c3a73da1360aa`
-**Execution state:** P2c, Phase 2, P3a (PR #30), G0 (G0.1–G0.6, PR #34 through PR #45) P3b (PR #46, `main @ edcf871f59d0616e194a8e752d9b6ba23f42b8a2`, migration head `0082`) and P3c (PR #47, `main @ 3f389499bbb1a0a70935360f32230f8e0aae4a7c`, migration head `0083`) are closed; P4a — Generic PayDefinition / Branch Configuration authority cutover — closed via PR #48 (`main @ 83234d46b5ab357c1e7062d77aff4e4ad3d9e711`, migration head `0084`); P4b — Target Period Definition Runtime + PerUnit Cutover — closed via PR #49 (head `0085`); the Branch timezone refoundation (PR #56, head `0086`), Durable Driver Stages 1–3 (PRs #57–#59, head `0088`), P4c (PR #62, head `0089`) and P5a (PR #63, head `0090`) are closed; P5b — OrdinalTier completion — is the current implementation work unit and advances the migration head from `0090` to `0091`
+**Current baseline:** `main @ b4474728196b23cf2b95aad6a30abb4914e9ff05` (PR #65 merge, P7a closed); Alembic head `0091`. P5b closed via PR #64 at `d7030ab9a1c9d1dd6198b08b91735ec5db3b34da`; P7a adds no migration. Earlier baselines are retained below as implementation history.
+**Execution state:** P2c, Phase 2, P3a (PR #30), G0 (PRs #34–#45), P3b (PR #46), P3c (PR #47), P4a (PR #48), P4b (PR #49), the Branch timezone refoundation (PR #56), Durable Driver Stages 1–3 (PRs #57–#59), P4c (PR #62), P5a (PR #63), P5b (PR #64, head `0091`) and P7a (PR #65, no migration) are closed. P7b — final Compensation / Settings UI — is implemented and awaiting independent review/merge; it adds no migration. P7c and P8 remain future/deferred.
 
-> This document records the approved target architecture. P5a is closed; P5b is the current implementation unit; P7 and later units have not started.
+> This document records the approved target architecture. P5b's backend OrdinalTier work and P7a are closed. P7b is implemented and awaiting independent review/merge; P7c and P8 remain future/deferred.
 
 > **P5b OrdinalTier amendment (2026-10-22):** OrdinalTier is operational as a first-production method through the generic architecture of this plan (the P5b section of `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` records the implemented contract). The definition owns the topology and generic PayDefinition governance creates it (a request stores its proposed tiers; creation leaves the structure unlocked and an unused, Pending-free definition may replace its method and topology through the governance structure change until the first Approved schedule or first period reference sets the one canonical structure lock); a Driver's `DriverRateSchedule` supplies one complete value set; the method-owned calculation pays each ordinal unit with the value of the tier covering it (`3 + 4 + 5 + 5 = 17`, ordinals restarting per source line); evidence freezes the topology, the values and the per-tier explanation in calculation contract `payroll-calculation-v4`. Statements below that call OrdinalTier not yet operational, or place its runtime in the old P7 position, are superseded; the final tier authoring screens remain a later UX unit.
 
@@ -1245,9 +1245,9 @@ DayEntryState
 
 ---
 
-## P7 — OrdinalTier
+## P7 — OrdinalTier (backend authority completed by P5b)
 
-May run before/after P6 once P5C is complete, but must be after PerUnit architecture is proven.
+The target design below is implemented by P5b and remains the behavioral authority. It is retained as architecture history, not as future backend work. The final method/topology authoring UX is P7b, after P7a and on the merged P5b contract.
 
 ### Definition editing
 

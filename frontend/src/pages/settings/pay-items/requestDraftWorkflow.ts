@@ -1,4 +1,6 @@
 import type {
+  OrdinalTierInput,
+  PayDefinitionCalculationMethod,
   PayDefinitionInputType,
   PayDefinitionRequestSubmitPayload,
   PayDefinitionRequestSummary,
@@ -17,6 +19,8 @@ export interface RequestDraftWorkflowDeps {
 export interface RequestDraftEditFields {
   definition_name: string;
   input_type: PayDefinitionInputType;
+  calculation_method: PayDefinitionCalculationMethod;
+  ordinal_tiers: OrdinalTierInput[] | null;
   unit: string;
   notes: string;
 }
@@ -48,6 +52,8 @@ export async function saveAndSubmitDraft(
     expected_revision: draft.revision,
     definition_name: edits.definition_name,
     input_type: edits.input_type,
+    calculation_method: edits.calculation_method,
+    ordinal_tiers: edits.ordinal_tiers,
     unit: edits.unit,
     notes: edits.notes,
   });

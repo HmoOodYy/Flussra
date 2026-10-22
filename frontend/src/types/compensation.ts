@@ -159,6 +159,8 @@ export interface BranchPayDefinitionState {
   input_type: PayDefinitionInputType;
   unit: string | null;
   calculation_method: PayDefinitionCalculationMethod;
+  components: RateComponentSummary[];
+  structure_locked_at_utc: string | null;
   definition_status: PayDefinitionStatus;
   rate_definition_id: number | null;
   is_configured: boolean;

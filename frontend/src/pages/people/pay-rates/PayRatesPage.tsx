@@ -12,7 +12,6 @@
  * tied to a Branch assignment, so the rates follow the Driver across a transfer.
  */
 import { useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import { useAuth } from '../../../store/authStore';
 import { canEditPayRates } from '../../../lib/permissions';
 import styles from './PayRatesPage.module.css';
@@ -142,15 +141,7 @@ export function PayRatesPage() {
         />
 
         <div className={styles.right}>
-          {driver.noProfile ? (
-            <div className={styles.emptyRight}>
-              <div className={styles.emptyRightCard}>
-                <p className={styles.emptyRightTitle}>No driver profile</p>
-                <p className={styles.emptyRightMsg}>This user does not have a driver profile yet.</p>
-                <Link to="/people" style={{ fontSize: '0.83rem', color: '#6366f1' }}>Back to People</Link>
-              </div>
-            </div>
-          ) : selectedDriverId == null ? (
+          {selectedDriverId == null ? (
             <div className={styles.emptyRight}>
               <div className={styles.emptyRightCard}>
                 <p className={styles.emptyRightTitle}>Select a driver</p>

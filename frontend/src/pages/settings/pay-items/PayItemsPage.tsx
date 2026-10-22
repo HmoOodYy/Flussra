@@ -189,6 +189,10 @@ export function PayItemsPage() {
         setDraftName={requests.setDraftName}
         draftInputType={requests.draftInputType}
         setDraftInputType={requests.setDraftInputType}
+        draftCalculationMethod={requests.draftCalculationMethod}
+        setDraftCalculationMethod={requests.setDraftCalculationMethod}
+        draftOrdinalTiers={requests.draftOrdinalTiers}
+        setDraftOrdinalTiers={requests.setDraftOrdinalTiers}
         draftUnit={requests.draftUnit}
         setDraftUnit={requests.setDraftUnit}
         draftNotes={requests.draftNotes}
@@ -230,6 +234,10 @@ export function PayItemsPage() {
         setCreateCode={creation.setCreateCode}
         createInputType={creation.createInputType}
         setCreateInputType={creation.setCreateInputType}
+        createCalculationMethod={creation.createCalculationMethod}
+        setCreateCalculationMethod={creation.setCreateCalculationMethod}
+        createOrdinalTiers={creation.createOrdinalTiers}
+        setCreateOrdinalTiers={creation.setCreateOrdinalTiers}
         createUnit={creation.createUnit}
         setCreateUnit={creation.setCreateUnit}
         createNotes={creation.createNotes}
