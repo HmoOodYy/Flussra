@@ -10,7 +10,6 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
-from psycopg2 import errors
 
 from app.compensation import resolver
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
@@ -87,8 +86,8 @@ async def test_direct_creation_builds_the_definition_owned_topology(p3c_client, 
     assert created["rate_shape"] == "OrdinalTierSchedule"
     assert _bounds(created) == [(1, 1), (2, 2), (3, None)]
     assert [c["sequence_no"] for c in created["components"]] == [1, 2, 3]
-    # The governed event is the first authoritative use of the structure, as for PerUnit.
-    assert created["structure_locked_at_utc"] is not None
+    # Creation is not a use: the structure is unlocked until the first authoritative use.
+    assert created["structure_locked_at_utc"] is None
     assert created["provenance"]["creation_mode"] == "DirectCreate"
     assert created["provenance"]["calculation_method_version"] == 1
     cur.execute("""
@@ -196,23 +195,6 @@ async def test_only_company_wide_editors_create_definitions_directly(p3c_client,
         assert response.status_code == 403
 
 
-async def test_structure_of_a_governed_definition_is_locked_from_the_start(
-    p3c_client, tenant, cur,
-):
-    created = await create_ordinal_definition(p3c_client, tenant)
-    rate_definition_id = created["rate_definition_id"]
-    for statement in (
-        "UPDATE payroll.ratecomponentdefinitions SET ordinalto = 9 WHERE ratedefinitionid = %s",
-        "DELETE FROM payroll.ratecomponentdefinitions WHERE ratedefinitionid = %s",
-    ):
-        with pytest.raises(errors.CheckViolation, match="RATE_STRUCTURE_LOCKED"):
-            cur.execute(statement, (rate_definition_id,))
-    with pytest.raises(errors.CheckViolation, match="RATE_STRUCTURE_LOCKED"):
-        cur.execute(
-            "UPDATE payroll.paydefinitions SET calculationmethod = 'PerUnit', "
-            "inputtype = 'Decimal' WHERE paydefinitionid = %s", (created["pay_definition_id"],))
-
-
 # ---------------------------------------------------------------------------
 # Definition governance: request, approval and provenance
 # ---------------------------------------------------------------------------
@@ -231,7 +213,7 @@ async def test_a_request_carries_its_topology_through_approval(p3c_client, tenan
         f"{DEFINITIONS}/{request['approved_pay_definition_id']}", headers=tenant.admin)).json()
     assert definition["calculation_method"] == "OrdinalTier"
     assert _bounds(definition) == [(1, 1), (2, 2), (3, None)]
-    assert definition["structure_locked_at_utc"] is not None
+    assert definition["structure_locked_at_utc"] is None
     provenance = definition["provenance"]
     assert provenance["creation_mode"] == "Request"
     assert provenance["source_request_id"] == request["request_id"]

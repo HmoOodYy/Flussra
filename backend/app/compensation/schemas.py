@@ -137,6 +137,17 @@ class PayDefinitionDirectCreate(_DefinitionFieldValidators):
     ordinal_tiers: list[OrdinalTierInput] | None = None
 
 
+class PayDefinitionStructureUpdate(_DefinitionFieldValidators):
+    """The method-specific structure of an existing, not yet authoritative PayDefinition.
+
+    The method, the input type and (for OrdinalTier) the ordered topology are replaced together.
+    """
+
+    calculation_method: str
+    input_type: str
+    ordinal_tiers: list[OrdinalTierInput] | None = None
+
+
 class PayDefinitionRequestSummary(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

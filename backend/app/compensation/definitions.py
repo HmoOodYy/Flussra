@@ -40,6 +40,7 @@ from app.compensation.schemas import (
     PayDefinitionRequestSubmit,
     PayDefinitionRequestSummary,
     PayDefinitionRequestUpdate,
+    PayDefinitionStructureUpdate,
     PayDefinitionSummary,
     RateComponentSummary,
 )
@@ -427,16 +428,48 @@ def _generated_code() -> str:
     return f"PD{_uuid.uuid4().hex[:12].upper()}"
 
 
+async def _insert_components(
+    db: AsyncConnection, rate_definition_id: int, method: str, tiers: list | None,
+) -> None:
+    """The components a method requires: the one scalar component of PerUnit, or the ordered
+    tier components of an OrdinalTier topology (the definition owns the topology, a Driver
+    schedule only supplies the values). Then the structure must be complete: for OrdinalTier
+    a valid topology."""
+    if method == "OrdinalTier":
+        for sequence_no, (ordinal_from, ordinal_to) in enumerate(_tier_bounds(tiers), start=1):
+            await db.execute(
+                text("""
+                    INSERT INTO payroll.ratecomponentdefinitions
+                        (ratedefinitionid, shape, sequenceno, ordinalfrom, ordinalto)
+                    VALUES (:rid, 'OrdinalTierSchedule', :seq, :low, :high)
+                """),
+                {"rid": rate_definition_id, "seq": sequence_no, "low": ordinal_from,
+                 "high": ordinal_to},
+            )
+    else:
+        await db.execute(
+            text("""
+                INSERT INTO payroll.ratecomponentdefinitions (ratedefinitionid, shape, sequenceno)
+                VALUES (:rid, 'Scalar', 1)
+            """),
+            {"rid": rate_definition_id},
+        )
+    await db.execute(
+        text("SELECT payroll.fn_AssertRateStructureComplete(:rid)"),
+        {"rid": rate_definition_id},
+    )
+
+
 async def _create_definition_structure(
     db: AsyncConnection, *, company_id: int, user_id: int, code: str | None, name: str,
     input_type: str, unit: str | None, method: str, tiers: list | None = None,
 ) -> tuple[int, int]:
-    """Create the PayDefinition with its RateDefinition and the components its method requires:
-    the one scalar component of PerUnit, or the ordered tier components of an OrdinalTier
-    topology (the definition owns the topology, a Driver schedule only supplies the values).
+    """Create the PayDefinition with its RateDefinition and the components its method requires.
 
-    The governed event is the first authoritative use of the structure, so the
-    canonical RateDefinitions.StructureLockedAtUtc is set here and nowhere else.
+    The structure is created unlocked. The canonical RateDefinitions.StructureLockedAtUtc is
+    set by the first authoritative use (the first Approved schedule or the first payroll
+    period that references the RateDefinition), never by creation: until then
+    ``change_structure`` may correct the method and topology.
     """
     pay_definition_id = (await db.execute(
         text("""
@@ -457,35 +490,7 @@ async def _create_definition_structure(
         """),
         {"cid": company_id, "pid": pay_definition_id, "method": method},
     )).scalar_one()
-    if method == "OrdinalTier":
-        for sequence_no, (ordinal_from, ordinal_to) in enumerate(_tier_bounds(tiers), start=1):
-            await db.execute(
-                text("""
-                    INSERT INTO payroll.ratecomponentdefinitions
-                        (ratedefinitionid, shape, sequenceno, ordinalfrom, ordinalto)
-                    VALUES (:rid, 'OrdinalTierSchedule', :seq, :low, :high)
-                """),
-                {"rid": rate_definition_id, "seq": sequence_no, "low": ordinal_from,
-                 "high": ordinal_to},
-            )
-    else:
-        await db.execute(
-            text("""
-                INSERT INTO payroll.ratecomponentdefinitions (ratedefinitionid, shape, sequenceno)
-                VALUES (:rid, 'Scalar', 1)
-            """),
-            {"rid": rate_definition_id},
-        )
-    # The structure is complete (and, for OrdinalTier, a valid topology) before it is locked.
-    await db.execute(
-        text("SELECT payroll.fn_AssertRateStructureComplete(:rid)"),
-        {"rid": rate_definition_id},
-    )
-    await db.execute(
-        text("UPDATE payroll.ratedefinitions SET structurelockedatutc = now() "
-             "WHERE ratedefinitionid = :rid"),
-        {"rid": rate_definition_id},
-    )
+    await _insert_components(db, int(rate_definition_id), method, tiers)
     return int(pay_definition_id), int(rate_definition_id)
 
 
@@ -673,6 +678,113 @@ async def _load_definition(
     if provenance is not None:
         summary["provenance"] = PayDefinitionProvenance.model_validate(dict(provenance))
     return PayDefinitionSummary.model_validate(summary)
+
+
+async def change_structure(
+    company_id: int, user_id: int, pay_definition_id: int, data: PayDefinitionStructureUpdate,
+    db: AsyncConnection,
+) -> PayDefinitionSummary:
+    """Replace the method, input type and topology of a PayDefinition before its first use.
+
+    The PayDefinition keeps its identity. The structure may change only while its
+    RateDefinition is unlocked (no Approved schedule and no payroll period references it yet)
+    and no Pending schedule exists (discard it first); the first Approved schedule or the first
+    period reference locks it for good. The change is one transaction under the same
+    RateDefinition structure lock every schedule and period writer takes, so it is wholly
+    before or wholly after any Pending creation, approval or period creation. Components of the
+    old structure are replaced, never edited; no schedule exists that could reference them.
+
+    Raises RATE_STRUCTURE_LOCKED / RATE_STRUCTURE_PENDING_SCHEDULE (409), or the structure
+    errors of creation (422).
+    """
+    await require_definition_company_edit(company_id, user_id, db)
+    _require_valid_structure(
+        data.calculation_method, data.input_type, data.ordinal_tiers, "a structure change")
+    # Lock order as retirement: the RateDefinition structure lock first (resolved with a plain
+    # read), then the PayDefinition row.
+    rate_definition_id = (await db.execute(
+        text("""
+            SELECT rd.ratedefinitionid
+            FROM   payroll.ratedefinitions rd
+            WHERE  rd.paydefinitionid = :pid AND rd.companyid = :cid
+        """),
+        {"pid": pay_definition_id, "cid": company_id},
+    )).scalar_one_or_none()
+    if rate_definition_id is None:
+        raise compensation_error("DEFINITION_NOT_FOUND", "PayDefinition not found.", 404)
+    locked = await lock_rate_definition_structure(rate_definition_id, db)
+    row = (await db.execute(
+        text("""
+            SELECT status, calculationmethod, inputtype FROM payroll.paydefinitions
+            WHERE  paydefinitionid = :pid AND companyid = :cid
+            FOR UPDATE
+        """),
+        {"pid": pay_definition_id, "cid": company_id},
+    )).mappings().first()
+    if row is None:
+        raise compensation_error("DEFINITION_NOT_FOUND", "PayDefinition not found.", 404)
+    if row["status"] != "Active":
+        raise compensation_error(
+            "PAY_DEFINITION_NOT_ACTIVE", "Only an Active PayDefinition can change structure.", 422)
+    if locked:
+        raise compensation_error(
+            "RATE_STRUCTURE_LOCKED",
+            "The structure is locked: an approved schedule or a payroll period already uses it.",
+            409)
+    pending = (await db.execute(
+        text("SELECT 1 FROM payroll.driverrateschedules "
+             "WHERE ratedefinitionid = :rid AND status = 'Pending' LIMIT 1"),
+        {"rid": rate_definition_id},
+    )).scalar_one_or_none()
+    if pending is not None:
+        raise compensation_error(
+            "RATE_STRUCTURE_PENDING_SCHEDULE",
+            "Discard the Pending schedule before changing the compensation structure.", 409)
+
+    try:
+        # Old components first (they reference the old shape), then the method, input type and
+        # shape together, then the components the new method requires.
+        await db.execute(
+            text("DELETE FROM payroll.ratecomponentdefinitions WHERE ratedefinitionid = :rid"),
+            {"rid": rate_definition_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE payroll.paydefinitions
+                SET    calculationmethod = :method, inputtype = :input_type,
+                       updatedbyuserid = :uid, updatedatutc = now()
+                WHERE  paydefinitionid = :pid
+            """),
+            {"method": data.calculation_method, "input_type": data.input_type,
+             "uid": user_id, "pid": pay_definition_id},
+        )
+        await db.execute(
+            text("""
+                UPDATE payroll.ratedefinitions
+                SET    shape = payroll.fn_shapeforcalculationmethod(:method)
+                WHERE  ratedefinitionid = :rid
+                  AND  shape IS DISTINCT FROM payroll.fn_shapeforcalculationmethod(:method)
+            """),
+            {"method": data.calculation_method, "rid": rate_definition_id},
+        )
+        await _insert_components(
+            db, int(rate_definition_id), data.calculation_method, data.ordinal_tiers)
+    except DBAPIError as exc:
+        translated = translate_database_error(exc)
+        if translated is not None:
+            raise translated from exc
+        raise
+    await write_audit(
+        db, company_id=company_id, branch_id=None, user_id=user_id,
+        action_code="PAY_DEFINITION_STRUCTURE_CHANGED", entity_name="PayDefinitions",
+        entity_id=str(pay_definition_id),
+        old_value={"calculation_method": row["calculationmethod"],
+                   "input_type": row["inputtype"]},
+        new_value={"calculation_method": data.calculation_method,
+                   "input_type": data.input_type,
+                   "ordinal_tiers": [dict(zip(("ordinal_from", "ordinal_to"), bounds))
+                                     for bounds in _tier_bounds(data.ordinal_tiers)]})
+    return await _load_definition(company_id, pay_definition_id, db)
 
 
 async def get_definition(

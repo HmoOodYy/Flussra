@@ -179,10 +179,20 @@ async def test_inactive_definitions_are_not_authorable(p3c_client, tenant, cur):
     assert response.json()["detail"]["code"] == "PAY_DEFINITION_NOT_ACTIVE"
 
 
-async def test_governed_definition_structure_is_locked_from_the_start(p3c_client, tenant, cur):
+async def test_a_governed_definition_is_locked_by_its_first_approved_schedule_not_by_creation(
+    p3c_client, tenant, cur,
+):
     from psycopg2 import errors
 
     definition = await create_definition(p3c_client, tenant)
+    cur.execute("SELECT structurelockedatutc FROM payroll.ratedefinitions "
+                "WHERE ratedefinitionid = %s", (definition["rate_definition_id"],))
+    assert cur.fetchone() == (None,)
+
+    await authored_schedule(p3c_client, tenant, definition, "25")
+    cur.execute("SELECT structurelockedatutc IS NOT NULL FROM payroll.ratedefinitions "
+                "WHERE ratedefinitionid = %s", (definition["rate_definition_id"],))
+    assert cur.fetchone() == (True,)
     with pytest.raises(errors.CheckViolation, match="RATE_STRUCTURE_LOCKED"):
         cur.execute("DELETE FROM payroll.ratecomponentdefinitions WHERE ratedefinitionid = %s",
                     (definition["rate_definition_id"],))
