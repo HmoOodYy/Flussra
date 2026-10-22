@@ -153,9 +153,14 @@ async def _load_approved_snapshot_packet(
     except SnapshotEvidenceError as exc:
         raise _evidence_error(exc) from exc
     projection = project_final_lines(content)
-    if not projection:
+    if not projection and not content["ReportEvidence"]["StatusEntries"]:
+        # A snapshot without an official component is valid only as an evidence-only period:
+        # every Status it holds is non-monetary, so it projects no FinalLines but carries the
+        # frozen Status selections that made the period worth submitting. A snapshot with
+        # neither money nor Status evidence is empty and cannot be finalized.
         raise _snapshot_finalization_error(
-            "APPROVED_SNAPSHOT_INTEGRITY_ERROR", "the approved snapshot has no official component.")
+            "APPROVED_SNAPSHOT_INTEGRITY_ERROR",
+            "the approved snapshot has neither an official component nor Status evidence.")
     return {"review": review, "snapshot": content, "projection": projection}
 
 

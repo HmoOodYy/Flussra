@@ -8,7 +8,9 @@ takes the money from that authority only:
 * InReview: the snapshot bound to the Pending PeriodApproval review item.
 * Approved: the snapshot bound to the Approved PeriodApproval review item.
 * Locked / Archived: the one snapshot the period's FinalLines name, whose FinalLines must be
-  exactly the projection of that snapshot.
+  exactly the projection of that snapshot. A snapshot with no official component projects no
+  FinalLines; then the snapshot is the one the period's single Approved PeriodApproval
+  authorized, accepted only if it really projects nothing.
 * Cancelled: no financials.
 * Any other status fails closed.
 
@@ -30,7 +32,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.payroll.final_line_projection import verify_final_lines
+from app.payroll.final_line_projection import project_final_lines, verify_final_lines
 from app.payroll.snapshot_verification import SnapshotEvidenceError, verify_snapshot
 
 ZERO = Decimal("0")
@@ -145,34 +147,58 @@ async def _bound_snapshot_id(
     return int(reviews[0]["reviewitemid"]), int(snapshot_id)
 
 
-async def _final_lines_snapshot_id(
+async def _finalized_snapshot_id(
     db: AsyncConnection, *, period_id: int, company_id: int, branch_id: int,
-) -> int:
-    """The snapshot a finalized period's FinalLines name: exactly one, never a "latest"."""
+) -> tuple[int, bool]:
+    """(snapshot id, whether FinalLines name it) for a finalized period; never a "latest".
+
+    The snapshot is the one the period's FinalLines name: exactly one. A snapshot with no
+    official component (it holds only Status evidence, for instance when every Status of the
+    period is non-monetary) projects no FinalLines at all, so for a period with none the
+    snapshot is the one the period's single Approved PeriodApproval review item authorized,
+    which is the exact relationship finalization itself consumed. The caller then proves that
+    the snapshot really has nothing to project.
+    """
     rows = (await db.execute(text("""
         SELECT DISTINCT payrollcalculationsnapshotid
         FROM payroll.payrollfinallines
         WHERE payrollperiodid = :period_id AND companyid = :company_id AND branchid = :branch_id
     """), {"period_id": period_id, "company_id": company_id, "branch_id": branch_id})).all()
-    if not rows:
-        raise _error("FINAL_LINES_EMPTY", "the finalized period has no FinalLines.")
-    if len(rows) != 1:
+    if len(rows) > 1:
         raise _error(
             "PROVENANCE_UNAVAILABLE",
             "the FinalLines of the finalized period name more than one calculation snapshot.")
-    return int(rows[0][0])
+    if rows:
+        return int(rows[0][0]), True
+    approved = (await db.execute(text("""
+        SELECT ri.payrollcalculationsnapshotid
+        FROM review.managerreviewitems ri
+        WHERE ri.companyid = :company_id AND ri.branchid = :branch_id
+          AND ri.requesttype = 'PeriodApproval'
+          AND ri.entityschema = 'payroll' AND ri.entityname = 'PayrollPeriods'
+          AND ri.entityid = :period_id AND ri.status = 'Approved'
+    """), {"company_id": company_id, "branch_id": branch_id,
+           "period_id": str(period_id)})).all()
+    if len(approved) != 1 or approved[0][0] is None:
+        raise _error("FINAL_LINES_EMPTY", "the finalized period has no FinalLines.")
+    return int(approved[0][0]), False
 
 
 async def _verified_authority(
     db: AsyncConnection, *, base: dict[str, Any], kind: AuthorityKind, snapshot_id: int,
-    review_item_id: int | None,
+    review_item_id: int | None, has_final_lines: bool = True,
 ) -> FinancialAuthority:
     try:
         content = await verify_snapshot(
             db, snapshot_id=snapshot_id, company_id=base["company_id"],
             branch_id=base["branch_id"], period_id=base["period_id"])
         if kind is AuthorityKind.FINAL_LINES:
-            await verify_final_lines(db, content)
+            if has_final_lines:
+                await verify_final_lines(db, content)
+            elif project_final_lines(content):
+                # The snapshot has official components, so a finalized period must have
+                # their FinalLines; their absence is not a zero-component period.
+                raise _error("FINAL_LINES_EMPTY", "the finalized period has no FinalLines.")
     except SnapshotEvidenceError as exc:
         if exc.code == "SNAPSHOT_NOT_FOUND":
             raise _error(
@@ -225,11 +251,11 @@ async def _resolve(
             kind=(AuthorityKind.SUBMITTED_SNAPSHOT if status == "InReview"
                   else AuthorityKind.APPROVED_SNAPSHOT))
     if status in {"Locked", "Archived"}:
-        snapshot_id = await _final_lines_snapshot_id(
+        snapshot_id, has_final_lines = await _finalized_snapshot_id(
             db, period_id=period_id, company_id=company_id, branch_id=branch_id)
         return await _verified_authority(
             db, base=base, snapshot_id=snapshot_id, review_item_id=None,
-            kind=AuthorityKind.FINAL_LINES)
+            kind=AuthorityKind.FINAL_LINES, has_final_lines=has_final_lines)
     if status == "Cancelled":
         return FinancialAuthority(
             **base, authority_kind=AuthorityKind.UNAVAILABLE, reason_code="PERIOD_CANCELLED",
