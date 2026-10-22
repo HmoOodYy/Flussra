@@ -48,7 +48,6 @@ test('the Day Grid has no hours, miles or pay-item semantics', () => {
     'src/pages/payroll/dayGridModel.ts',
     'src/pages/payroll/WorkTotals.tsx',
     'src/pages/payroll/PayrollEntryDialog.tsx',
-    'src/pages/payroll/PeriodDetailPage.tsx',
     'src/pages/payroll/useDailyEntryController.ts',
   ].map(read).join('\n');
   assert.doesNotMatch(sources, /pay_item_code|pay_item_id|is_time|total_hours|total_miles/);
@@ -63,10 +62,10 @@ test('Day Grid saves are keyed by the period definition id', () => {
   assert.doesNotMatch(feature, /values\[[^\]]*definition_code/);
 });
 
-test('period pages carry no PayItem identity', () => {
+test('the payroll entry workbench carries no PayItem identity', () => {
   const types = read('src/types/payroll/entry.ts');
   assert.match(types, /payroll_period_definition_id/);
-  const detail = [read('src/pages/payroll/PeriodDetailPage.tsx'), read('src/pages/payroll/useDailyEntryController.ts')].join('\n');
+  const detail = [read('src/pages/payroll/PayrollEntryDialog.tsx'), read('src/pages/payroll/useDailyEntryController.ts')].join('\n');
   assert.doesNotMatch(detail, /pay_item_code|PayItem/);
 });
 

@@ -10,7 +10,6 @@ import { SignupPage } from './pages/public/SignupPage';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { PeriodsListPage } from './pages/payroll/PeriodsListPage';
-import { PeriodDetailPage } from './pages/payroll/PeriodDetailPage';
 import { LedgerPage } from './pages/payroll/LedgerPage';
 import { SettingsShell } from './pages/settings/SettingsShell';
 import { CompanyBranchesPage } from './pages/settings/company-branches/CompanyBranchesPage';
@@ -133,10 +132,6 @@ export default function App() {
             <Route
               path="/payroll/periods"
               element={<Gate check={canViewCurrentPayroll}><PeriodsListPage /></Gate>}
-            />
-            <Route
-              path="/payroll/periods/:periodId"
-              element={<Gate check={canViewCurrentPayroll}><PeriodDetailPage /></Gate>}
             />
             <Route
               path="/payroll/ledger"

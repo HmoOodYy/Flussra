@@ -536,6 +536,8 @@ P1b protects only:
 
 No synthetic date is inferred for Period Pay.
 
+Update 2026-10-22: P7c is a frontend-only cleanup and does not define a HireDate rule for Period Pay rows; this entry stays open for an explicit product decision.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
@@ -610,7 +612,8 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 * **P4a–P4c** runtime authority + snapshots/calculation/evidence
 * **P5a–P5b** Status compensation + OrdinalTier
 * **P6a** transfer compensation copy — RETIRED (2026-10-18); superseded by Durable Driver Stages 1–3, which precede P4c
-* **P7b** final Compensation / Settings UI cutover
+* **P7b** final Compensation / Settings UI cutover (closed, PR #66)
+* **P7c** payroll-entry and finalized-payroll frontend cutover
 * **P8a–P8b** runtime and physical schema/catalog cleanup
 
 **Why Deferred:**  
@@ -619,7 +622,7 @@ Compensation must be built on stable Workforce identity rather than while Employ
 **Current State:**  
 P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45). P3b is closed (PR #46): it established a dormant target persistence model and database invariants beside the legacy compensation model. P3c made the dormant model authorable and resolvable (generic PayDefinition governance and provenance, PerUnit assignment authoring, canonical resolver) without switching any operational path. P4a (closed, PR #48) cut the definition, branch-applicability and PerUnit rate authoring authority over to the target model and retired the legacy CDPI/PayItem writers and the ordinary legacy DriverRate writers. P4b (closed, PR #49, migration `0085`) is the clean pre-production runtime cutover: PayrollPeriodDefinitions replace the period PayItem snapshot, ordinary DraftLines become source facts keyed by `PayrollPeriodDefinitionID`, live PerUnit money is derived by the backend through `resolve_many` and the method-owned calculation boundary, and submit/resubmit/finalize stay closed (`TARGET_PAYROLL_EVIDENCE_NOT_READY`) until P4c. Zero PayDefinitions is valid and never falls back to PayItems; development databases that contain periods must be reset before `0085` applies. This debt is not resolved by P3b, P3c or P4a: the target period snapshots, calculation and evidence (P4b–P4c), Status and OrdinalTier (P5), transfer copy (P6, since retired) and removal of the inert legacy layer remain. Update 2026-10-18: Durable Driver Stages 1–3 (permanent Driver and DriverAssignments, Driver-owned compensation, payable rounding and proration) now precede P4c, and P6a is retired because compensation follows the Driver.
 
-Update 2026-10-22: P4c and P5a–P5b are closed; target calculation, Status, OrdinalTier and Driver-owned schedules are live. P7a merged via PR #65 at `b4474728196b23cf2b95aad6a30abb4914e9ff05`, and P7b completes the frontend Compensation / Settings cutover on that `0091` baseline without a migration. P7b is implemented and awaiting independent review/merge. This entry remains open for P8 runtime/schema cleanup; P7c payroll-entry cleanup also remains future work.
+Update 2026-10-22: P4c and P5a–P5b are closed; target calculation, Status, OrdinalTier and Driver-owned schedules are live. P7a merged via PR #65 at `b4474728196b23cf2b95aad6a30abb4914e9ff05`, and P7b completes the frontend Compensation / Settings cutover on that `0091` baseline without a migration. P7b merged via PR #66 at `a827a2d942594b339f9fd13441d7a1a835670bce`, and P7c (frontend-only) removes the last active frontend consumers of the legacy payroll-entry and raw FinalLines surfaces; it is implemented and awaiting independent review/merge. This entry remains open for P8 runtime/schema cleanup.
 
 **Issue Resolved?:** NOT YET
 
@@ -706,6 +709,8 @@ Cleaning payroll entry before target Compensation and final calculation paths ar
 
 **Current State:**  
 P1b must not be expanded into a payroll-entry redesign.
+
+Update 2026-10-22: P7c is implemented and awaiting independent review/merge. Current Payroll → Payroll Entry is the single operational Day Grid (the duplicate period-detail page and route are removed), the Finalized Payroll Library is the one finalized-payroll presentation (the raw FinalLines Ledger dialog, its client-side subtotal reconstruction, its permission helper and the merged Ledger discovery are removed), and no active frontend call remains to a legacy generic monetary or rate writer. The backend `GET /payroll/periods/{period_id}/final-lines` route and the FinalLines storage are intentionally retained for P8a. This entry becomes YES when P7c is accepted under the rules above.
 
 **Issue Resolved?:** NOT YET
 

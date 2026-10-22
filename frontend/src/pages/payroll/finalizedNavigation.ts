@@ -4,10 +4,9 @@
  * canonical destination for finalized (Locked/Archived) payroll.
  *
  * This does not invent a new destination: the Ledger page already lists
- * finalized periods and opens the existing FinalizedPayrollLibraryDialog /
- * FinalSummaryDialog for one. It previously had no way to preselect a period
- * from a link, so this module adds the smallest query-param contract needed
- * for that — nothing about Ledger's own display or discovery logic changes.
+ * finalized periods and opens the FinalizedPayrollLibraryDialog for one. This
+ * module holds the smallest query-param contract needed to preselect a period
+ * from a link.
  */
 
 const PERIOD_ID_PARAM = 'period_id';

@@ -1,8 +1,9 @@
 /**
  * PayrollEntryDialog — large workbench modal containing the daily entry grid.
  *
- * Extracted from PeriodDetailPage.tsx. Opens with a periodId prop, fetches
- * its own data via getDayGrid, and cleans up on close.
+ * The one operational Day Grid surface, launched from Current Payroll. It opens with a
+ * periodId prop, fetches its own data via getDayGrid, and cleans up on close. Columns are the
+ * period's frozen definitions; every amount shown is the backend's.
  */
 import { useEffect } from 'react';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
@@ -12,8 +13,6 @@ import { StatusCellInput } from './StatusCellInput';
 import { formatDayLabel, useDailyEntryController } from './useDailyEntryController';
 import { formatGrossTotal } from './grossDisplay';
 import styles from './PayrollEntryDialog.module.css';
-
-const dialogSaveError = daySaveErrorMessage;
 
 // ---------------------------------------------------------------------------
 // Props
@@ -36,7 +35,7 @@ export function PayrollEntryDialog({ periodId, onClose }: PayrollEntryDialogProp
     notesOpenDriverAssignmentId, setNotesOpenDriverAssignmentId, fetchGrid, atStart, atEnd, prevDay, nextDay,
     isEditable, canEdit, handleSave, handleCellChange, handleStatusChange, handleNotesChange,
     getCellValue, getStatusText, getNotesValue,
-  } = useDailyEntryController({ periodId, user, formatSaveError: dialogSaveError });
+  } = useDailyEntryController({ periodId, user, formatSaveError: daySaveErrorMessage });
 
   useEffect(() => {
     void fetchGrid(selectedDate);

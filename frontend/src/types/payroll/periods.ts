@@ -28,12 +28,8 @@ export interface PeriodSummary {
   draft_drivers: number;
   draft_lines: number;
   draft_lines_needing_attention: number;
-  final_lines: number;
-  // Ledger aggregates (migration 0024 — non-zero only for Locked/Archived)
-  final_gross: string | null;
   financial_authority?: string | null;
   financial_authority_reason?: string | null;
-  final_driver_count: number;
 }
 
 // ── Current workflow and candidate-based period creation ───────────────────

@@ -22,7 +22,7 @@ import type {
   PeriodCandidatePreview,
   PeriodCreationResult,
 } from '../types/payroll/periods';
-import type { FinalizationPreviewResponse, FinalLineSummary } from '../types/payroll/finalization';
+import type { FinalizationPreviewResponse } from '../types/payroll/finalization';
 import type { CalculationPreviewResponse } from '../types/payroll/calculation';
 import type { CalculationReportResponse, CalculationReportView } from '../types/payroll/reports';
 import type {
@@ -275,23 +275,6 @@ export async function getFinalizationPreview(
 ): Promise<FinalizationPreviewResponse> {
   const resp = await apiClient.get<FinalizationPreviewResponse>(
     `/payroll/periods/${periodId}/finalization-preview`,
-  );
-  return resp.data;
-}
-
-// ---------------------------------------------------------------------------
-// CP-4 — Ledger: final lines
-// ---------------------------------------------------------------------------
-
-export async function getFinalLines(
-  periodId: number,
-  driverAssignmentId?: number,
-): Promise<FinalLineSummary[]> {
-  const params: Record<string, string> = {};
-  if (driverAssignmentId != null) params.driver_assignment_id = String(driverAssignmentId);
-  const resp = await apiClient.get<FinalLineSummary[]>(
-    `/payroll/periods/${periodId}/final-lines`,
-    { params },
   );
   return resp.data;
 }

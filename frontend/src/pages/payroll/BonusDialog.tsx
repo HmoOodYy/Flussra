@@ -1,7 +1,7 @@
 /**
  * BonusDialog — period-level bonus management modal.
  *
- * Extracted from BonusPanel in PeriodDetailPage.tsx and promoted to a
+ * Promoted from an inline panel to a
  * standalone dialog. Fetches the backend-owned bonus summary given a periodId.
  */
 import { useEffect, useState, useCallback, useRef } from 'react';
