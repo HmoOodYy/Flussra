@@ -18,26 +18,6 @@ export interface DriverSummary {
   employment_status: string;
 }
 
-/** Matches backend PersonSummary — response of GET /core/people */
-export interface PersonSummary {
-  employee_id: number;
-  branch_id: number;
-  branch_name: string;
-  employee_key: string | null;
-  full_name: string;
-  preferred_name: string | null;
-  driver_state: 'current' | 'pending' | 'none';
-  employment_status: string;
-  email: string | null;
-  primary_phone: string | null;
-  hire_date: string | null;
-  driver_id: number | null;
-  driver_assignment_id: number | null;
-  driver_number: string | null;
-  driver_status: string | null;
-  cdl_number: string | null;
-}
-
 export interface Branch {
   branch_id: number;
   branch_code: string;

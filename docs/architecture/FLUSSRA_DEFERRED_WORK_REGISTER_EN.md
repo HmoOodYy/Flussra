@@ -336,11 +336,13 @@ The frontend and some runtime consumers still use it.
 **Current State:**  
 The route must act as a compatibility read over the Workforce read model and use `driver\_state=current|pending|none` instead of `employee\_type`.
 
+Update 2026-10-22: P7a migrates every frontend consumer off `/core/people`: Workforce reads `/workforce/employees`, Access reads `/admin/users` with a minimal Access-scoped Employee candidate read, and the Transfer Requests driver picker reads `/core/drivers`. The endpoint itself is intentionally not removed here; final deletion remains P8a once zero consumers are proven.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Last Updated:** 2026-10-22
 
 \---
 
@@ -673,11 +675,13 @@ Backend authorities need to stabilize first. Building the final UI on top of tra
 **Current State:**  
 P1b performs minimum compatibility changes only, such as using `driver\_state` in the Transfer Requests picker.
 
+Update 2026-10-22: P7a implements the final routed People & Access hub (Workforce, Access, Transfer Requests), retires the User-centered wizard, and keeps the three areas' authorities separate. This entry becomes YES when P7a is accepted under the rules above.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Last Updated:** 2026-10-22
 
 \---
 

@@ -299,7 +299,7 @@ async def get_employee(
     assignments = [_assignment_summary(dict(a)) for a in assignments_result.mappings().all()]
     user_result = await db.execute(
         text("""
-            SELECT UserID, Username, DisplayName, IsActive, CanLogin
+            SELECT UserID, Username, DisplayName, IsActive, CanLogin, IsStaged
             FROM sec.Users WHERE CompanyID = :company_id AND EmployeeID = :employee_id
             ORDER BY UserID LIMIT 1
         """),
@@ -312,7 +312,7 @@ async def get_employee(
         linked_user=UserSummary(
             user_id=linked["userid"], username=linked["username"],
             display_name=linked["displayname"], is_active=linked["isactive"],
-            can_login=linked["canlogin"],
+            can_login=linked["canlogin"], is_staged=linked["isstaged"],
         ) if linked else None,
     )
 

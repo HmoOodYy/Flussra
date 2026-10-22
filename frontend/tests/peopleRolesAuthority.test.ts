@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { toUserProfile } from '../src/store/authStore.ts';
 import type { UserInfoResponse, UserProfile } from '../src/store/authStore.ts';
 import {
-  canViewPeople,
+  canViewAccess,
   canCreatePeople,
   canEditPeople,
   canTogglePeopleActive,
@@ -18,9 +18,9 @@ import {
   canViewSettings,
 } from '../src/lib/permissions.ts';
 
-const peopleControllerSource = readFileSync(new URL('../src/pages/people/usePeopleController.ts', import.meta.url), 'utf8');
-const peopleStateSource = readFileSync(new URL('../src/pages/people/peoplePageState.ts', import.meta.url), 'utf8');
-const peopleProvisioningSource = readFileSync(new URL('../src/pages/people/usePeopleProvisioning.ts', import.meta.url), 'utf8');
+const accessControllerSource = readFileSync(new URL('../src/pages/people/access/useAccessController.ts', import.meta.url), 'utf8');
+const accessActionsSource = readFileSync(new URL('../src/pages/people/access/useAccessActions.ts', import.meta.url), 'utf8');
+const accessDetailSource = readFileSync(new URL('../src/pages/people/access/AccessDetail.tsx', import.meta.url), 'utf8');
 const peopleFormControlsSource = readFileSync(new URL('../src/pages/people/PeopleFormControls.tsx', import.meta.url), 'utf8');
 
 // Authority and BranchAccess defaults are shared; this suite keeps its admin profile local.
@@ -74,23 +74,23 @@ function mixedDriverPlusCompanyUser(code: string): UserProfile {
   });
 }
 
-// ── canViewPeople ────────────────────────────────────────────────────────────
+// ── canViewAccess ────────────────────────────────────────────────────────────
 
-test('canViewPeople: a branch-only users.view grant does not authorize the page', () => {
-  assert.equal(canViewPeople(branchOnlyUser('users.view')), false);
+test('canViewAccess: a branch-only users.view grant does not authorize the page', () => {
+  assert.equal(canViewAccess(branchOnlyUser('users.view')), false);
 });
 
-test('canViewPeople: a company-wide users.view grant authorizes even with empty active_permissions', () => {
-  assert.equal(canViewPeople(companyUser('users.view')), true);
+test('canViewAccess: a company-wide users.view grant authorizes even with empty active_permissions', () => {
+  assert.equal(canViewAccess(companyUser('users.view')), true);
 });
 
-test('canViewPeople: company settings.manage/setup.manage authorize as admin fallback', () => {
-  assert.equal(canViewPeople(companyUser('settings.manage')), true);
-  assert.equal(canViewPeople(companyUser('setup.manage')), true);
+test('canViewAccess: company settings.manage/setup.manage authorize as admin fallback', () => {
+  assert.equal(canViewAccess(companyUser('settings.manage')), true);
+  assert.equal(canViewAccess(companyUser('setup.manage')), true);
 });
 
-test('canViewPeople: a mixed Driver branch row + valid company users.view grant is authorized', () => {
-  assert.equal(canViewPeople(mixedDriverPlusCompanyUser('users.view')), true);
+test('canViewAccess: a mixed Driver branch row + valid company users.view grant is authorized', () => {
+  assert.equal(canViewAccess(mixedDriverPlusCompanyUser('users.view')), true);
 });
 
 // ── canCreatePeople ──────────────────────────────────────────────────────────
@@ -179,7 +179,8 @@ test('canProvisionPeopleAccount requires users.edit and visible role choices', (
     authority: makeAuthority({ company_permissions: ['users.edit', 'roles.view'] }),
   });
   assert.equal(canProvisionPeopleAccount(editorWithRoleVisibility), true);
-  assert.match(peopleProvisioningSource, /if \(!userCanProvisionAccount\) \{\s*dispatch\(\{ type: 'WIZ_STEP', step: 5 \}\);/);
+  assert.match(accessControllerSource, /provision: authUser \? canProvisionPeopleAccount\(authUser\) : false/);
+  assert.match(accessDetailSource, /can\.provision/);
 });
 
 test('scope choices give DRIVER only Self and keep ordinary scopes for other roles', () => {
@@ -190,13 +191,15 @@ test('scope choices give DRIVER only Self and keep ordinary scopes for other rol
 });
 
 test('ownership replacement options exclude Driver without removing it from normal role choices', () => {
-  assert.match(peopleControllerSource, /ownerTransferRoles = st\.roles\.filter\(r => r\.is_active && r\.role_code !== 'COMPANY_OWNER' && r\.role_code !== 'DRIVER'\)/);
-  assert.match(peopleControllerSource, /assignableRoles = st\.roles\.filter\(r => r\.role_code !== 'COMPANY_OWNER' && r\.is_active\)/);
+  assert.match(accessControllerSource, /ownerTransferRoles = st\.roles\.filter\(r => r\.is_active && r\.role_code !== 'COMPANY_OWNER' && r\.role_code !== 'DRIVER'\)/);
+  assert.match(accessControllerSource, /assignableRoles = st\.roles\.filter\(r => r\.role_code !== 'COMPANY_OWNER' && r\.is_active\)/);
 });
 
-test('provision failure stays on the staged provisioning step for in-place retry', () => {
-  assert.match(peopleStateSource, /case 'WIZ_PARTIAL': return \{[^\n]*step: 3 \}/);
-  assert.match(readFileSync(new URL('../src/pages/people/PeopleWizard.tsx', import.meta.url), 'utf8'), /Correct the role, scope, or Employee selection and retry; the User will not be recreated/);
+test('account creation and provisioning are single atomic requests that keep the dialog open on failure', () => {
+  assert.match(accessActionsSource, /createAdminUser\(payload\)/);
+  assert.match(accessActionsSource, /provisionAdminUser\(selected\.user_id, payload\)/);
+  assert.match(accessActionsSource, /Nothing was persisted: the dialog stays open/);
+  assert.match(accessActionsSource, /type: 'PROVISION_ERROR'/);
 });
 
 // ── Role helpers: view/create/edit/delete stay distinct ─────────────────────

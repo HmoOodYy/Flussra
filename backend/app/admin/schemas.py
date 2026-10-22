@@ -8,6 +8,7 @@ Covers:
   - Company roles (create, update, delete, permission management)
 """
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -54,6 +55,8 @@ class UserAdmin(BaseModel):
     user_id: int
     company_id: int
     employee_id: int | None = None
+    # The linked Employee's name, so the link can be shown without any Workforce read.
+    employee_name: str | None = None
     is_staged: bool
     username: str
     display_name: str
@@ -81,6 +84,21 @@ class UserAdmin(BaseModel):
     role_permission_codes: list[str] = []
     # Additional ALLOW overrides granted directly to this user (on top of role)
     extra_permission_codes: list[str] = []
+
+
+class EmployeeLinkCandidate(BaseModel):
+    """The minimum an Access administrator needs to pick an Employee to link a User to.
+
+    Only Employees that no User is linked to are candidates. This is not the Workforce roster:
+    it carries no contact, hire, termination or Driver identity data.
+    """
+    employee_id: int
+    employee_key: str | None = None
+    full_name: str
+    branch_id: int
+    branch_name: str
+    employment_status: str
+    driver_state: Literal["current", "pending", "none"]
 
 
 class UserCreate(BaseModel):

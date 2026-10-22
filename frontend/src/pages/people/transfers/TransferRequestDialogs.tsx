@@ -3,7 +3,7 @@ import type { Branch } from '../../../types/core';
 import type { DriverTransferRequest } from '../../../types/transfer';
 import type { TabAction, TabState, DecideDialogState } from './transferRequestsState';
 import styles from '../PeoplePage.module.css';
-import trStyles from '../TransferRequestsTab.module.css';
+import trStyles from './TransferRequests.module.css';
 
 interface Props {
   st: Pick<TabState, 'create' | 'approveDialog' | 'decideDialog' | 'cancelDialog' | 'rescheduleDialog'>;

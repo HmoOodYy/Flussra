@@ -20,7 +20,10 @@ import { legacyPayrollSettingsRedirect } from './pages/settings/payroll/payrollS
 import { StatusKeysPage } from './pages/settings/status-keys/StatusKeysPage';
 import { PayItemsPage } from './pages/settings/pay-items/PayItemsPage';
 import { RolesPage } from './pages/settings/roles/RolesPage';
-import { PeoplePage } from './pages/people/PeoplePage';
+import { PeopleDefaultRedirect, PeopleHub } from './pages/people/PeopleHub';
+import { WorkforcePage } from './pages/people/workforce/WorkforcePage';
+import { AccessPage } from './pages/people/access/AccessPage';
+import { TransferRequestsPage } from './pages/people/transfers/TransferRequestsPage';
 import { PayRatesPage } from './pages/people/pay-rates/PayRatesPage';
 import { ReviewPage } from './pages/ReviewPage';
 import { useAuth } from './store/authStore';
@@ -29,7 +32,10 @@ import {
   canViewCurrentPayroll,
   canViewLedger,
   canViewReview,
-  canViewPeople,
+  canViewPeopleHub,
+  canViewWorkforce,
+  canViewAccess,
+  canViewTransfers,
   canViewPayRates,
   canViewSettings,
   canManageSettingsAdmin,
@@ -111,10 +117,12 @@ export default function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
 
             {/* People */}
-            <Route
-              path="/people"
-              element={<Gate check={canViewPeople}><PeoplePage /></Gate>}
-            />
+            <Route path="/people" element={<Gate check={canViewPeopleHub}><PeopleHub /></Gate>}>
+              <Route index element={<PeopleDefaultRedirect />} />
+              <Route path="workforce" element={<Gate check={canViewWorkforce}><WorkforcePage /></Gate>} />
+              <Route path="access" element={<Gate check={canViewAccess}><AccessPage /></Gate>} />
+              <Route path="transfers" element={<Gate check={canViewTransfers}><TransferRequestsPage /></Gate>} />
+            </Route>
             <Route
               path="/people/pay-rates"
               element={<Gate check={canViewPayRates}><PayRatesPage /></Gate>}

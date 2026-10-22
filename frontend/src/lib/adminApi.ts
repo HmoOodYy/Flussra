@@ -6,6 +6,7 @@ import type {
   CompanyRoleCreate,
   CompanyRolePermissions,
   CompanyRoleUser,
+  EmployeeLinkCandidate,
   OwnerTransferRequest,
   OwnerTransferResult,
   Permission,
@@ -37,8 +38,21 @@ export function createAdminUser(payload: UserCreate): AxiosPromise<UserAdmin> {
   return apiClient.post<UserAdmin>('/admin/users', payload);
 }
 
-export function linkAdminUserEmployee(userId: number, employeeId: number | null): AxiosPromise {
-  return apiClient.put(`/admin/users/${userId}/employee-link`, { employee_id: employeeId });
+export function linkAdminUserEmployee(userId: number, employeeId: number): AxiosPromise<UserAdmin> {
+  return apiClient.put<UserAdmin>(`/admin/users/${userId}/employee-link`, { employee_id: employeeId });
+}
+
+export function unlinkAdminUserEmployee(userId: number): AxiosPromise<UserAdmin> {
+  return apiClient.delete<UserAdmin>(`/admin/users/${userId}/employee-link`);
+}
+
+/** Employees no User is linked to: an Access read that needs no Workforce permission. */
+export function getEmployeeLinkCandidates(params: {
+  q?: string;
+  driver_state?: 'current' | 'pending' | 'none';
+  limit?: number;
+} = {}): AxiosPromise<EmployeeLinkCandidate[]> {
+  return apiClient.get<EmployeeLinkCandidate[]>('/admin/employee-link-candidates', { params });
 }
 
 export function provisionAdminUser(userId: number, payload: UserProvision): AxiosPromise<UserAdmin> {

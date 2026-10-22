@@ -25,6 +25,7 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'GET /admin/company-roles/{role_id}/permissions': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'PUT /admin/company-roles/{role_id}/permissions': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'GET /admin/company-roles/{role_id}/users': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'users.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
+    'GET /admin/employee-link-candidates': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('users.create', 'users.edit', 'roles.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'GET /admin/permissions': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'users.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'GET /admin/roles': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'GET /admin/users': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('users.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),

@@ -8,7 +8,7 @@ import {
   canViewCurrentPayroll,
   canViewReview,
   canViewLedger,
-  canViewPeople,
+  canViewPeopleHub,
   canViewPayRates,
   canViewPayrollSetups,
 } from '../lib/permissions';
@@ -84,7 +84,7 @@ function QuickActions() {
       accent: '#0f766e',
     });
 
-  if (canViewPeople(user))
+  if (canViewPeopleHub(user))
     actions.push({
       label: 'People & Access',
       description: 'Manage drivers and user accounts',

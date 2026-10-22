@@ -26,6 +26,7 @@ from app.admin.schemas import (
     CompanyRolePermissionsUpdate,
     CompanyRoleUpdate,
     CompanyRoleUser,
+    EmployeeLinkCandidate,
     OwnerTransferRequest,
     OwnerTransferResult,
     Permission,
@@ -75,6 +76,31 @@ async def list_users(
         user_id=int(token["sub"]),
         db=db,
         include_inactive=include_inactive,
+    )
+
+
+@router.get(
+    "/employee-link-candidates",
+    response_model=list[EmployeeLinkCandidate],
+    summary="Employees that can still be linked to a User",
+    description=(
+        "Employees with no linked User, with only the identity needed to choose one "
+        "(name, key, Branch, employment status, Driver state). This is an Access read, "
+        "not the Workforce roster.\n\n"
+        "Requires: `users.create`, `users.edit` or `roles.edit` (or the admin fallbacks)."
+    ),
+    responses={403: {"description": "Insufficient scope"}},
+)
+async def list_employee_link_candidates(
+    token: TokenDep,
+    db: DbDep,
+    q: str | None = Query(None, description="Case-insensitive search on name or employee key"),
+    driver_state: str | None = Query(None, pattern="^(current|pending|none)$"),
+    limit: int = Query(100, ge=1, le=500),
+) -> list[EmployeeLinkCandidate]:
+    return await user_reads.list_employee_link_candidates(
+        company_id=int(token["cid"]), user_id=int(token["sub"]), db=db,
+        q=q, driver_state=driver_state, limit=limit,
     )
 
 
