@@ -534,3 +534,32 @@ async def test_a_blocked_tier_period_freezes_nothing(p3c_client, p3c_engine, ten
     before = period_evidence_counts(tenant, period)
     await submit(p3c_client, tenant, period, expect=422)
     assert period_evidence_counts(tenant, period) == before
+
+
+async def test_tier_compensation_cannot_change_inside_a_finalized_period(
+    p3c_client, p3c_engine, tenant,
+):
+    from tests.compensation_api_fixtures import approve_schedule, create_pending, set_tier_values
+
+    period, _, definition = await _tier_scenario(p3c_client, p3c_engine, tenant)
+    allow_self_approval(tenant)
+    await submit(p3c_client, tenant, period)
+    await decide(p3c_client, tenant, await pending_review_item(tenant, period))
+    await finalize(p3c_client, tenant, period)
+
+    pending = await create_pending(
+        p3c_client, tenant, definition, effective_from=day(period, 0))
+    assert (await set_tier_values(
+        p3c_client, tenant, pending, definition, ("9", "9", "9"))).status_code == 200
+    refused = await approve_schedule(p3c_client, tenant, pending)
+    assert refused.status_code == 422
+    assert refused.json()["detail"]["code"] == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"
+
+    (current,) = [row for row in rows(
+        tenant, "SELECT driverratescheduleid FROM payroll.driverrateschedules "
+                "WHERE ratedefinitionid = %s AND status = 'Approved'", definition["rate_definition_id"])]
+    voided = await p3c_client.post(
+        f"/compensation/driver-rate-schedules/{current[0]}/void", headers=tenant.admin,
+        json={"reason": "too late"})
+    assert voided.status_code == 422
+    assert voided.json()["detail"]["code"] == "DRIVER_COMPENSATION_IN_FINALIZED_PERIOD"

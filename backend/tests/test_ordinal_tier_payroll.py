@@ -329,3 +329,22 @@ async def test_no_money_is_stored_on_the_source_line_so_none_can_become_authorit
     assert [tuple(row) for row in stored] == [(D("4"), None, None)]
     driver = _driver(await build_packet(p3c_engine, tenant, period), tenant.driver_a)
     assert driver.daily_pay == D("17.00")
+
+
+async def test_the_live_reports_show_the_derived_tier_money_per_definition(
+    p3c_client, p3c_engine, tenant,
+):
+    period, ppd, _ = await open_tier_period(p3c_client, p3c_engine, tenant)
+    await enter(p3c_client, tenant, period, 1, ppd=ppd, quantity="4")
+    pid = period["payroll_period_id"]
+    for view in ("drivers", "period-work", "period-pay", "mixed"):
+        response = await p3c_client.get(f"/payroll/periods/{pid}/reports/{view}", headers=tenant.admin)
+        assert response.status_code == 200, (view, response.text[:200])
+        (driver,) = response.json()["drivers"]
+        assert driver["work"]["daily_rows"][0]["quantity"] == "4.0000"
+        assert D(driver["pay"]["daily_pay"]) == D("17.00")
+        assert D(driver["pay"]["total_pay"]) == D("17.00")
+    pay = (await p3c_client.get(
+        f"/payroll/periods/{pid}/reports/period-pay", headers=tenant.admin)).json()
+    (amount,) = pay["drivers"][0]["pay"]["definition_amounts"]
+    assert (amount["payroll_period_definition_id"], D(amount["amount"])) == (ppd, D("17.00"))
