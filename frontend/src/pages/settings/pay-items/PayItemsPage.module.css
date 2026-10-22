@@ -1779,9 +1779,9 @@
   margin-left: 0.2rem;
 }
 
-/* ── CDPI Request Review Section ─────────────────────────────────────────── */
+/* ── Pay Item Request Review Section ──────────────────────────────────────── */
 
-.cdpiSection {
+.payItemRequestSection {
   margin: 1.25rem 1rem 0.5rem;
   border: 1px solid #e5e7eb;
   border-radius: 10px;
@@ -1789,7 +1789,7 @@
   overflow: hidden;
 }
 
-.cdpiSectionHeader {
+.payItemRequestHeader {
   display: flex;
   align-items: center;
   gap: 1rem;
@@ -1799,7 +1799,7 @@
   flex-wrap: wrap;
 }
 
-.cdpiSectionTitle {
+.payItemRequestTitle {
   margin: 0;
   font-size: 0.88rem;
   font-weight: 600;
@@ -1807,19 +1807,19 @@
   white-space: nowrap;
 }
 
-.cdpiFilterRow {
+.payItemRequestFilters {
   display: flex;
   gap: 0.35rem;
   flex-wrap: wrap;
 }
 
-.cdpiRequestList {
+.payItemRequestList {
   display: flex;
   flex-direction: column;
   gap: 0;
 }
 
-.cdpiEmpty {
+.payItemRequestEmpty {
   padding: 1rem 1.25rem;
   font-size: 0.82rem;
   color: #94a3b8;
@@ -1828,7 +1828,7 @@
   gap: 0.4rem;
 }
 
-.cdpiRequestCard {
+.payItemRequestCard {
   padding: 0.75rem 1.25rem;
   border-bottom: 1px solid #f1f5f9;
   display: flex;
@@ -1836,55 +1836,55 @@
   gap: 0.3rem;
 }
 
-.cdpiRequestCard:last-child {
+.payItemRequestCard:last-child {
   border-bottom: none;
 }
 
-.cdpiCardRow {
+.payItemRequestCardRow {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   flex-wrap: wrap;
 }
 
-.cdpiCardName {
+.payItemRequestName {
   font-size: 0.88rem;
   font-weight: 600;
   color: #1e293b;
 }
 
-.cdpiCardMeta {
+.payItemRequestMeta {
   font-size: 0.78rem;
   color: #64748b;
 }
 
-.cdpiCardNotes {
+.payItemRequestNotes {
   font-size: 0.78rem;
   color: #6b7280;
   font-style: italic;
 }
 
-.cdpiCardDates {
+.payItemRequestDates {
   font-size: 0.74rem;
   color: #94a3b8;
 }
 
-.cdpiCardActions {
+.payItemRequestActions {
   display: flex;
   gap: 0.5rem;
   margin-top: 0.25rem;
   flex-wrap: wrap;
 }
 
-.cdpiCardActions .btnPrimary,
-.cdpiCardActions .btnSecondary,
-.cdpiCardActions .btnDanger {
+.payItemRequestActions .btnPrimary,
+.payItemRequestActions .btnSecondary,
+.payItemRequestActions .btnDanger {
   padding: 0.3rem 0.75rem;
   font-size: 0.78rem;
 }
 
 /* Status badges */
-.cdpiStatusBadge {
+.payItemRequestStatus {
   display: inline-flex;
   align-items: center;
   padding: 0.1rem 0.5rem;
@@ -1898,89 +1898,57 @@
   border: 1px solid #e2e8f0;
 }
 
-.cdpiStatusBadgePendingCompanyApproval {
+.payItemRequestStatusPending {
   background: #fffbeb;
   color: #92400e;
   border-color: #fde68a;
 }
 
-.cdpiStatusBadgeApproved {
+.payItemRequestStatusApproved {
   background: #f0fdf4;
   color: #166534;
   border-color: #bbf7d0;
 }
 
-.cdpiStatusBadgeRejected {
+.payItemRequestStatusRejected {
   background: #fef2f2;
   color: #991b1b;
   border-color: #fecaca;
 }
 
-.cdpiStatusBadgeDraft {
+.payItemRequestStatusDraft {
   background: #f8fafc;
   color: #64748b;
   border-color: #e2e8f0;
 }
 
-/* ── CDPI Branch Controls Section ──────────────────────────────────────────── */
-
-.cdpiBranchHint {
-  margin: 0;
-  padding: 0.55rem 1.25rem 0.65rem;
-  font-size: 0.78rem;
-  color: #64748b;
-  border-bottom: 1px solid #f1f5f9;
+.tierEditor {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
 }
 
-.cdpiBranchItemList {
+.tierEditorRow {
   display: flex;
-  flex-direction: column;
-  gap: 0;
-}
-
-.cdpiBranchItemCard {
-  padding: 0.8rem 1.25rem;
-  border-bottom: 1px solid #f1f5f9;
-  display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
-}
-
-.cdpiBranchItemCard:last-child {
-  border-bottom: none;
-}
-
-.cdpiBranchActiveRow,
-.cdpiBranchNameRow {
-  display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.75rem;
-  flex-wrap: wrap;
+  min-height: 2rem;
 }
 
-.cdpiBranchControlLabel {
-  font-size: 0.78rem;
+.tierEditorRange {
+  min-width: 4rem;
   font-weight: 600;
-  color: #374151;
-  min-width: 10rem;
-  padding-top: 0.2rem;
-  flex-shrink: 0;
+  color: #334155;
 }
 
-.cdpiBranchNameEdit {
+.tierEditorEnd {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  flex: 1;
-  flex-wrap: wrap;
-  min-width: 0;
+  gap: 0.45rem;
+  color: #64748b;
+  font-size: 0.8rem;
 }
 
-.cdpiBranchNameDisplay {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex: 1;
-  flex-wrap: wrap;
-  min-width: 0;
+.tierEditorEnd input {
+  width: 6rem;
 }

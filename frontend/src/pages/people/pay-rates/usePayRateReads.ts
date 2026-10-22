@@ -83,9 +83,7 @@ export function usePayRateReads(selectedDriverId: number | null) {
       const [values, access, source] = await Promise.all([
         listDriverPayRates(driverId), getCompensationAccess(driverId), loadPendingSource(driverId)]);
       if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
-        // This screen edits one value per rate. Tiered (OrdinalTier) rates carry a complete
-        // value set per tier and have their own authoring screen; they are not offered here.
-        setRowsState(values.filter((row) => row.rate_shape === 'Scalar'));
+        setRowsState(values);
         setRatesDriverId(driverId);
         setAccessState(access);
         setAccessDriverId(driverId);

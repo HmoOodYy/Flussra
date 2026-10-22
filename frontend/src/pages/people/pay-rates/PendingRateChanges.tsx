@@ -3,6 +3,7 @@ import { fmtAmount } from './payRatesView';
 import { RETIRED_LABEL } from './payRatesHistory';
 import { canApprovePendingRow, canDiscardPendingRow, isPendingRowComplete, type PendingScheduleRow } from './payRatesPending';
 import { TierValueList } from './TierValueList';
+import { isTieredSchedule } from './payRatesTiers';
 import styles from './PayRatesPage.module.css';
 
 type PendingRateChangesProps = {
@@ -28,7 +29,7 @@ export function PendingRateChanges({ pendingRows, pendingCount, canEditDriver, c
         <div className={styles.emptySection}>No pending rate changes for this driver.</div>
       ) : (
         <table className={styles.rateTable}>
-          <thead><tr><th>Rate</th><th>Current</th><th>Pending Amount / Tier Values</th><th>Effective From</th>{(canEditDriver || canDiscardDriver) && <th>Actions</th>}</tr></thead>
+          <thead><tr><th>Rate</th><th>Current</th><th>Pending Amount / Tier Values</th><th>Effective</th><th>State</th>{(canEditDriver || canDiscardDriver) && <th>Actions</th>}</tr></thead>
           <tbody>
             {pendingRows.map((row) => {
               const busy = actioningId === row.scheduleId;
@@ -42,11 +43,14 @@ export function PendingRateChanges({ pendingRows, pendingCount, canEditDriver, c
                     {row.tiered && <span className={styles.statusBadge} style={{ marginLeft: '0.4rem' }}>Tiered</span>}
                     {row.retired && <span className={styles.statusBadge} style={{ marginLeft: '0.4rem' }}>{RETIRED_LABEL}</span>}
                   </td>
-                  <td>{!row.inMatrix ? '—' : row.current ? fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits) : <span className={styles.missingText}>No current rate</span>}</td>
+                  <td>{!row.inMatrix ? '—' : row.current ? (isTieredSchedule(row.current.values)
+                    ? <TierValueList values={row.current.values} unit={row.unit} currencyCode={currencyCode} currencyDigits={currencyDigits} />
+                    : fmtAmount(row.current.amount, row.unit, currencyCode, currencyDigits)) : <span className={styles.missingText}>No current rate</span>}</td>
                   <td>{row.tiered
                     ? <TierValueList values={row.values} unit={row.unit} currencyCode={currencyCode} currencyDigits={currencyDigits} />
                     : row.amount === null ? <span className={styles.missingText}>Not set</span> : <strong>{fmtAmount(row.amount, row.unit, currencyCode, currencyDigits)}</strong>}</td>
-                  <td>{row.effectiveFrom}</td>
+                  <td>{row.effectiveFrom}{row.effectiveTo ? ` – ${row.effectiveTo}` : ''}</td>
+                  <td><span className={styles.pendingBadge}>Pending</span></td>
                   {(canEditDriver || canDiscardDriver) && <td>{(approve || discard) && <div className={styles.actionBtns}>
                     {approve && <button className={styles.btnApprove} disabled={busy || actioningId != null || !isPendingRowComplete(row)} onClick={() => void runPendingAction(row.scheduleId, () => approveSchedule(row.scheduleId))}>{busy ? '…' : 'Approve'}</button>}
                     {discard && <button className={styles.btnVoid} disabled={busy || actioningId != null} onClick={() => void runPendingAction(row.scheduleId, () => discardSchedule(row.scheduleId))}>{busy ? '…' : 'Discard'}</button>}

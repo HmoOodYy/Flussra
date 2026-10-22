@@ -1,6 +1,6 @@
 import type { BranchConfigVersion, BranchPayDefinitionState, PayDefinitionSummary } from '../../../types/compensation';
 import type { AggregateDefinition } from './payItemsModel';
-import { fmtDate, INPUT_TYPE_LABELS, METHOD_LABELS } from './payItemsModel';
+import { fmtDate, INPUT_TYPE_LABELS, METHOD_LABELS, ordinalTierLabel } from './payItemsModel';
 import styles from './PayItemsPage.module.css';
 
 interface PayItemCatalogProps {
@@ -142,6 +142,26 @@ export function PayItemCatalog({
                       <span className={styles.detailLabel}>Unit</span>
                       <span className={styles.detailValue}>{(selectedItem ?? selectedAgg)!.unit ?? '—'}</span>
                     </div>
+                    {(selectedCompany ?? selectedItem ?? selectedAgg)?.calculation_method === 'OrdinalTier' && (
+                      <div className={styles.detailRow}>
+                        <span className={styles.detailLabel}>Quantity tiers</span>
+                        <span className={styles.detailValue}>
+                          {(selectedCompany ?? selectedItem ?? selectedAgg)?.components.slice().sort((a, b) => a.sequence_no - b.sequence_no)
+                            .map((component) => component.ordinal_from == null ? 'Unavailable'
+                              : ordinalTierLabel({ ordinal_from: component.ordinal_from, ordinal_to: component.ordinal_to }))
+                            .join(', ') || 'Tier structure unavailable'}
+                        </span>
+                      </div>
+                    )}
+                    {(selectedCompany ?? selectedItem ?? selectedAgg) && (
+                      <div className={styles.detailRow}>
+                        <span className={styles.detailLabel}>Structure</span>
+                        <span className={styles.detailValue}>{(selectedCompany ?? selectedItem ?? selectedAgg)!.structure_locked_at_utc
+                          ? `Locked since ${fmtDate((selectedCompany ?? selectedItem ?? selectedAgg)!.structure_locked_at_utc)}`
+                          : 'Unlocked; available for authorized company structure changes'}</span>
+                      </div>
+                    )}
+                    <div className={styles.inputNote}>Branch settings control where this Pay Item can be used; they do not change its method or quantity tiers.</div>
                     {selectedItem && (
                       <>
                         <div className={styles.detailRow}>
@@ -203,7 +223,7 @@ export function PayItemCatalog({
                   {history && (
                     <div className={styles.historySection}>
                       <div className={styles.detailSectionTitle}>Configuration history</div>
-                      {history.length === 0 && <div className={styles.cdpiEmpty}>No configuration yet.</div>}
+                      {history.length === 0 && <div className={styles.payItemRequestEmpty}>No configuration yet.</div>}
                       {history.map(version => (
                         <div key={version.config_id} className={styles.historyItem}>
                           <span>{version.is_active ? 'Active' : 'Inactive'}</span>

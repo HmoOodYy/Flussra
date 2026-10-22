@@ -6,10 +6,10 @@ import {
   submitPayDefinitionRequest,
   updatePayDefinitionRequest,
 } from '../../../lib/compensationApi';
-import type { PayDefinitionInputType } from '../../../types/compensation';
+import type { OrdinalTierInput, PayDefinitionCalculationMethod, PayDefinitionInputType } from '../../../types/compensation';
 import type { RequestFilter } from './payItemsModel';
 import { submitExistingDraft } from './requestDraftWorkflow';
-import { apiError } from './payItemsModel';
+import { apiError, buildPayDefinitionPayload, buildPayDefinitionRequestPayload, validatePayMethod } from './payItemsModel';
 
 interface UsePayItemCreationArgs {
   canDirectCreate: boolean;
@@ -29,10 +29,17 @@ export function usePayItemCreation({
   const [createName, setCreateName] = useState('');
   const [createCode, setCreateCode] = useState('');
   const [createInputType, setCreateInputType] = useState<PayDefinitionInputType>('Decimal');
+  const [createCalculationMethod, setCreateCalculationMethodState] = useState<PayDefinitionCalculationMethod>('PerUnit');
+  const [createOrdinalTiers, setCreateOrdinalTiers] = useState<OrdinalTierInput[]>([{ ordinal_from: 1, ordinal_to: null }]);
   const [createUnit, setCreateUnit] = useState('');
   const [createNotes, setCreateNotes] = useState('');
   const [createSaving, setCreateSaving] = useState(false);
   const [createError, setCreateError] = useState('');
+
+  function setCreateCalculationMethod(method: PayDefinitionCalculationMethod) {
+    setCreateCalculationMethodState(method);
+    if (method === 'OrdinalTier') setCreateInputType('WholeNumber');
+  }
 
   async function saveCreate(e: FormEvent) {
     e.preventDefault();
@@ -40,24 +47,30 @@ export function usePayItemCreation({
       setCreateError('Pay item name is required.');
       return;
     }
+    const methodError = validatePayMethod(createCalculationMethod, createInputType,
+      createCalculationMethod === 'OrdinalTier' ? createOrdinalTiers : []);
+    if (methodError) {
+      setCreateError(methodError);
+      return;
+    }
     setCreateSaving(true);
     setCreateError('');
-    const fields = {
+    const fields = buildPayDefinitionPayload({
       definition_code: createCode.trim() || null,
       definition_name: createName.trim(),
       input_type: createInputType,
       unit: createUnit.trim() || null,
-      calculation_method: 'PerUnit' as const,
-    };
+      calculation_method: createCalculationMethod,
+      ordinal_tiers: createOrdinalTiers,
+    });
     try {
       if (canDirectCreate) {
         await createPayDefinition(fields);
         showToast('Pay item created for the company. Activate it per branch to use it.');
         setReloadKey(k => k + 1);
       } else if (selectedBranchId !== null) {
-        const draft = await createPayDefinitionRequest({
-          requesting_branch_id: selectedBranchId, ...fields, notes: createNotes.trim() || null,
-        });
+        const draft = await createPayDefinitionRequest(buildPayDefinitionRequestPayload(
+          selectedBranchId, fields, createNotes.trim() || null));
         const result = await submitExistingDraft(
           { updatePayDefinitionRequest, submitPayDefinitionRequest }, draft);
         if (result.kind === 'submitted') {
@@ -75,6 +88,8 @@ export function usePayItemCreation({
       setCreateOpen(false);
       setCreateName(''); setCreateCode(''); setCreateUnit(''); setCreateNotes('');
       setCreateInputType('Decimal');
+      setCreateCalculationMethodState('PerUnit');
+      setCreateOrdinalTiers([{ ordinal_from: 1, ordinal_to: null }]);
     } catch (err) {
       setCreateError(apiError(err));
     } finally {
@@ -84,7 +99,8 @@ export function usePayItemCreation({
 
   return {
     createOpen, setCreateOpen, createName, setCreateName, createCode, setCreateCode,
-    createInputType, setCreateInputType, createUnit, setCreateUnit,
+    createInputType, setCreateInputType, createCalculationMethod, setCreateCalculationMethod,
+    createOrdinalTiers, setCreateOrdinalTiers, createUnit, setCreateUnit,
     createNotes, setCreateNotes, createSaving, createError, setCreateError, saveCreate,
   };
 }

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { approveSchedule, createSchedule, replaceScheduleValues, updateSchedule } from '../../../lib/compensationApi';
 import type { DriverPayRateRow } from '../../../types/compensation';
 import { apiError, type EditRow } from './payRatesView';
+import { buildCompleteScheduleValues } from './payRatesTiers';
 
 export function useTargetRateEditing(selectedDriverId: number | null, refreshTargetRows: (driverId: number) => Promise<void>, referenceDate: string | undefined) {
   const [targetDrafts, setTargetDrafts] = useState<Record<number, EditRow>>({});
@@ -13,7 +14,13 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
     setTargetDrafts((prev) => ({
       ...prev,
       [row.rate_definition_id]: {
-        amount: row.pending?.amount ?? row.current?.amount ?? '',
+        values: Object.fromEntries(row.components.map((component) => {
+          const existing = row.pending?.values.find((value) =>
+            value.rate_component_definition_id === component.rate_component_definition_id)
+            ?? row.current?.values.find((value) =>
+              value.rate_component_definition_id === component.rate_component_definition_id);
+          return [component.rate_component_definition_id, existing?.amount ?? ''];
+        })),
         effective_from: row.pending?.effective_from ?? referenceDate ?? '',
       },
     }));
@@ -24,8 +31,14 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
     setTargetErrors((prev) => { const next = { ...prev }; delete next[rateDefinitionId]; return next; });
   }
 
-  function setTargetField(rateDefinitionId: number, field: keyof EditRow, value: string) {
-    setTargetDrafts((prev) => ({ ...prev, [rateDefinitionId]: { ...prev[rateDefinitionId], [field]: value } }));
+  function setTargetField(rateDefinitionId: number, field: 'effective_from' | number, value: string) {
+    setTargetDrafts((prev) => {
+      const current = prev[rateDefinitionId];
+      if (!current) return prev;
+      return { ...prev, [rateDefinitionId]: typeof field === 'number'
+        ? { ...current, values: { ...current.values, [field]: value } }
+        : { ...current, effective_from: value } };
+    });
   }
 
   /**
@@ -37,9 +50,8 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
   async function saveTargetRow(row: DriverPayRateRow, approve: boolean) {
     const id = row.rate_definition_id;
     const draft = targetDrafts[id];
-    const componentId = row.rate_component_definition_id;
-    if (!selectedDriverId || !draft || draft.amount === '' || !draft.effective_from) return;
-    if (componentId === null) return; // a tiered rate is not edited as one scalar value
+    const values = draft ? buildCompleteScheduleValues(row.components, draft.values) : null;
+    if (!selectedDriverId || !draft || !draft.effective_from || !values) return;
     const driverId = selectedDriverId;
     setTargetSavingId(id);
     setTargetErrors((prev) => { const next = { ...prev }; delete next[id]; return next; });
@@ -57,9 +69,7 @@ export function useTargetRateEditing(selectedDriverId: number | null, refreshTar
         });
         scheduleId = created.driver_rate_schedule_id;
       }
-      await replaceScheduleValues(scheduleId, [{
-        rate_component_definition_id: componentId, amount: draft.amount,
-      }]);
+      await replaceScheduleValues(scheduleId, values);
       if (approve) {
         phase = 'approve';
         await approveSchedule(scheduleId);

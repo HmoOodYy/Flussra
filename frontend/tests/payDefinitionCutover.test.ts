@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { buildPayDefinitionPayload, buildPayDefinitionRequestPayload, ordinalTopologyError, validatePayMethod } from '../src/pages/settings/pay-items/payItemsModel.ts';
+import { buildCompleteScheduleValues, hasCompleteValues } from '../src/pages/people/pay-rates/payRatesTiers.ts';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -90,9 +92,10 @@ test('Status pay rates are Driver rate schedules of a Status rate column, with n
   assert.match(page, /r\.kind === 'StatusRateColumn'/);
   assert.doesNotMatch(payRatesFeatureSource, /rate-matrix|rates\/batch|saveStatusRateBatch|approveStatusRate|voidStatusRate/);
   assert.doesNotMatch(payRatesFeatureSource, /rate_type_id|driver_rate_id/);
-  // The row editor sends the Status rate column's RateDefinition and component like any rate.
-  assert.match(payRatesTargetHook, /rate_definition_id: id/);
-  assert.match(payRatesTargetHook, /rate_component_definition_id: row\.rate_component_definition_id/);
+  // Scalar Status rows still produce a complete one-component schedule payload.
+  assert.deepEqual(buildCompleteScheduleValues([
+    { rate_component_definition_id: 31, sequence_no: 1, ordinal_from: null, ordinal_to: null },
+  ], { 31: '25.00' }), [{ rate_component_definition_id: 31, amount: '25.00' }]);
 });
 
 test('compensationApi talks only to the /compensation namespace', () => {
@@ -145,4 +148,65 @@ test('Status rates have no independent batch action and never touch assignments'
   assert.ok(payRatesSource('useDriverPayRules.ts').includes("from './driverPayRulesApi'"));
   assert.ok(payRatesSource('driverPayRulesApi.ts').includes("/payroll/drivers/${driverId}/pay-rules"));
   assert.ok(payRatesSource('driverPayRulesApi.ts').includes("'/payroll/driver-pay-rules'"));
+});
+
+const VALID_TIERS = [
+  { ordinal_from: 1, ordinal_to: 2 },
+  { ordinal_from: 3, ordinal_to: 5 },
+  { ordinal_from: 6, ordinal_to: null },
+];
+
+test('Per Unit direct creation does not carry a tier topology', () => {
+  assert.deepEqual(buildPayDefinitionPayload({
+    definition_name: 'Mileage', input_type: 'Decimal', unit: 'mile',
+    calculation_method: 'PerUnit', ordinal_tiers: VALID_TIERS,
+  }), {
+    definition_name: 'Mileage', input_type: 'Decimal', unit: 'mile', calculation_method: 'PerUnit',
+  });
+});
+
+test('Ordinal direct creation carries WholeNumber input and ordered tier bounds', () => {
+  assert.deepEqual(buildPayDefinitionPayload({
+    definition_name: 'Loads', input_type: 'WholeNumber', unit: 'load',
+    calculation_method: 'OrdinalTier', ordinal_tiers: VALID_TIERS,
+  }), {
+    definition_name: 'Loads', input_type: 'WholeNumber', unit: 'load',
+    calculation_method: 'OrdinalTier', ordinal_tiers: VALID_TIERS,
+  });
+});
+
+test('Ordinal branch request carries the branch, method, input, topology, and notes', () => {
+  const definition = buildPayDefinitionPayload({
+    definition_name: 'Loads', input_type: 'WholeNumber', unit: 'load',
+    calculation_method: 'OrdinalTier', ordinal_tiers: VALID_TIERS,
+  });
+  assert.deepEqual(buildPayDefinitionRequestPayload(42, definition, 'Route loads'), {
+    requesting_branch_id: 42, ...definition, notes: 'Route loads',
+  });
+});
+
+test('Ordinal topology rejects decimal, gaps, overlaps, non-positive bounds, and missing final open tier', () => {
+  assert.equal(validatePayMethod('OrdinalTier', 'WholeNumber', VALID_TIERS), null);
+  assert.match(validatePayMethod('OrdinalTier', 'Decimal', VALID_TIERS) ?? '', /whole-number/);
+  assert.match(ordinalTopologyError([{ ordinal_from: 1, ordinal_to: 2 }, { ordinal_from: 4, ordinal_to: null }]) ?? '', /continuous/);
+  assert.match(ordinalTopologyError([{ ordinal_from: 1, ordinal_to: 3 }, { ordinal_from: 3, ordinal_to: null }]) ?? '', /continuous/);
+  assert.match(ordinalTopologyError([{ ordinal_from: 0, ordinal_to: null }]) ?? '', /positive/);
+  assert.match(ordinalTopologyError([{ ordinal_from: 1, ordinal_to: 2 }]) ?? '', /final tier/);
+  assert.match(ordinalTopologyError([{ ordinal_from: 1, ordinal_to: null }, { ordinal_from: 2, ordinal_to: null }]) ?? '', /open-ended/);
+});
+
+test('Tiered Driver schedule writes every component atomically and treats zero as present', () => {
+  const components = [
+    { rate_component_definition_id: 20, sequence_no: 2, ordinal_from: 3, ordinal_to: null },
+    { rate_component_definition_id: 10, sequence_no: 1, ordinal_from: 1, ordinal_to: 2 },
+  ];
+  assert.equal(buildCompleteScheduleValues(components, { 10: '0', 20: '' }), null);
+  assert.equal(hasCompleteValues([
+    { rate_component_definition_id: 10, sequence_no: 1, ordinal_from: 1, ordinal_to: 2, amount: '0' },
+    { rate_component_definition_id: 20, sequence_no: 2, ordinal_from: 3, ordinal_to: null, amount: null },
+  ]), false);
+  assert.deepEqual(buildCompleteScheduleValues(components, { 10: '0', 20: '5.25' }), [
+    { rate_component_definition_id: 10, amount: '0' },
+    { rate_component_definition_id: 20, amount: '5.25' },
+  ]);
 });

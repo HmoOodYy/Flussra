@@ -16,6 +16,7 @@ function makeRequest(overrides: Partial<PayDefinitionRequestSummary> = {}): PayD
     input_type: 'Decimal',
     unit: null,
     calculation_method: 'PerUnit',
+    ordinal_tiers: null,
     notes: null,
     status: 'Draft',
     revision: 1,
@@ -33,7 +34,9 @@ function makeRequest(overrides: Partial<PayDefinitionRequestSummary> = {}): PayD
 
 const EDITS: RequestDraftEditFields = {
   definition_name: 'Edited Name',
-  input_type: 'Decimal',
+  input_type: 'WholeNumber',
+  calculation_method: 'OrdinalTier',
+  ordinal_tiers: [{ ordinal_from: 1, ordinal_to: 2 }, { ordinal_from: 3, ordinal_to: null }],
   unit: '',
   notes: '',
 };
@@ -67,11 +70,13 @@ test('saveAndSubmitDraft: submit uses the revision returned by PATCH, not a loca
     request_id: 'req-2', revision: 6, status: 'PendingCompanyApproval', definition_name: 'Edited Name',
   });
   let submitCalledWith: [string, unknown] | null = null;
+  let updateCalledWith: unknown = null;
 
   const deps: RequestDraftWorkflowDeps = {
     updatePayDefinitionRequest: async (requestId, payload) => {
       assert.equal(requestId, 'req-2');
       assert.equal(payload.expected_revision, 3);
+      updateCalledWith = payload;
       return patched;
     },
     submitPayDefinitionRequest: async (requestId, payload) => {
@@ -83,6 +88,15 @@ test('saveAndSubmitDraft: submit uses the revision returned by PATCH, not a loca
   const result = await saveAndSubmitDraft(deps, draft, EDITS);
 
   assert.equal(result.kind, 'submitted');
+  assert.deepEqual(updateCalledWith, {
+    expected_revision: 3,
+    definition_name: EDITS.definition_name,
+    input_type: EDITS.input_type,
+    calculation_method: EDITS.calculation_method,
+    ordinal_tiers: EDITS.ordinal_tiers,
+    unit: EDITS.unit,
+    notes: EDITS.notes,
+  });
   assert.deepEqual(submitCalledWith, ['req-2', { expected_revision: 5 }]);
 });
 

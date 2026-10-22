@@ -1,7 +1,8 @@
 import { canManagePayDefinitionsForBranch } from '../../../lib/permissions';
-import type { PayDefinitionDecisionAction, PayDefinitionInputType, PayDefinitionRequestEvent, PayDefinitionRequestSummary } from '../../../types/compensation';
+import type { OrdinalTierInput, PayDefinitionCalculationMethod, PayDefinitionDecisionAction, PayDefinitionInputType, PayDefinitionRequestEvent, PayDefinitionRequestSummary } from '../../../types/compensation';
 import type { UserProfile } from '../../../store/authStore';
-import { fmtDate, INPUT_TYPE_LABELS } from './payItemsModel';
+import { fmtDate, INPUT_TYPE_LABELS, METHOD_LABELS, ordinalTierLabel, validatePayMethod } from './payItemsModel';
+import { OrdinalTierEditor } from './OrdinalTierEditor';
 import styles from './PayItemsPage.module.css';
 
 interface PayDefinitionRequestsPanelProps {
@@ -36,6 +37,10 @@ interface PayDefinitionRequestsPanelProps {
   setDraftName(value: string): void;
   draftInputType: PayDefinitionInputType;
   setDraftInputType(value: PayDefinitionInputType): void;
+  draftCalculationMethod: PayDefinitionCalculationMethod;
+  setDraftCalculationMethod(value: PayDefinitionCalculationMethod): void;
+  draftOrdinalTiers: OrdinalTierInput[];
+  setDraftOrdinalTiers(value: OrdinalTierInput[]): void;
   draftUnit: string;
   setDraftUnit(value: string): void;
   draftNotes: string;
@@ -50,15 +55,16 @@ export function PayDefinitionRequestsPanel({
   toggleRequestHistory, expandedRequestId, requestEvents, decideTarget, decideAction,
   setDecideTarget, decideSaving, decideReason, setDecideReason, decideError, executeDecide,
   draftTarget, setDraftTarget, draftSaving, draftName, setDraftName, draftInputType,
-  setDraftInputType, draftUnit, setDraftUnit, draftNotes, setDraftNotes, draftError, executeDraftEdit,
+  setDraftInputType, draftCalculationMethod, setDraftCalculationMethod, draftOrdinalTiers, setDraftOrdinalTiers,
+  draftUnit, setDraftUnit, draftNotes, setDraftNotes, draftError, executeDraftEdit,
 }: PayDefinitionRequestsPanelProps) {
   return (
     <>
       {showRequestsTab && pageTab === 'requests' && (
-        <div className={styles.cdpiSection}>
-          <div className={styles.cdpiSectionHeader}>
-            <h3 className={styles.cdpiSectionTitle}>Pay Item Requests</h3>
-            <div className={styles.cdpiFilterRow}>
+        <div className={styles.payItemRequestSection}>
+          <div className={styles.payItemRequestHeader}>
+            <h3 className={styles.payItemRequestTitle}>Pay Item Requests</h3>
+            <div className={styles.payItemRequestFilters}>
               {(['PendingCompanyApproval', 'Draft', 'Approved', 'Rejected', 'all'] as const).map(f => (
                 <button key={f} type="button"
                   className={`${styles.filterPill}${requestFilter === f ? ` ${styles.filterPillActive}` : ''}`}
@@ -68,32 +74,38 @@ export function PayDefinitionRequestsPanel({
               ))}
             </div>
           </div>
-          {requestsLoading && <div className={styles.cdpiEmpty}>Loading requests…</div>}
+          {requestsLoading && <div className={styles.payItemRequestEmpty}>Loading requests…</div>}
           {requestsError && <div className={styles.errorAlert}>{requestsError}</div>}
           {!requestsLoading && !requestsError && requests.length === 0 && (
-            <div className={styles.cdpiEmpty}>No requests found.</div>
+            <div className={styles.payItemRequestEmpty}>No requests found.</div>
           )}
-          <div className={styles.cdpiRequestList}>
+          <div className={styles.payItemRequestList}>
             {requests.map(req => (
-              <div key={req.request_id} className={styles.cdpiRequestCard}>
-                <div className={styles.cdpiCardRow}>
-                  <span className={styles.cdpiStatusBadge}>
+              <div key={req.request_id} className={styles.payItemRequestCard}>
+                <div className={styles.payItemRequestCardRow}>
+                  <span className={styles.payItemRequestStatus}>
                     {req.status === 'PendingCompanyApproval' ? 'Pending' : req.status}
                   </span>
-                  <span className={styles.cdpiCardName}>{req.definition_name ?? '(unnamed)'}</span>
-                  <span className={styles.cdpiCardMeta}>
+                  <span className={styles.payItemRequestName}>{req.definition_name ?? '(unnamed)'}</span>
+                  <span className={styles.payItemRequestMeta}>
                     {branchName(req.requesting_branch_id)}
+                    {' · '}{req.calculation_method ? METHOD_LABELS[req.calculation_method] : '—'}
                     {' · '}{req.input_type ? INPUT_TYPE_LABELS[req.input_type] : '—'}
                     {req.unit ? ` · ${req.unit}` : ''}
                   </span>
                 </div>
-                {req.notes && <div className={styles.cdpiCardNotes}>{req.notes}</div>}
-                <div className={styles.cdpiCardDates}>
+                {req.calculation_method === 'OrdinalTier' && (
+                  <div className={styles.payItemRequestNotes}>
+                    Quantity tiers: {(req.ordinal_tiers ?? []).map(ordinalTierLabel).join(', ') || 'Missing tier structure'}
+                  </div>
+                )}
+                {req.notes && <div className={styles.payItemRequestNotes}>{req.notes}</div>}
+                <div className={styles.payItemRequestDates}>
                   rev {req.revision}
                   {req.submitted_at_utc && ` · submitted ${fmtDate(req.submitted_at_utc)}`}
                   {req.copied_from_request_id && ' · copied from a rejected request'}
                 </div>
-                <div className={styles.cdpiCardActions}>
+                <div className={styles.payItemRequestActions}>
                   {canGovern && req.status === 'PendingCompanyApproval' && (
                     <>
                       <button type="button" className={styles.btnPrimary} onClick={() => openDecide(req, 'Approve')}>Approve</button>
@@ -139,6 +151,12 @@ export function PayDefinitionRequestsPanel({
             <div className={styles.modalBody}>
               <div className={styles.infoBanner}>
                 <strong>{decideTarget.definition_name ?? '(unnamed)'}</strong> from {branchName(decideTarget.requesting_branch_id)}
+                <div>{decideTarget.calculation_method ? METHOD_LABELS[decideTarget.calculation_method] : 'Method missing'}
+                  {' · '}{decideTarget.input_type ? INPUT_TYPE_LABELS[decideTarget.input_type] : 'Input missing'}
+                  {decideTarget.unit ? ` · ${decideTarget.unit}` : ''}</div>
+                {decideTarget.calculation_method === 'OrdinalTier' && (
+                  <div>Quantity tiers: {(decideTarget.ordinal_tiers ?? []).map(ordinalTierLabel).join(', ') || 'Missing tier structure'}</div>
+                )}
               </div>
               <div className={styles.formGroup} style={{ marginTop: '0.75rem' }}>
                 <label className={styles.label} htmlFor="decide-reason">Reason <span className={styles.required}>*</span></label>
@@ -172,11 +190,29 @@ export function PayDefinitionRequestsPanel({
               <div className={styles.formGroup}>
                 <label className={styles.label} htmlFor="draft-input">Input</label>
                 <select id="draft-input" className={styles.input} value={draftInputType}
-                  onChange={e => setDraftInputType(e.target.value as PayDefinitionInputType)} disabled={draftSaving}>
+                  onChange={e => setDraftInputType(e.target.value as PayDefinitionInputType)} disabled={draftSaving || draftCalculationMethod === 'OrdinalTier'}>
                   <option value="Decimal">{INPUT_TYPE_LABELS.Decimal}</option>
                   <option value="WholeNumber">{INPUT_TYPE_LABELS.WholeNumber}</option>
                 </select>
               </div>
+              <div className={styles.formGroup}>
+                <label className={styles.label} htmlFor="draft-method">Pay method</label>
+                <select id="draft-method" className={styles.input} value={draftCalculationMethod}
+                  onChange={e => {
+                    const method = e.target.value as PayDefinitionCalculationMethod;
+                    setDraftCalculationMethod(method);
+                    if (method === 'OrdinalTier') setDraftInputType('WholeNumber');
+                  }} disabled={draftSaving}>
+                  <option value="PerUnit">{METHOD_LABELS.PerUnit}</option>
+                  <option value="OrdinalTier">{METHOD_LABELS.OrdinalTier}</option>
+                </select>
+                <div className={styles.inputNote}>{draftCalculationMethod === 'PerUnit'
+                  ? 'Quantity is multiplied by the Driver’s rate.'
+                  : 'Each whole-number quantity unit uses the Driver’s rate for its tier.'}</div>
+              </div>
+              {draftCalculationMethod === 'OrdinalTier' && (
+                <OrdinalTierEditor tiers={draftOrdinalTiers} setTiers={setDraftOrdinalTiers} disabled={draftSaving} />
+              )}
               <div className={styles.formGroup}>
                 <label className={styles.label} htmlFor="draft-unit">Unit <span className={styles.optional}>(optional)</span></label>
                 <input id="draft-unit" className={styles.input} maxLength={50} value={draftUnit}
@@ -190,7 +226,8 @@ export function PayDefinitionRequestsPanel({
               {draftError && <div className={styles.errorAlert}>{draftError}</div>}
             </div>
             <div className={styles.modalFooter}>
-              <button type="button" className={styles.btnPrimary} disabled={draftSaving || !draftName.trim()}
+              <button type="button" className={styles.btnPrimary} disabled={draftSaving || !draftName.trim()
+                || Boolean(validatePayMethod(draftCalculationMethod, draftInputType, draftCalculationMethod === 'OrdinalTier' ? draftOrdinalTiers : []))}
                 onClick={() => void executeDraftEdit()}>{draftSaving ? 'Working…' : 'Save and Submit'}</button>
               <button type="button" className={styles.btnSecondary} disabled={draftSaving} onClick={() => setDraftTarget(null)}>Cancel</button>
             </div>

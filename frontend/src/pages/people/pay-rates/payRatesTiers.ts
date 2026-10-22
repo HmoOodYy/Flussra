@@ -1,4 +1,4 @@
-import type { ScheduleValue } from '../../../types/compensation.ts';
+import type { RateComponentSummary, ScheduleValue, ScheduleValuePayload } from '../../../types/compensation.ts';
 
 /**
  * A rate schedule is either one scalar value or the complete value set of an OrdinalTier
@@ -43,4 +43,18 @@ export function scalarAmount(values: ScheduleValue[]): string | null {
 /** A schedule can be approved only when every value it holds is set: all tiers, or the one amount. */
 export function hasCompleteValues(values: ScheduleValue[]): boolean {
   return values.length > 0 && values.every((value) => value.amount !== null);
+}
+
+/** Build the one atomic replacement payload, refusing any missing or unknown component value. */
+export function buildCompleteScheduleValues(
+  components: RateComponentSummary[],
+  amounts: Record<number, string>,
+): ScheduleValuePayload[] | null {
+  if (components.length === 0 || components.some((component) =>
+    amounts[component.rate_component_definition_id] === undefined
+      || amounts[component.rate_component_definition_id] === '')) return null;
+  return components.slice().sort((a, b) => a.sequence_no - b.sequence_no).map((component) => ({
+    rate_component_definition_id: component.rate_component_definition_id,
+    amount: amounts[component.rate_component_definition_id],
+  }));
 }

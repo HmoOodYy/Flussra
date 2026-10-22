@@ -1,6 +1,7 @@
 import type { FormEvent } from 'react';
-import type { PayDefinitionInputType } from '../../../types/compensation';
-import { INPUT_TYPE_LABELS } from './payItemsModel';
+import type { OrdinalTierInput, PayDefinitionCalculationMethod, PayDefinitionInputType } from '../../../types/compensation';
+import { INPUT_TYPE_LABELS, METHOD_LABELS, validatePayMethod } from './payItemsModel';
+import { OrdinalTierEditor } from './OrdinalTierEditor';
 import styles from './PayItemsPage.module.css';
 
 interface PayItemCreationDialogProps {
@@ -12,6 +13,10 @@ interface PayItemCreationDialogProps {
   setCreateCode(value: string): void;
   createInputType: PayDefinitionInputType;
   setCreateInputType(value: PayDefinitionInputType): void;
+  createCalculationMethod: PayDefinitionCalculationMethod;
+  setCreateCalculationMethod(value: PayDefinitionCalculationMethod): void;
+  createOrdinalTiers: OrdinalTierInput[];
+  setCreateOrdinalTiers(value: OrdinalTierInput[]): void;
   createUnit: string;
   setCreateUnit(value: string): void;
   createNotes: string;
@@ -24,7 +29,8 @@ interface PayItemCreationDialogProps {
 
 export function PayItemCreationDialog({
   createOpen, setCreateOpen, createName, setCreateName, createCode, setCreateCode,
-  createInputType, setCreateInputType, createUnit, setCreateUnit, createNotes, setCreateNotes,
+  createInputType, setCreateInputType, createCalculationMethod, setCreateCalculationMethod,
+  createOrdinalTiers, setCreateOrdinalTiers, createUnit, setCreateUnit, createNotes, setCreateNotes,
   createSaving, createError, canDirectCreate, saveCreate,
 }: PayItemCreationDialogProps) {
   return (
@@ -53,19 +59,29 @@ export function PayItemCreationDialog({
               <div className={styles.formGroup}>
                 <label className={styles.label} htmlFor="create-input">Quantity entered as</label>
                 <select id="create-input" className={styles.input} value={createInputType}
-                  onChange={e => setCreateInputType(e.target.value as PayDefinitionInputType)} disabled={createSaving}>
+                  onChange={e => setCreateInputType(e.target.value as PayDefinitionInputType)} disabled={createSaving || createCalculationMethod === 'OrdinalTier'}>
                   <option value="Decimal">{INPUT_TYPE_LABELS.Decimal}</option>
                   <option value="WholeNumber">{INPUT_TYPE_LABELS.WholeNumber}</option>
                 </select>
               </div>
               <div className={styles.formGroup}>
+                <label className={styles.label} htmlFor="create-method">Pay method</label>
+                <select id="create-method" className={styles.input} value={createCalculationMethod}
+                  onChange={e => setCreateCalculationMethod(e.target.value as PayDefinitionCalculationMethod)} disabled={createSaving}>
+                  <option value="PerUnit">{METHOD_LABELS.PerUnit}</option>
+                  <option value="OrdinalTier">{METHOD_LABELS.OrdinalTier}</option>
+                </select>
+                <div className={styles.inputNote}>{createCalculationMethod === 'PerUnit'
+                  ? 'Quantity is multiplied by the Driver’s rate.'
+                  : 'Each whole-number quantity unit uses the Driver’s rate for its tier.'}</div>
+              </div>
+              {createCalculationMethod === 'OrdinalTier' && (
+                <OrdinalTierEditor tiers={createOrdinalTiers} setTiers={setCreateOrdinalTiers} disabled={createSaving} />
+              )}
+              <div className={styles.formGroup}>
                 <label className={styles.label} htmlFor="create-unit">Unit <span className={styles.optional}>(optional)</span></label>
                 <input id="create-unit" className={styles.input} maxLength={50} value={createUnit}
                   onChange={e => setCreateUnit(e.target.value)} disabled={createSaving} />
-              </div>
-              <div className={styles.formGroup}>
-                <span className={styles.label}>Pay method</span>
-                <div className={styles.inputNote}>Each unit is paid at the driver&apos;s own rate.</div>
               </div>
               {!canDirectCreate && (
                 <div className={styles.formGroup}>
@@ -77,7 +93,8 @@ export function PayItemCreationDialog({
               {createError && <div className={styles.errorAlert}>{createError}</div>}
             </div>
             <div className={styles.modalFooter}>
-              <button type="submit" className={styles.btnPrimary} disabled={createSaving || !createName.trim()}>
+              <button type="submit" className={styles.btnPrimary} disabled={createSaving || !createName.trim()
+                || Boolean(validatePayMethod(createCalculationMethod, createInputType, createCalculationMethod === 'OrdinalTier' ? createOrdinalTiers : []))}>
                 {createSaving ? 'Working…' : canDirectCreate ? 'Create Pay Item' : 'Submit for Approval'}
               </button>
               <button type="button" className={styles.btnSecondary} disabled={createSaving} onClick={() => setCreateOpen(false)}>Cancel</button>

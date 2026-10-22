@@ -380,6 +380,8 @@ class BranchPayDefinitionState(BaseModel):
     input_type: str
     unit: str | None = None
     calculation_method: str
+    components: list[RateComponentSummary] = Field(default_factory=list)
+    structure_locked_at_utc: datetime | None = None
     definition_status: str
     rate_definition_id: int | None = None
     is_configured: bool

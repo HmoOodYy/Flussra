@@ -594,10 +594,10 @@ There should be no runtime authorization dependency on `drivers.manage`.
 
 \---
 
-## DWR-015 — Compensation Architecture Is Still Legacy and Has Not Yet Entered the Target Refoundation
+## DWR-015 — Legacy Compensation Runtime and Schema Cleanup Remain
 
 **Issue:**  
-The old Rate/Pay architecture still exists, while the target Compensation model is separate and intentionally scheduled for later work.
+The target Compensation authority is operational, while pre-cutover Rate/Pay tables and runtime artifacts remain for catalog-proven cleanup.
 
 **Discovered In:**  
 Unified refoundation planning; deliberately separated from Workforce refoundation.
@@ -610,12 +610,16 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 * **P4a–P4c** runtime authority + snapshots/calculation/evidence
 * **P5a–P5b** Status compensation + OrdinalTier
 * **P6a** transfer compensation copy — RETIRED (2026-10-18); superseded by Durable Driver Stages 1–3, which precede P4c
+* **P7b** final Compensation / Settings UI cutover
+* **P8a–P8b** runtime and physical schema/catalog cleanup
 
 **Why Deferred:**  
 Compensation must be built on stable Workforce identity rather than while Employee/Driver authority is still moving.
 
 **Current State:**  
 P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45). P3b is closed (PR #46): it established a dormant target persistence model and database invariants beside the legacy compensation model. P3c made the dormant model authorable and resolvable (generic PayDefinition governance and provenance, PerUnit assignment authoring, canonical resolver) without switching any operational path. P4a (closed, PR #48) cut the definition, branch-applicability and PerUnit rate authoring authority over to the target model and retired the legacy CDPI/PayItem writers and the ordinary legacy DriverRate writers. P4b (closed, PR #49, migration `0085`) is the clean pre-production runtime cutover: PayrollPeriodDefinitions replace the period PayItem snapshot, ordinary DraftLines become source facts keyed by `PayrollPeriodDefinitionID`, live PerUnit money is derived by the backend through `resolve_many` and the method-owned calculation boundary, and submit/resubmit/finalize stay closed (`TARGET_PAYROLL_EVIDENCE_NOT_READY`) until P4c. Zero PayDefinitions is valid and never falls back to PayItems; development databases that contain periods must be reset before `0085` applies. This debt is not resolved by P3b, P3c or P4a: the target period snapshots, calculation and evidence (P4b–P4c), Status and OrdinalTier (P5), transfer copy (P6, since retired) and removal of the inert legacy layer remain. Update 2026-10-18: Durable Driver Stages 1–3 (permanent Driver and DriverAssignments, Driver-owned compensation, payable rounding and proration) now precede P4c, and P6a is retired because compensation follows the Driver.
+
+Update 2026-10-22: P4c and P5a–P5b are closed; target calculation, Status, OrdinalTier and Driver-owned schedules are live. P7a merged via PR #65 at `b4474728196b23cf2b95aad6a30abb4914e9ff05`, and P7b completes the frontend Compensation / Settings cutover on that `0091` baseline without a migration. P7b is implemented and awaiting independent review/merge. This entry remains open for P8 runtime/schema cleanup; P7c payroll-entry cleanup also remains future work.
 
 **Issue Resolved?:** NOT YET
 
@@ -675,12 +679,13 @@ Backend authorities need to stabilize first. Building the final UI on top of tra
 **Current State:**  
 P1b performs minimum compatibility changes only, such as using `driver\_state` in the Transfer Requests picker.
 
-Update 2026-10-22: P7a implements the final routed People & Access hub (Workforce, Access, Transfer Requests), retires the User-centered wizard, and keeps the three areas' authorities separate. This entry becomes YES when P7a is accepted under the rules above.
+Update 2026-10-22: P7a implements the final routed People & Access hub (Workforce, Access, Transfer Requests), retires the User-centered wizard, and keeps the three areas' authorities separate. It merged via PR #65 at `b4474728196b23cf2b95aad6a30abb4914e9ff05` with no migration.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
+**Resolved In:** P7a — People / Access / Transfer UI
+
+**Resolution Evidence:** PR #65 merge commit `b4474728196b23cf2b95aad6a30abb4914e9ff05`; routed Workforce, Access and Transfer Requests UI
 **Last Updated:** 2026-10-22
 
 \---
