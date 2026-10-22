@@ -347,10 +347,15 @@ async def _get_accessible_branches_for_transfers(
     """
     Return (can_see_all, branch_ids) for transfer read access.
 
-    Caller must have drivers.view (or drivers.edit) on at least one branch.
-    - AllCompanyBranches scope + drivers.view or drivers.edit → can_see_all=True, branch_ids=[]
-    - SpecificBranch scope → branch_ids = branches where caller has drivers.view
-    - No qualifying permission → raises HTTP 403
+    Transfer-read authority is `drivers.view` OR `drivers.edit`, and it is additive across scopes:
+    - Company-wide drivers.view/drivers.edit → can_see_all=True, branch_ids=[]
+    - Otherwise → the Branches where the caller holds drivers.view/drivers.edit (granted for that
+      Branch or company-wide), which the list is then filtered to.
+    - No such authority anywhere → raises HTTP 403.
+
+    A Company-wide assignment in an unrelated permission family (for example users.view) says
+    nothing about transfer authority, so it neither grants nor suppresses a Branch-scoped
+    drivers.view/drivers.edit grant.
 
     This function is for OPERATIONAL users only.  DRIVER/Self users are blocked before
     this is called.
@@ -358,19 +363,15 @@ async def _get_accessible_branches_for_transfers(
     can_see_all, branch_ids = await check_branch_access(company_id, user_id, db)
 
     if can_see_all:
-        # Company level (branch_id=None → AllCompanyBranches only): drivers.view or drivers.edit,
-        # the same pair a SpecificBranch caller is held to below.
-        if not await has_any_permission(company_id, user_id, None, _TRANSFER_READ_PERMS, db):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=(
-                    "You do not have permission to perform this action "
-                    f"(required: one of {_TRANSFER_READ_PERMS})."
-                ),
-            )
-        return True, []
+        # branch_id=None asks about company-wide authority only.
+        if await has_any_permission(company_id, user_id, None, _TRANSFER_READ_PERMS, db):
+            return True, []
+        # Company-wide scope exists but not for transfers: resolve the Branches one by one.
+        branch_rows = await db.execute(
+            text("SELECT BranchID FROM core.Branches WHERE CompanyID = :cid"), {"cid": company_id},
+        )
+        branch_ids = [int(row["branchid"]) for row in branch_rows.mappings().all()]
 
-    # SpecificBranch: keep only branches where caller has drivers.view or drivers.edit
     allowed: list[int] = []
     for bid in branch_ids:
         if await has_any_permission(company_id, user_id, bid, _TRANSFER_READ_PERMS, db):
@@ -380,7 +381,8 @@ async def _get_accessible_branches_for_transfers(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
-                "You do not have drivers.view permission on any branch. "
+                "You do not have permission to perform this action "
+                f"(required: one of {_TRANSFER_READ_PERMS}) on any branch. "
                 "Transfer request data is not accessible."
             ),
         )

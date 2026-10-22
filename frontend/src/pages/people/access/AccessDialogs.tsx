@@ -85,9 +85,18 @@ export function AccessDialogs(props: AccessDialogsProps) {
               <select className={styles.inp} value={st.create.form.employeeId ?? ''} required={createIsDriver}
                 onChange={e => dispatch({ type: 'CREATE_PICK', employee: createCandidates.find(c => c.employee_id === parseInt(e.target.value)) ?? null })}>
                 <option value="">{createIsDriver ? '— Select the current Driver —' : '— No Employee (stand-alone account) —'}</option>
+                {st.create.selected === null && st.create.form.employeeId !== null && (
+                  <option value={st.create.form.employeeId}>Employee #{st.create.form.employeeId} (not confirmed yet)</option>
+                )}
                 {createCandidates.map(c => <option key={c.employee_id} value={c.employee_id}>{candidateLabel(c)}</option>)}
               </select>
             </Field>
+            {st.create.resolveError !== null && (
+              <div className={styles.errMsg} role="alert">
+                Could not look up the chosen Employee: {st.create.resolveError}{' '}
+                <button type="button" className={styles.linkBtn} onClick={() => dispatch({ type: 'CREATE_RESOLVE_RETRY' })}>Retry</button>
+              </div>
+            )}
             {(st.create.candidatesLoading || st.create.resolving) && <p className={styles.helpTxt}>Loading Employees…</p>}
             {st.create.candidatesMore && (
               <button type="button" className={styles.linkBtn} onClick={() => props.loadMoreCandidates('create')}>Load more Employees</button>

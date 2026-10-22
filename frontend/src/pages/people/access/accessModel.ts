@@ -51,6 +51,31 @@ export function hasMoreCandidates(received: number): boolean {
   return received >= CANDIDATE_PAGE_SIZE;
 }
 
+export type PreselectOutcome =
+  | { kind: 'found'; employee: EmployeeLinkCandidate }
+  /** The lookup succeeded and the Employee is not a candidate (already linked, or not in this Company). */
+  | { kind: 'unavailable' }
+  /** The request itself failed: nothing is known about the Employee. */
+  | { kind: 'failed'; error: string };
+
+/**
+ * Resolves an Employee preselected by id. A failed request is reported as a failure, never as
+ * "unavailable": only a successful, empty answer proves the Employee cannot be linked.
+ */
+export async function lookupPreselectedEmployee(
+  employeeId: number,
+  fetchById: (employeeId: number) => Promise<EmployeeLinkCandidate[]>,
+  describeError: (error: unknown) => string,
+): Promise<PreselectOutcome> {
+  try {
+    const rows = await fetchById(employeeId);
+    const employee = rows.find((row) => row.employee_id === employeeId);
+    return employee ? { kind: 'found', employee } : { kind: 'unavailable' };
+  } catch (error) {
+    return { kind: 'failed', error: describeError(error) };
+  }
+}
+
 /** The select's options: the loaded page plus the chosen Employee, which may sit on another page. */
 export function withSelected(
   candidates: EmployeeLinkCandidate[],

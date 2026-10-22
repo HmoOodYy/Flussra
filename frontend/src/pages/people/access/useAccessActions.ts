@@ -27,6 +27,7 @@ import {
   buildProvisionPayload,
   eligibleCandidates,
   hasMoreCandidates,
+  lookupPreselectedEmployee,
   unlinkBlockedReason,
 } from './accessModel';
 import type { AccessAction, AccessPageState } from './accessState';
@@ -46,6 +47,10 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
   const submitCreate = useCallback(async (e: FormEvent) => {
     e.preventDefault();
     if (st.create.loading) return;
+    if (st.create.resolving || st.create.resolveError !== null) {
+      dispatch({ type: 'CREATE_ERROR', err: 'The chosen Employee has not been confirmed yet. Retry the lookup or choose another Employee.' });
+      return;
+    }
     const payload = buildCreateAccountPayload(st.create.form, st.roles);
     if (typeof payload === 'string') { dispatch({ type: 'CREATE_ERROR', err: payload }); return; }
     dispatch({ type: 'CREATE_LOADING', val: true });
@@ -61,7 +66,7 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
       // Nothing was persisted: the dialog stays open with its values for a corrected retry.
       dispatch({ type: 'CREATE_ERROR', err: apiError(err) });
     }
-  }, [st.create.form, st.create.loading, st.roles, dispatch, showToast]);
+  }, [st.create.form, st.create.loading, st.create.resolving, st.create.resolveError, st.roles, dispatch, showToast]);
 
   // ── Provision a staged account: one atomic request ──
   const submitProvision = useCallback(async (e: FormEvent) => {
@@ -131,9 +136,16 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
   useEffect(() => {
     if (!createOpen || !resolving || preselectedId === null) return;
     let cancelled = false;
-    getEmployeeLinkCandidates({ employee_id: preselectedId, limit: 1 })
-      .then((r) => { if (!cancelled) dispatch({ type: 'CREATE_RESOLVED', employee: r.data[0] ?? null }); })
-      .catch(() => { if (!cancelled) dispatch({ type: 'CREATE_RESOLVED', employee: null }); });
+    void lookupPreselectedEmployee(
+      preselectedId,
+      async (id) => (await getEmployeeLinkCandidates({ employee_id: id, limit: 1 })).data,
+      apiError,
+    ).then((outcome) => {
+      if (cancelled) return;
+      if (outcome.kind === 'found') dispatch({ type: 'CREATE_RESOLVED', employee: outcome.employee });
+      else if (outcome.kind === 'unavailable') dispatch({ type: 'CREATE_RESOLVED', employee: null });
+      else dispatch({ type: 'CREATE_RESOLVE_FAILED', error: outcome.error });
+    });
     return () => { cancelled = true; };
   }, [createOpen, resolving, preselectedId, dispatch]);
 

@@ -17,6 +17,7 @@ import {
   filterUsers,
   hasMoreCandidates,
   linkSummary,
+  lookupPreselectedEmployee,
   unlinkBlockedReason,
   withSelected,
 } from '../src/pages/people/access/accessModel.ts';
@@ -157,6 +158,66 @@ test('a preselected Employee that cannot be found is cleared with an explanation
   assert.match(st.create.error ?? '', /not available/);
 });
 
+const describe = (error: unknown) => (error instanceof Error ? error.message : 'unknown');
+
+test('the preselection lookup tells a found Employee, an unavailable one and a failed request apart', async () => {
+  const found = await lookupPreselectedEmployee(7, async () => [candidate(7, 'Ada', 'none')], describe);
+  assert.deepEqual(found.kind, 'found');
+  const unavailable = await lookupPreselectedEmployee(7, async () => [], describe);
+  assert.deepEqual(unavailable, { kind: 'unavailable' });
+  const failed = await lookupPreselectedEmployee(7, async () => { throw new Error('Network Error'); }, describe);
+  assert.deepEqual(failed, { kind: 'failed', error: 'Network Error' });
+});
+
+test('a failed preselection lookup keeps the intended Employee and is retryable, not "unavailable"', async () => {
+  let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
+  st = accessReducer(st, { type: 'CREATE_PRESELECT', employeeId: 900 });
+  const failed = await lookupPreselectedEmployee(900, async () => { throw new Error('503'); }, describe);
+  assert.equal(failed.kind, 'failed');
+  if (failed.kind === 'failed') st = accessReducer(st, { type: 'CREATE_RESOLVE_FAILED', error: failed.error });
+
+  assert.equal(st.create.form.employeeId, 900);
+  assert.deepEqual([st.create.resolving, st.create.resolveError, st.create.selected], [false, '503', null]);
+  assert.equal(st.create.error, null);
+  assert.doesNotMatch(st.create.error ?? '', /not available|already/);
+
+  // Retry, then a successful lookup resolves the same Employee.
+  st = accessReducer(st, { type: 'CREATE_RESOLVE_RETRY' });
+  assert.deepEqual([st.create.resolving, st.create.resolveError, st.create.form.employeeId], [true, null, 900]);
+  const found = await lookupPreselectedEmployee(900, async () => [candidate(900, 'Zed Far Away', 'none')], describe);
+  assert.equal(found.kind, 'found');
+  if (found.kind === 'found') st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: found.employee });
+  assert.deepEqual([st.create.resolving, st.create.resolveError, st.create.selected?.employee_id], [false, null, 900]);
+  assert.equal(st.create.form.displayName, 'Zed Far Away');
+});
+
+test('a resolved preselection survives later paging and searching', () => {
+  let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
+  st = accessReducer(st, { type: 'CREATE_PRESELECT', employeeId: 900 });
+  st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: candidate(900, 'Zed', 'none') });
+  st = accessReducer(st, { type: 'CREATE_SEARCH', val: 'someone else' });
+  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(1, 'A', 'none')], more: true });
+  st = accessReducer(st, { type: 'CREATE_CANDIDATES', candidates: [candidate(2, 'B', 'none')], more: false, append: true });
+  assert.equal(st.create.form.employeeId, 900);
+  assert.deepEqual(withSelected(st.create.candidates, st.create.selected).map((c) => c.employee_id), [900, 1, 2]);
+});
+
+test('choosing another Employee clears a failed lookup', () => {
+  let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
+  st = accessReducer(st, { type: 'CREATE_PRESELECT', employeeId: 900 });
+  st = accessReducer(st, { type: 'CREATE_RESOLVE_FAILED', error: '503' });
+  st = accessReducer(st, { type: 'CREATE_PICK', employee: candidate(5, 'Other', 'none') });
+  assert.deepEqual([st.create.resolveError, st.create.resolving, st.create.form.employeeId], [null, false, 5]);
+});
+
+test('creating an account is held back while the preselected Employee is unconfirmed', () => {
+  const actions = readFileSync(new URL('../src/pages/people/access/useAccessActions.ts', import.meta.url), 'utf8');
+  assert.match(actions, /st\.create\.resolving \|\| st\.create\.resolveError !== null/);
+  assert.match(actions, /type: 'CREATE_RESOLVE_FAILED'/);
+  const dialogs = readFileSync(new URL('../src/pages/people/access/AccessDialogs.tsx', import.meta.url), 'utf8');
+  assert.match(dialogs, /type: 'CREATE_RESOLVE_RETRY'/);
+});
+
 test('a typed display name is never overwritten by the chosen Employee name', () => {
   let st = accessReducer(ACCESS_INITIAL, { type: 'CREATE_OPEN' });
   st = accessReducer(st, { type: 'CREATE_FORM', form: { displayName: 'Custom Name' } });
@@ -222,6 +283,6 @@ test('the Transfer Requests driver picker reads the transfer-authorized candidat
 
 test('account creation resolves a preselected Employee by id instead of searching the first page', () => {
   const actions = readFileSync(new URL('../src/pages/people/access/useAccessActions.ts', import.meta.url), 'utf8');
-  assert.match(actions, /getEmployeeLinkCandidates\(\{ employee_id: preselectedId, limit: 1 \}\)/);
+  assert.match(actions, /getEmployeeLinkCandidates\(\{ employee_id: id, limit: 1 \}\)/);
   assert.match(actions, /limit: CANDIDATE_PAGE_SIZE, offset/);
 });

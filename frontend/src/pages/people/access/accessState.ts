@@ -30,6 +30,11 @@ export interface CreateAccountState extends Busy {
   selected: EmployeeLinkCandidate | null;
   /** An Employee preselected by id (from Workforce) that is still being looked up. */
   resolving: boolean;
+  /**
+   * Why the lookup of the preselected Employee failed (network, server, authorization). The
+   * Employee id is kept: a failed request proves nothing about the Employee, so it can be retried.
+   */
+  resolveError: string | null;
 }
 
 export interface ProvisionState extends Busy { form: ProvisionForm }
@@ -98,6 +103,8 @@ export type AccessAction =
   | { type: 'CREATE_PICK'; employee: EmployeeLinkCandidate | null }
   | { type: 'CREATE_PRESELECT'; employeeId: number }
   | { type: 'CREATE_RESOLVED'; employee: EmployeeLinkCandidate | null }
+  | { type: 'CREATE_RESOLVE_FAILED'; error: string }
+  | { type: 'CREATE_RESOLVE_RETRY' }
   | { type: 'CREATE_LOADING'; val: boolean }
   | { type: 'CREATE_ERROR'; err: string | null }
   // Provision a staged account
@@ -155,7 +162,7 @@ const CLOSED: Busy = { open: false, loading: false, error: null };
 export const ACCESS_INITIAL: AccessPageState = {
   users: [], roles: [], branches: [], allPerms: [],
   loading: true, error: null, selectedId: null, filters: ACCESS_FILTERS0,
-  create: { ...CLOSED, form: ACCOUNT_FORM0, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, selected: null, resolving: false },
+  create: { ...CLOSED, form: ACCOUNT_FORM0, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, selected: null, resolving: false, resolveError: null },
   provision: { ...CLOSED, form: PROVISION_FORM0 },
   link: { ...CLOSED, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, employeeId: null },
   edit: { ...CLOSED, name: '', email: '', phone: '', canLogin: true, mustChange: false },
@@ -202,6 +209,8 @@ export function accessReducer(st: AccessPageState, a: AccessAction): AccessPageS
     case 'CREATE_PICK': return { ...st, create: {
       ...st.create,
       selected: a.employee,
+      resolving: false,
+      resolveError: null,
       form: {
         ...st.create.form,
         employeeId: a.employee?.employee_id ?? null,
@@ -210,8 +219,10 @@ export function accessReducer(st: AccessPageState, a: AccessAction): AccessPageS
       error: null,
     } };
     case 'CREATE_PRESELECT': return { ...st, create: {
-      ...st.create, resolving: true, form: { ...st.create.form, employeeId: a.employeeId },
+      ...st.create, resolving: true, resolveError: null, form: { ...st.create.form, employeeId: a.employeeId },
     } };
+    case 'CREATE_RESOLVE_FAILED': return { ...st, create: { ...st.create, resolving: false, resolveError: a.error } };
+    case 'CREATE_RESOLVE_RETRY': return { ...st, create: { ...st.create, resolving: true, resolveError: null } };
     case 'CREATE_RESOLVED': return a.employee
       ? { ...st, create: {
           ...st.create, resolving: false, selected: a.employee,
