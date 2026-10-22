@@ -35,6 +35,12 @@ export interface CreateAccountState extends Busy {
    * Employee id is kept: a failed request proves nothing about the Employee, so it can be retried.
    */
   resolveError: string | null;
+  /**
+   * The preselected Employee, when a successful lookup proved it cannot be linked. The dialog stays
+   * blocked until the operator chooses another Employee or explicitly chooses "No Employee": an
+   * unavailable Employee never turns into a stand-alone account by itself.
+   */
+  unavailableEmployeeId: number | null;
 }
 
 export interface ProvisionState extends Busy { form: ProvisionForm }
@@ -162,7 +168,7 @@ const CLOSED: Busy = { open: false, loading: false, error: null };
 export const ACCESS_INITIAL: AccessPageState = {
   users: [], roles: [], branches: [], allPerms: [],
   loading: true, error: null, selectedId: null, filters: ACCESS_FILTERS0,
-  create: { ...CLOSED, form: ACCOUNT_FORM0, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, selected: null, resolving: false, resolveError: null },
+  create: { ...CLOSED, form: ACCOUNT_FORM0, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, selected: null, resolving: false, resolveError: null, unavailableEmployeeId: null },
   provision: { ...CLOSED, form: PROVISION_FORM0 },
   link: { ...CLOSED, search: '', candidates: [], candidatesLoading: false, candidatesMore: false, employeeId: null },
   edit: { ...CLOSED, name: '', email: '', phone: '', canLogin: true, mustChange: false },
@@ -211,6 +217,7 @@ export function accessReducer(st: AccessPageState, a: AccessAction): AccessPageS
       selected: a.employee,
       resolving: false,
       resolveError: null,
+      unavailableEmployeeId: null,
       form: {
         ...st.create.form,
         employeeId: a.employee?.employee_id ?? null,
@@ -219,7 +226,8 @@ export function accessReducer(st: AccessPageState, a: AccessAction): AccessPageS
       error: null,
     } };
     case 'CREATE_PRESELECT': return { ...st, create: {
-      ...st.create, resolving: true, resolveError: null, form: { ...st.create.form, employeeId: a.employeeId },
+      ...st.create, resolving: true, resolveError: null, unavailableEmployeeId: null,
+      form: { ...st.create.form, employeeId: a.employeeId },
     } };
     case 'CREATE_RESOLVE_FAILED': return { ...st, create: { ...st.create, resolving: false, resolveError: a.error } };
     case 'CREATE_RESOLVE_RETRY': return { ...st, create: { ...st.create, resolving: true, resolveError: null } };
@@ -234,8 +242,8 @@ export function accessReducer(st: AccessPageState, a: AccessAction): AccessPageS
         } }
       : { ...st, create: {
           ...st.create, resolving: false, selected: null,
+          unavailableEmployeeId: st.create.form.employeeId,
           form: { ...st.create.form, employeeId: null },
-          error: 'That Employee is not available for a new account (it may already have one).',
         } };
     case 'CREATE_LOADING': return { ...st, create: { ...st.create, loading: a.val } };
     case 'CREATE_ERROR': return { ...st, create: { ...st.create, error: a.err, loading: false } };

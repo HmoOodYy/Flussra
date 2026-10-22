@@ -12,6 +12,8 @@ import {
   buildCreateAccountPayload,
   buildProvisionPayload,
   CANDIDATE_PAGE_SIZE,
+  createBlockedReason,
+  prepareCreateAccount,
   canLinkUser,
   eligibleCandidates,
   filterUsers,
@@ -155,7 +157,7 @@ test('a preselected Employee that cannot be found is cleared with an explanation
   st = accessReducer(st, { type: 'CREATE_PRESELECT', employeeId: 5 });
   st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: null });
   assert.deepEqual([st.create.resolving, st.create.form.employeeId, st.create.selected], [false, null, null]);
-  assert.match(st.create.error ?? '', /not available/);
+  assert.equal(st.create.unavailableEmployeeId, 5);
 });
 
 const describe = (error: unknown) => (error instanceof Error ? error.message : 'unknown');
@@ -210,12 +212,86 @@ test('choosing another Employee clears a failed lookup', () => {
   assert.deepEqual([st.create.resolveError, st.create.resolving, st.create.form.employeeId], [null, false, 5]);
 });
 
-test('creating an account is held back while the preselected Employee is unconfirmed', () => {
+function preselected(outcome: 'found' | 'unavailable' | 'failed') {
+  let st = accessReducer({ ...ACCESS_INITIAL, roles: ROLES }, { type: 'CREATE_OPEN' });
+  st = accessReducer(st, { type: 'CREATE_FORM', form: { displayName: 'Ada', username: 'ada', password: 'longenough', roleId: 2 } });
+  st = accessReducer(st, { type: 'CREATE_PRESELECT', employeeId: 5 });
+  if (outcome === 'found') st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: candidate(5, 'Ada', 'none') });
+  if (outcome === 'unavailable') st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: null });
+  if (outcome === 'failed') st = accessReducer(st, { type: 'CREATE_RESOLVE_FAILED', error: '503' });
+  return st;
+}
+
+test('a found preselected Employee submits normally with its link', () => {
+  const st = preselected('found');
+  assert.equal(createBlockedReason(st.create), null);
+  const payload = prepareCreateAccount(st.create, ROLES);
+  assert.ok(typeof payload !== 'string');
+  assert.equal(payload.employee_id, 5);
+});
+
+test('an unavailable preselected Employee blocks creation and never becomes a stand-alone account', () => {
+  const st = preselected('unavailable');
+  assert.equal(st.create.unavailableEmployeeId, 5);
+  assert.equal(st.create.form.employeeId, null);
+  assert.match(createBlockedReason(st.create) ?? '', /Employee #5 is not available/);
+  // The submit path builds no request at all, however valid the other fields are.
+  const prepared = prepareCreateAccount(st.create, ROLES);
+  assert.equal(typeof prepared, 'string');
+  assert.match(String(prepared), /No Employee/);
+  // Editing other fields, or switching to a staged account, does not lift the block.
+  let edited = accessReducer(st, { type: 'CREATE_FORM', form: { email: 'ada@example.test' } });
+  edited = accessReducer(edited, { type: 'CREATE_FORM', form: { mode: 'staged' } });
+  assert.equal(typeof prepareCreateAccount(edited.create, ROLES), 'string');
+  assert.equal(edited.create.unavailableEmployeeId, 5);
+});
+
+test('a failed preselection lookup also builds no request and keeps its target', () => {
+  const st = preselected('failed');
+  assert.equal(st.create.form.employeeId, 5);
+  assert.equal(typeof prepareCreateAccount(st.create, ROLES), 'string');
+  assert.equal(st.create.unavailableEmployeeId, null);
+});
+
+test('retrying after a failure resolves the Employee and lifts the block', () => {
+  let st = preselected('failed');
+  st = accessReducer(st, { type: 'CREATE_RESOLVE_RETRY' });
+  assert.equal(typeof prepareCreateAccount(st.create, ROLES), 'string');
+  st = accessReducer(st, { type: 'CREATE_RESOLVED', employee: candidate(5, 'Ada', 'none') });
+  const payload = prepareCreateAccount(st.create, ROLES);
+  assert.ok(typeof payload !== 'string');
+  assert.equal(payload.employee_id, 5);
+});
+
+test('choosing another Employee lifts an unavailable-preselection block', () => {
+  let st = preselected('unavailable');
+  st = accessReducer(st, { type: 'CREATE_PICK', employee: candidate(8, 'Other', 'none') });
+  assert.equal(st.create.unavailableEmployeeId, null);
+  const payload = prepareCreateAccount(st.create, ROLES);
+  assert.ok(typeof payload !== 'string');
+  assert.equal(payload.employee_id, 8);
+});
+
+test('choosing "No Employee" on purpose is the only way to a stand-alone account from there', () => {
+  let st = preselected('unavailable');
+  assert.equal(typeof prepareCreateAccount(st.create, ROLES), 'string');
+  // The "No Employee" option is an explicit pick of no Employee.
+  st = accessReducer(st, { type: 'CREATE_PICK', employee: null });
+  assert.equal(st.create.unavailableEmployeeId, null);
+  const payload = prepareCreateAccount(st.create, ROLES);
+  assert.ok(typeof payload !== 'string');
+  assert.equal(payload.employee_id, null);
+});
+
+test('the create handler and dialog use the guarded path and keep the explicit stand-alone option', () => {
   const actions = readFileSync(new URL('../src/pages/people/access/useAccessActions.ts', import.meta.url), 'utf8');
-  assert.match(actions, /st\.create\.resolving \|\| st\.create\.resolveError !== null/);
+  assert.match(actions, /prepareCreateAccount\(st\.create, st\.roles\)/);
+  assert.doesNotMatch(actions, /buildCreateAccountPayload/);
   assert.match(actions, /type: 'CREATE_RESOLVE_FAILED'/);
   const dialogs = readFileSync(new URL('../src/pages/people/access/AccessDialogs.tsx', import.meta.url), 'utf8');
   assert.match(dialogs, /type: 'CREATE_RESOLVE_RETRY'/);
+  assert.match(dialogs, /disabled=\{createBlockedReason\(st\.create\) !== null\}/);
+  assert.match(dialogs, /No Employee \(stand-alone account\)/);
 });
 
 test('a typed display name is never overwritten by the chosen Employee name', () => {

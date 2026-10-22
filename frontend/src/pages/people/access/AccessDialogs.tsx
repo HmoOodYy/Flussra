@@ -2,7 +2,7 @@ import type { Dispatch, FormEvent } from 'react';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import type { CompanyRole, EmployeeLinkCandidate, UserAdmin } from '../../../types/admin';
 import { ErrMsg, Field, Modal, ModalFoot, PermissionPicker, ScopeFields } from '../PeopleFormControls';
-import { eligibleCandidates, withSelected } from './accessModel';
+import { createBlockedReason, eligibleCandidates, unavailablePreselectionMessage, withSelected } from './accessModel';
 import type { AccessAction, AccessPageState } from './accessState';
 import styles from '../PeoplePage.module.css';
 
@@ -82,15 +82,21 @@ export function AccessDialogs(props: AccessDialogsProps) {
                 onChange={e => dispatch({ type: 'CREATE_SEARCH', val: e.target.value })} />
             </Field>
             <Field label={createIsDriver ? 'Employee * (a current Driver)' : 'Link to an Employee (optional)'}>
-              <select className={styles.inp} value={st.create.form.employeeId ?? ''} required={createIsDriver}
+              <select className={styles.inp} value={st.create.unavailableEmployeeId !== null ? 'unavailable' : (st.create.form.employeeId ?? '')} required={createIsDriver}
                 onChange={e => dispatch({ type: 'CREATE_PICK', employee: createCandidates.find(c => c.employee_id === parseInt(e.target.value)) ?? null })}>
                 <option value="">{createIsDriver ? '— Select the current Driver —' : '— No Employee (stand-alone account) —'}</option>
+                {st.create.unavailableEmployeeId !== null && (
+                  <option value="unavailable" disabled>Employee #{st.create.unavailableEmployeeId} (unavailable)</option>
+                )}
                 {st.create.selected === null && st.create.form.employeeId !== null && (
                   <option value={st.create.form.employeeId}>Employee #{st.create.form.employeeId} (not confirmed yet)</option>
                 )}
                 {createCandidates.map(c => <option key={c.employee_id} value={c.employee_id}>{candidateLabel(c)}</option>)}
               </select>
             </Field>
+            {st.create.unavailableEmployeeId !== null && (
+              <ErrMsg msg={unavailablePreselectionMessage(st.create.unavailableEmployeeId)} />
+            )}
             {st.create.resolveError !== null && (
               <div className={styles.errMsg} role="alert">
                 Could not look up the chosen Employee: {st.create.resolveError}{' '}
@@ -105,7 +111,7 @@ export function AccessDialogs(props: AccessDialogsProps) {
               <p className={styles.helpTxt}>No current Driver is waiting for an account. Add the Driver in Workforce first.</p>
             )}
             {st.create.error && <ErrMsg msg={st.create.error} />}
-            <ModalFoot onCancel={() => dispatch({ type: 'CREATE_CLOSE' })} loading={st.create.loading} label="Create account" />
+            <ModalFoot onCancel={() => dispatch({ type: 'CREATE_CLOSE' })} loading={st.create.loading} label="Create account" disabled={createBlockedReason(st.create) !== null} />
           </form>
         </Modal>
       )}

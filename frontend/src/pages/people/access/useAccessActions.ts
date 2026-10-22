@@ -23,11 +23,11 @@ import type {
 import { apiError } from '../peoplePresentation';
 import {
   CANDIDATE_PAGE_SIZE,
-  buildCreateAccountPayload,
   buildProvisionPayload,
   eligibleCandidates,
   hasMoreCandidates,
   lookupPreselectedEmployee,
+  prepareCreateAccount,
   unlinkBlockedReason,
 } from './accessModel';
 import type { AccessAction, AccessPageState } from './accessState';
@@ -47,11 +47,8 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
   const submitCreate = useCallback(async (e: FormEvent) => {
     e.preventDefault();
     if (st.create.loading) return;
-    if (st.create.resolving || st.create.resolveError !== null) {
-      dispatch({ type: 'CREATE_ERROR', err: 'The chosen Employee has not been confirmed yet. Retry the lookup or choose another Employee.' });
-      return;
-    }
-    const payload = buildCreateAccountPayload(st.create.form, st.roles);
+    // Defensive: the request is never built while a preselected Employee is unsettled.
+    const payload = prepareCreateAccount(st.create, st.roles);
     if (typeof payload === 'string') { dispatch({ type: 'CREATE_ERROR', err: payload }); return; }
     dispatch({ type: 'CREATE_LOADING', val: true });
     try {
@@ -66,7 +63,7 @@ export function useAccessActions({ st, selected, dispatch, showToast, refreshUse
       // Nothing was persisted: the dialog stays open with its values for a corrected retry.
       dispatch({ type: 'CREATE_ERROR', err: apiError(err) });
     }
-  }, [st.create.form, st.create.loading, st.create.resolving, st.create.resolveError, st.roles, dispatch, showToast]);
+  }, [st.create, st.roles, dispatch, showToast]);
 
   // ── Provision a staged account: one atomic request ──
   const submitProvision = useCallback(async (e: FormEvent) => {

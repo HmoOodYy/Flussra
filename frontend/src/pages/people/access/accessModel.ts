@@ -238,6 +238,41 @@ export function buildCreateAccountPayload(form: AccountForm, roles: CompanyRole[
   return { ...base, is_staged: false, can_login: form.canLogin, role_assignment: assignment };
 }
 
+/** What an open create dialog still has to settle about a preselected Employee. */
+export interface CreateIntent {
+  form: AccountForm;
+  /** The preselected Employee is still being looked up. */
+  resolving: boolean;
+  /** The lookup request failed: nothing is known about the Employee. */
+  resolveError: string | null;
+  /** The lookup succeeded and proved the preselected Employee cannot be linked. */
+  unavailableEmployeeId: number | null;
+}
+
+export function unavailablePreselectionMessage(employeeId: number): string {
+  return `Employee #${employeeId} is not available for a new account (it may already have one). `
+    + 'Choose another Employee, or choose "No Employee" to create a stand-alone account.';
+}
+
+/**
+ * Why the account cannot be created yet, else null. A Workforce-preselected Employee is an explicit
+ * creation target: while it is unconfirmed, failed or unavailable the dialog must not fall back to a
+ * stand-alone account. Only choosing another Employee, or choosing "No Employee" on purpose, clears it.
+ */
+export function createBlockedReason(intent: CreateIntent): string | null {
+  if (intent.resolving) return 'Still confirming the chosen Employee. Try again in a moment.';
+  if (intent.resolveError !== null) {
+    return 'The chosen Employee has not been confirmed yet. Retry the lookup or choose another Employee.';
+  }
+  if (intent.unavailableEmployeeId !== null) return unavailablePreselectionMessage(intent.unavailableEmployeeId);
+  return null;
+}
+
+/** The one request that creates an account, or the reason it cannot be built. */
+export function prepareCreateAccount(intent: CreateIntent, roles: CompanyRole[]): UserCreate | string {
+  return createBlockedReason(intent) ?? buildCreateAccountPayload(intent.form, roles);
+}
+
 export interface ProvisionForm {
   roleId: number | null;
   scope: Scope;
