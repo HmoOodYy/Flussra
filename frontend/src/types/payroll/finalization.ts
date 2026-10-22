@@ -1,39 +1,5 @@
 
 
-// ---------------------------------------------------------------------------
-// CP-4 — Final Lines (Ledger)
-// ---------------------------------------------------------------------------
-
-export interface FinalLineSummary {
-  currency_code: string;
-  currency_minor_unit_digits: number;
-  final_line_id: number;
-  period_id: number;
-  branch_id: number;
-  driver_assignment_id: number;
-  driver_id: number;
-  employee_id: number;
-  driver_number: string | null;
-  driver_name: string;
-  /** Ledger display vocabulary only; `component_kind` is the classification. */
-  line_type: string;
-  line_scope: string;
-  component_kind: FinalLineComponentKind;
-  component_label: string | null;
-  payroll_calculation_snapshot_id: number;
-  payroll_calculation_snapshot_component_id: number;
-  payroll_period_definition_id: number | null;
-  pay_definition_id: number | null;
-  final_amount: string;
-  source_type: string;
-  approved_by_user_id: number | null;
-  approved_at_utc: string;
-  locked_at_utc: string | null;
-  notes: string | null;
-  /** Frozen provenance: snapshot id, revision, hash, component identity and source ids. */
-  source_snapshot: Record<string, unknown> | null;
-}
-
 /** One FinalLine projects one official component of the approved snapshot. */
 export type FinalLineComponentKind =
   | 'ORDINARY'

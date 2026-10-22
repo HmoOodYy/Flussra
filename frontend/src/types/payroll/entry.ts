@@ -1,5 +1,3 @@
-import type { FinalizedSectionAvailability } from './finalizedEvidence';
-
 // ---------------------------------------------------------------------------
 // CP-1 — Day Grid types
 // ---------------------------------------------------------------------------
@@ -60,7 +58,6 @@ export interface DayGridQuantityTotal {
 export interface DayGridSummary {
   total_drivers: number;
   worked: number;
-  pto: number;
   off: number;
   quantity_totals: DayGridQuantityTotal[];
   // CP-2F: null and financials_available=false for Draft (Prepared) periods —
@@ -90,13 +87,6 @@ export interface DayGridResponse {
   status_keys: DayGridStatusKey[];
   rows: DayGridRow[];
   summary: DayGridSummary;
-  // Stage B3 Unit 8C-3: set only for Locked/Archived periods, where row
-  // status_key/status_label/is_off come from immutable calculation-snapshot
-  // evidence rather than live PayrollStatusKeys. Reuses the same
-  // {state, reason_code} shape already established by the P6A Finalized
-  // Payroll Information Library contracts. Absent/null for Draft/Open/
-  // InReview/Returned/Approved.
-  status_evidence?: FinalizedSectionAvailability | null;
 }
 
 export interface DayGridSaveRow {

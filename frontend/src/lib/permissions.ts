@@ -87,20 +87,13 @@ export function canViewFinalizedLibrary(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAnyAuthorityPermission(user, ['ledger.view']);
 }
 
-/** Legacy raw FinalLines: mirror its operational backend read permissions. */
-export function canViewFinalLines(user: UserProfile): boolean {
-  return (
-    !isDriverUser(user) &&
-    _hasAnyAuthorityPermission(user, ['payroll.view', 'payroll.entry', 'payroll.finalize'])
-  );
-}
-
 /**
- * Ledger navigation remains available to either finalized-library readers or
- * operational payroll readers while the legacy FinalLines surface is retained.
+ * Ledger navigation is the Finalized Payroll Library's entry point: it follows the
+ * library's own ledger.view authority and nothing else (operational payroll permissions
+ * do not open finalized payroll).
  */
 export function canViewLedger(user: UserProfile): boolean {
-  return canViewFinalizedLibrary(user) || canViewFinalLines(user);
+  return canViewFinalizedLibrary(user);
 }
 
 /**

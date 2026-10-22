@@ -100,14 +100,12 @@ test('a failed save shows the server message whatever the shape of the error', (
   assert.equal(daySaveErrorMessage(new Error('network')), 'Save failed.');
 });
 
-test('both Day Grid surfaces take typed Status text through the shared cell and show canonical names', () => {
-  for (const path of ['src/pages/payroll/PayrollEntryDialog.tsx', 'src/pages/payroll/PeriodDetailPage.tsx']) {
-    const source = read(path);
-    assert.match(source, /<StatusCellInput/, path);
-    assert.match(source, /shownText=\{getStatusText\(row\)\}/, path);
-    assert.match(source, /daySaveErrorMessage/, path);
-    assert.doesNotMatch(source, /getStatusValue|<option key=\{sk\.key_code\}/, path);
-  }
+test('the payroll entry workbench takes typed Status text through the shared cell and shows canonical names', () => {
+  const source = read('src/pages/payroll/PayrollEntryDialog.tsx');
+  assert.match(source, /<StatusCellInput/);
+  assert.match(source, /shownText=\{getStatusText\(row\)\}/);
+  assert.match(source, /daySaveErrorMessage/);
+  assert.doesNotMatch(source, /getStatusValue|<option key=\{sk\.key_code\}/);
   const cell = read('src/pages/payroll/StatusCellInput.tsx');
   assert.match(cell, /<datalist/);
   assert.match(cell, /statusInputSuggestions\(entry\)/);

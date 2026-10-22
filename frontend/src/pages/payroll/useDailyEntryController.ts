@@ -8,7 +8,7 @@ import { buildSaveRowFromGrid, statusCellText, withTypedStatus } from './dayGrid
 
 const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
 
-// Shared grid state and actions; each surface owns its read trigger and save-error presentation.
+// Grid state and actions of the payroll entry workbench; the surface owns its read trigger and save-error presentation.
 
 export function formatDayLabel(d: string): string {
   const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][weekdayOfIso(d)];

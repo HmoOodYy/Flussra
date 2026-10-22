@@ -7,7 +7,6 @@ import {
   canViewCurrentPayroll,
   canViewDailyPayItems,
   canViewFinalizedLibrary,
-  canViewFinalLines,
   canViewLedger,
   canViewPayRates,
   canViewReview,
@@ -32,7 +31,6 @@ const DISCOVERY_PERMISSIONS = [
 const VISIBILITY_CHECKS = [
   ['Current Payroll', canViewCurrentPayroll],
   ['Finalized Library', canViewFinalizedLibrary],
-  ['legacy FinalLines', canViewFinalLines],
   ['Ledger', canViewLedger],
   ['Review', canViewReview],
   ['Pay Rates', canViewPayRates],
@@ -44,7 +42,6 @@ const VISIBILITY_CHECKS = [
 const DRIVER_EXCLUDED_CHECKS = [
   ['Current Payroll', canViewCurrentPayroll],
   ['Finalized Library', canViewFinalizedLibrary],
-  ['legacy FinalLines', canViewFinalLines],
   ['Ledger', canViewLedger],
   ['Review', canViewReview],
   ['Pay Rates', canViewPayRates],
@@ -145,4 +142,21 @@ test('page visibility: branch discovery does not widen concrete-branch actions',
   assert.equal(canEditPayRates(user, 20), false);
   assert.equal(canViewDailyPayItems(user), true);
   assert.equal(canManagePayDefinitionsForBranch(user, 20), false);
+});
+
+test('page visibility: the Ledger is the Finalized Payroll Library\'s ledger.view authority, never operational payroll permissions', () => {
+  const operational = makeUser({
+    branches: [makeBranch({ branch_id: null, scope: 'AllCompanyBranches' })],
+    authority: makeAuthority({ company_permissions: ['payroll.view', 'payroll.entry', 'payroll.finalize'] }),
+  });
+  assert.equal(canViewCurrentPayroll(operational), true);
+  assert.equal(canViewFinalizedLibrary(operational), false);
+  assert.equal(canViewLedger(operational), false);
+
+  const ledgerReader = makeUser({
+    branches: [makeBranch({ branch_id: null, scope: 'AllCompanyBranches' })],
+    authority: makeAuthority({ company_permissions: ['ledger.view'] }),
+  });
+  assert.equal(canViewLedger(ledgerReader), true);
+  assert.equal(canViewLedger(ledgerReader), canViewFinalizedLibrary(ledgerReader));
 });

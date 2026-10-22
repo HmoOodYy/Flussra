@@ -1,12 +1,12 @@
 /**
- * LedgerPage — CP-4
+ * LedgerPage
  *
- * Read-only view of finalized (Locked/Archived) payroll periods.
- * Accessible from the sidebar. Each period card shows final aggregates from
- * vw_PayrollPeriodList and opens either the P6A library or legacy FinalLines.
+ * Read-only list of finalized (Locked/Archived) payroll periods. The Finalized Payroll
+ * Library is the one finalized-payroll presentation: every card opens it, and every amount,
+ * count and explanation shown there is the backend's frozen evidence.
  *
- * Security: DRIVER/Self access is blocked by the backend. P6A and FinalLines
- * retain their distinct permission contracts; frontend gating is UI-only.
+ * Security: ledger.view is the one authority (see canViewLedger); DRIVER/Self access is
+ * blocked by the backend. Frontend gating is UI-only.
  */
 import { useEffect, useReducer, useState, useCallback, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -14,18 +14,14 @@ import apiClient from '../../lib/apiClient';
 import { getFinalizedPeriods } from '../../lib/payrollApi';
 import type { Branch } from '../../types/core';
 import type { FinalizedPeriodListItem } from '../../types/payroll/finalized';
-import type { PeriodSummary } from '../../types/payroll/periods';
 import { PeriodStatusBadge } from '../../components/StatusBadge';
-import { FinalSummaryDialog } from './FinalSummaryDialog';
 import {
   FinalizedPayrollLibraryDialog,
   type FinalizedPayrollLibraryPeriodContext,
 } from './FinalizedPayrollLibraryDialog';
-import { discoverLedgerPeriods, type LedgerDiscoveryDeps, type LedgerDiscoveryPeriod } from './ledgerDiscovery';
+import { ledgerLoadErrorMessage } from './ledgerLoadError';
 import { resolvePreselectedPeriodId } from './finalizedNavigation';
 import styles from './LedgerPage.module.css';
-import { formatMoney as formatCurrencyMoney } from '../../lib/money';
-import { useAuth } from '../../store/authStore';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -40,17 +36,6 @@ function libraryContextForPeriod(finalized: FinalizedPeriodListItem): FinalizedP
     status: finalized.period_status,
   };
 }
-
-// Module scope keeps this reference stable across renders (used as a useCallback dep).
-const ledgerDiscoveryDeps: LedgerDiscoveryDeps = {
-  fetchFinalized: getFinalizedPeriods,
-  fetchOperational: async (status, branchId) => {
-    const params: Record<string, string> = { status };
-    if (branchId != null) params.branch_id = String(branchId);
-    const response = await apiClient.get<PeriodSummary[]>('/payroll/periods', { params });
-    return response.data;
-  },
-};
 
 // ---------------------------------------------------------------------------
 // Reducers
@@ -71,10 +56,10 @@ function branchesReducer(s: BranchesState, a: BranchesAction): BranchesState {
   }
 }
 
-type PeriodsState = { periods: LedgerDiscoveryPeriod[]; loading: boolean; error: string };
+type PeriodsState = { periods: FinalizedPeriodListItem[]; loading: boolean; error: string };
 type PeriodsAction =
   | { type: 'FETCH_START' }
-  | { type: 'FETCH_OK';    periods: LedgerDiscoveryPeriod[] }
+  | { type: 'FETCH_OK';    periods: FinalizedPeriodListItem[] }
   | { type: 'FETCH_ERROR'; error: string };
 
 function periodsReducer(s: PeriodsState, a: PeriodsAction): PeriodsState {
@@ -91,79 +76,45 @@ function periodsReducer(s: PeriodsState, a: PeriodsAction): PeriodsState {
 // ---------------------------------------------------------------------------
 
 interface LedgerCardProps {
-  period: LedgerDiscoveryPeriod;
-  onOpenLibrary: (() => void) | null;
-  onViewSummary: (() => void) | null;
+  period: FinalizedPeriodListItem;
+  onOpenLibrary: () => void;
 }
 
-function LedgerCard({ period: p, onOpenLibrary, onViewSummary }: LedgerCardProps) {
-  const { user } = useAuth();
-  // Finalized is the display authority when a period has both records — this
-  // matches the presentation a ledger.view user saw before merged discovery.
-  const status = p.finalized ? p.finalized.period_status : p.operational ? p.operational.status : null;
-  const primary = p.finalized ?? p.operational;
-  const displayCurrencyCode = p.finalized ? p.finalized.currency_code : user?.currency_code;
-  const displayMinorUnitDigits = p.finalized ? p.finalized.currency_minor_unit_digits : user?.currency_minor_unit_digits;
-  if (status == null || primary == null) return null;
-
+function LedgerCard({ period: p, onOpenLibrary }: LedgerCardProps) {
   return (
     <div className={styles.card}>
       {/* Left: period info */}
       <div className={styles.cardInfo}>
         <div className={styles.cardNameRow}>
-          <span className={styles.cardName}>{primary.period_name || primary.period_code}</span>
-          <PeriodStatusBadge status={status} />
+          <span className={styles.cardName}>{p.period_name || p.period_code}</span>
+          <PeriodStatusBadge status={p.period_status} />
         </div>
         <div className={styles.cardMeta}>
-          <span>{primary.branch_name}</span>
+          <span>{p.branch_name}</span>
           <span className={styles.metaSep}>·</span>
-          <span>{primary.period_type}</span>
+          <span>{p.period_type}</span>
           <span className={styles.metaSep}>·</span>
-          <span>{primary.start_date} – {primary.end_date}</span>
-          {primary.pay_date && (
+          <span>{p.start_date} – {p.end_date}</span>
+          {p.pay_date && (
             <>
               <span className={styles.metaSep}>·</span>
-              <span>Pay: {primary.pay_date}</span>
+              <span>Pay: {p.pay_date}</span>
             </>
           )}
         </div>
-        {p.finalized ? (
-          <div className={styles.cardStats}>
-            <span className={styles.statChip}>
-              <span className={styles.statLabel}>Finalized</span>
-              <span className={styles.statValue}>{p.finalized.finalized_at_utc ? new Date(p.finalized.finalized_at_utc).toLocaleDateString() : 'Not provided'}</span>
-            </span>
-          </div>
-        ) : p.operational ? (
-          <div className={styles.cardStats}>
-            <span className={styles.statChip}>
-              <span className={styles.statLabel}>Final Gross</span>
-              <span className={styles.statValue}>{formatCurrencyMoney(p.operational.final_gross, displayCurrencyCode, displayMinorUnitDigits)}</span>
-            </span>
-            <span className={styles.statChip}>
-              <span className={styles.statLabel}>Drivers</span>
-              <span className={styles.statValue}>{p.operational.final_driver_count}</span>
-            </span>
-            <span className={styles.statChip}>
-              <span className={styles.statLabel}>Lines</span>
-              <span className={styles.statValue}>{p.operational.final_lines}</span>
-            </span>
-          </div>
-        ) : null}
+        <div className={styles.cardStats}>
+          <span className={styles.statChip}>
+            <span className={styles.statLabel}>Finalized</span>
+            <span className={styles.statValue}>{p.finalized_at_utc ? new Date(p.finalized_at_utc).toLocaleDateString() : 'Not provided'}</span>
+          </span>
+        </div>
       </div>
 
       {/* Right: action */}
       <div className={styles.cardActions}>
-        {onOpenLibrary && (
-          <button className={styles.primaryBtn} onClick={onOpenLibrary} type="button">
-            Open Finalized Payroll
-          </button>
-        )}
-        {onViewSummary && (
-          <button className={styles.secondaryBtn} onClick={onViewSummary} type="button">
-            Final Lines
-          </button>
-        )}
+        <button className={styles.primaryBtn} onClick={onOpenLibrary} type="button">
+          Open Finalized Payroll
+        </button>
       </div>
     </div>
   );
@@ -181,7 +132,6 @@ export function LedgerPage() {
   const [periodsSt,  dispatchPeriods]  = useReducer(periodsReducer,  { periods: [], loading: true, error: '' });
   const [filterStatus,   setFilterStatus]   = useState<LedgerStatus>('Locked');
   const [filterBranchId, setFilterBranchId] = useState<string>('');
-  const [summaryPeriod,  setSummaryPeriod]  = useState<PeriodSummary | null>(null);
   const [libraryPeriod,  setLibraryPeriod]  = useState<FinalizedPayrollLibraryPeriodContext | null>(null);
   const periodRequestId = useRef(0);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -201,13 +151,13 @@ export function LedgerPage() {
     dispatchPeriods({ type: 'FETCH_START' });
     try {
       const branchId = filterBranchId ? Number(filterBranchId) : undefined;
-      const periods = await discoverLedgerPeriods(ledgerDiscoveryDeps, filterStatus, branchId);
+      const periods = await getFinalizedPeriods(filterStatus, branchId);
       if (requestId === periodRequestId.current) {
         dispatchPeriods({ type: 'FETCH_OK', periods });
       }
-    } catch {
+    } catch (error) {
       if (requestId === periodRequestId.current) {
-        dispatchPeriods({ type: 'FETCH_ERROR', error: 'Failed to load ledger periods.' });
+        dispatchPeriods({ type: 'FETCH_ERROR', error: ledgerLoadErrorMessage(error) });
       }
     }
   }, [filterStatus, filterBranchId]);
@@ -231,12 +181,10 @@ export function LedgerPage() {
     if (preselectedId == null) return;
 
     preselectConsumed.current = true;
-    const match = periodsSt.periods.find((p) => p.identity === preselectedId);
-    if (match?.finalized) {
+    const match = periodsSt.periods.find((p) => p.period_id === preselectedId);
+    if (match) {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time deep-link consumption, guarded by preselectConsumed above
-      setLibraryPeriod(libraryContextForPeriod(match.finalized));
-    } else if (match?.operational) {
-      setSummaryPeriod(match.operational);
+      setLibraryPeriod(libraryContextForPeriod(match));
     }
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -264,7 +212,6 @@ export function LedgerPage() {
             className={styles.filterSelect}
             value={filterStatus}
             onChange={(e) => {
-              setSummaryPeriod(null);
               setLibraryPeriod(null);
               setFilterStatus(e.target.value as LedgerStatus);
             }}
@@ -282,7 +229,6 @@ export function LedgerPage() {
               className={styles.filterSelect}
               value={filterBranchId}
               onChange={(e) => {
-                setSummaryPeriod(null);
                 setLibraryPeriod(null);
                 setFilterBranchId(e.target.value);
               }}
@@ -316,30 +262,14 @@ export function LedgerPage() {
         </div>
       ) : (
         <div className={styles.cardList}>
-          {periodsSt.periods.map((p) => {
-            const { finalized, operational } = p;
-            return (
-              <LedgerCard
-                key={p.identity}
-                period={p}
-                onOpenLibrary={finalized
-                  ? () => setLibraryPeriod(libraryContextForPeriod(finalized))
-                  : null}
-                onViewSummary={operational
-                  ? () => setSummaryPeriod(operational)
-                  : null}
-              />
-            );
-          })}
+          {periodsSt.periods.map((p) => (
+            <LedgerCard
+              key={p.period_id}
+              period={p}
+              onOpenLibrary={() => setLibraryPeriod(libraryContextForPeriod(p))}
+            />
+          ))}
         </div>
-      )}
-
-      {/* ── Final Summary dialog ───────────────────────────────────── */}
-      {summaryPeriod != null && (
-        <FinalSummaryDialog
-          period={summaryPeriod}
-          onClose={() => setSummaryPeriod(null)}
-        />
       )}
 
       {libraryPeriod != null && (

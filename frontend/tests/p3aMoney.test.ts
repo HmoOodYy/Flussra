@@ -61,12 +61,10 @@ test('company currency settings use the server catalog and update auth currency 
   assert.doesNotMatch(saveBody, /auth\/me/);
 });
 
-test('Ledger finalized gross denomination comes from frozen finalized currency', () => {
+test('the Ledger shows no amount of its own: finalized money is the Finalized Payroll Library\'s frozen evidence', () => {
   const source = readFileSync(resolve(import.meta.dirname, '../src/pages/payroll/LedgerPage.tsx'), 'utf8');
-  assert.match(source, /const displayCurrencyCode = p\.finalized \? p\.finalized\.currency_code : user\?\.currency_code/);
-  assert.match(source, /const displayMinorUnitDigits = p\.finalized \? p\.finalized\.currency_minor_unit_digits : user\?\.currency_minor_unit_digits/);
-  assert.match(source, /formatCurrencyMoney\(p\.operational\.final_gross, displayCurrencyCode, displayMinorUnitDigits\)/);
-  assert.doesNotMatch(source, /formatCurrencyMoney\(p\.operational\.final_gross, user\?\.currency_code, user\?\.currency_minor_unit_digits\)/);
+  assert.doesNotMatch(source, /formatMoney|formatCurrencyMoney|currency_code|final_gross|\.reduce\(/);
+  assert.match(source, /<FinalizedPayrollLibraryDialog/);
 });
 
 test('financial screens have no known USD-specific formatting assumptions', () => {
@@ -89,7 +87,6 @@ test('financial screens have no known USD-specific formatting assumptions', () =
     '../src/pages/payroll/CalculationPreviewDialog.tsx',
     '../src/pages/payroll/CurrentPayrollReportsDialog.tsx',
     '../src/pages/payroll/FinalizationPreviewDialog.tsx',
-    '../src/pages/payroll/FinalSummaryDialog.tsx',
     '../src/pages/payroll/FinalizedPayrollLibraryDialog.tsx',
     '../src/pages/payroll/finalizedLibrary/OverviewBody.tsx',
     '../src/pages/payroll/finalizedLibrary/ReportBody.tsx',
@@ -101,7 +98,6 @@ test('financial screens have no known USD-specific formatting assumptions', () =
     '../src/pages/payroll/LedgerPage.tsx',
     '../src/pages/payroll/PeriodsListPage.tsx',
     '../src/pages/payroll/grossDisplay.ts',
-    '../src/pages/payroll/PeriodDetailPage.tsx',
     '../src/pages/payroll/useDailyEntryController.ts',
   ];
   const payRatesFeatureFiles = [

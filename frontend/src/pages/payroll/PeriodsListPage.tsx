@@ -299,9 +299,6 @@ function PeriodCard({
               &#9888; {p.draft_lines_needing_attention} need attention
             </span>
           )}
-          {p.final_lines > 0 && (
-            <span className={styles.countBadge}>{p.final_lines} final lines</span>
-          )}
         </div>
         {nextAction && <div className={nextAction.style}>{nextAction.text}</div>}
         {isReturned && (
