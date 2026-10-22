@@ -64,9 +64,20 @@ export function buildSaveRowFromGrid(grid: DayGridResponse | null, driverAssignm
     values: Object.fromEntries(
       Object.entries(row?.values ?? {}).map(([k, v]) => [k, v.quantity ?? '']),
     ),
+    // The Status the day holds travels as its identity, so an unrelated edit of the row (a
+    // note, a quantity) keeps exactly that Status and never re-reads it as typed text.
+    status_key_id: row?.status_key_id ?? null,
     status_key: row?.status_key ?? null,
     notes: row?.notes ?? null,
   };
+}
+
+/**
+ * The row after Status text was typed or cleared. Typing chooses a Status, which is not the
+ * held one any more, so the held identity is dropped and the text is what the server resolves.
+ */
+export function withTypedStatus(row: DayGridSaveRow, statusText: string | null): DayGridSaveRow {
+  return { ...row, status_key_id: null, status_key: statusText };
 }
 
 /**
