@@ -82,7 +82,7 @@ from app.payroll.schemas import (
     DraftLineUpdate,
 )
 from app.payroll.status_work_conflict import FinalDayState, assert_no_off_status_work_conflicts
-from app.settings.status_keys import resolve_status_input
+from app.settings.status_keys import get_status_by_id, resolve_status_input
 
 # ===========================================================================
 # CP-1 — Day Grid
@@ -409,6 +409,7 @@ async def get_day_grid(
 
         values: dict[str, DayGridLineValue] = {}
         status_key_code: str | None = None
+        status_key_id_held: int | None = None
         notes_text: str | None = None
         sk_label: str | None = None
         is_off: bool = False
@@ -434,12 +435,14 @@ async def get_day_grid(
                     if sk_id is not None:
                         live_sk = status_key_id_map.get(sk_id)
                         if live_sk is not None:
+                            status_key_id_held = sk_id
                             status_key_code = live_sk.key_code
                             sk_label = live_sk.label
                             is_off = bool(live_sk.is_off_reason)
                         else:
                             dk = deactivated_key_map.get(sk_id)
                             if dk:
+                                status_key_id_held = sk_id
                                 status_key_code = dk["statuscode"]
                                 sk_label = dk["keyname"]
                                 is_off = bool(dk["isoffreason"])
@@ -541,6 +544,7 @@ async def get_day_grid(
             driver_id=drv["permanentdriverid"],
             driver_name=drv["drivername"],
             driver_number=drv.get("drivernumber"),
+            status_key_id=status_key_id_held,
             status_key=status_key_code,
             status_label=sk_label,
             is_off=is_off,
@@ -703,29 +707,39 @@ async def save_day_grid(
                         status_code=422, detail=f"{definition.name}: {problem}")
             parsed_values[definition.payroll_period_definition_id] = quantity
 
-        # The typed Status text (name, alias or code) resolves Company-wide to exactly one
-        # Status, or the whole batch is rejected before any write (422). Re-saving the
-        # selection a day already holds is allowed even when its Status was deactivated since,
-        # but only when the text still names that same Status.
+        # The Status of the row is either a canonical identity (`status_key_id`: the Status the
+        # row already holds, used as is) or newly typed text (`status_key`: a name, an alias or
+        # a code, resolved Company-wide to exactly one Status). Keeping a held Status and
+        # choosing one by text are different operations: an unrelated edit of the row, such as
+        # its note, must never re-read the held Status as free text, where another Status's
+        # alias could take the day over. Any resolution failure rejects the whole batch before
+        # a write (422). Re-saving the held Status is allowed even when it was deactivated since.
         key_row = None
-        if save_row.status_key and save_row.status_key.strip():
-            try:
-                key_row = await resolve_status_input(company_id, save_row.status_key, db)
-            except HTTPException:
-                existing_key_id = (await db.execute(
-                    text("""
-                        SELECT statuskeyid FROM payroll.payrollperioddriverdayentrystate
-                        WHERE  payrollperiodid = :pid AND workdate = :dt
-                          AND  driverassignmentid = :did AND isvoided = FALSE
-                    """),
-                    {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
-                )).scalar_one_or_none()
-                if existing_key_id is None:
-                    raise
-                key_row = await resolve_status_input(
-                    company_id, save_row.status_key, db,
-                    allow_deactivated=True, key_id=existing_key_id,
-                )
+        has_status_id = save_row.status_key_id is not None
+        has_status_text = bool(save_row.status_key and save_row.status_key.strip())
+        if has_status_id or has_status_text:
+            held_key_id = (await db.execute(
+                text("""
+                    SELECT statuskeyid FROM payroll.payrollperioddriverdayentrystate
+                    WHERE  payrollperiodid = :pid AND workdate = :dt
+                      AND  driverassignmentid = :did AND isvoided = FALSE
+                """),
+                {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
+            )).scalar_one_or_none()
+            if has_status_id:
+                key_row = await get_status_by_id(
+                    company_id, save_row.status_key_id, db, held_key_id=held_key_id)
+            else:
+                try:
+                    key_row = await resolve_status_input(
+                        company_id, save_row.status_key, db, held_key_id=held_key_id)
+                except HTTPException:
+                    if held_key_id is None:
+                        raise
+                    key_row = await resolve_status_input(
+                        company_id, save_row.status_key, db,
+                        allow_deactivated=True, key_id=held_key_id,
+                    )
         # The legacy DailyStatus duplicate row carries the canonical technical code.
         validated_status_key = key_row["statuscode"] if key_row is not None else None
 

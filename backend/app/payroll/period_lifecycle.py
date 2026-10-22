@@ -59,6 +59,28 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
 }
 
 
+# What makes a period non-empty for submit and resubmit: a non-voided source line, an Active
+# Bonus event, or a canonical Status selection (a non-void day entry that holds a Status). The
+# canonical selection is the Status authority; the legacy DailyStatus duplicate row is only
+# one of the source lines counted here and is never required for a Status to count. A day
+# entry that only carries a note holds no Status and is not content.
+_PERIOD_CONTENT_SQL = """
+    SELECT (
+        SELECT COUNT(*) FROM payroll.payrolldraftlines
+        WHERE  payrollperiodid = :pid AND companyid = :cid
+          AND  status != 'Void'
+    ) + (
+        SELECT COUNT(*) FROM payroll.payrollbonusevents
+        WHERE  payrollperiodid = :pid AND companyid = :cid
+          AND  status = 'Active'
+    ) + (
+        SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate
+        WHERE  payrollperiodid = :pid AND companyid = :cid
+          AND  isvoided = FALSE AND statuskeyid IS NOT NULL
+    ) AS total_lines
+"""
+
+
 # ---------------------------------------------------------------------------
 # Status change
 # ---------------------------------------------------------------------------
@@ -204,20 +226,10 @@ async def change_period_status(
         # common (non-race) path.
         await _check_inreview_slot_available(company_id, existing.branch_id, period_id, db)
 
-        # Guard 1: empty period — refuse to submit a period with no payroll data.
-        # Count DraftLines + Active BonusEvents (bonus data lives in PayrollBonusEvents).
+        # Guard 1: empty period — refuse to submit a period with no payroll data
+        # (source lines, Active Bonus events or canonical Status selections).
         empty_result = await db.execute(
-            text("""
-                SELECT (
-                    SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE  payrollperiodid = :pid AND companyid = :cid
-                      AND  status != 'Void'
-                ) + (
-                    SELECT COUNT(*) FROM payroll.payrollbonusevents
-                    WHERE  payrollperiodid = :pid AND companyid = :cid
-                      AND  status = 'Active'
-                ) AS total_lines
-            """),
+            text(_PERIOD_CONTENT_SQL),
             {"pid": period_id, "cid": company_id},
         )
         if int(empty_result.scalar_one()) == 0:
@@ -651,20 +663,9 @@ async def resubmit_period(
 
     # ── Step 4: run submission guards (same as Open→InReview) ────────────── #
 
-    # Guard 1: empty period.
-    # Count DraftLines + Active BonusEvents.
+    # Guard 1: empty period (source lines, Active Bonus events or canonical Status selections).
     empty_result = await db.execute(
-        text("""
-            SELECT (
-                SELECT COUNT(*) FROM payroll.payrolldraftlines
-                WHERE  payrollperiodid = :pid AND companyid = :cid
-                  AND  status != 'Void'
-            ) + (
-                SELECT COUNT(*) FROM payroll.payrollbonusevents
-                WHERE  payrollperiodid = :pid AND companyid = :cid
-                  AND  status = 'Active'
-            ) AS total_lines
-        """),
+        text(_PERIOD_CONTENT_SQL),
         {"pid": period_id, "cid": company_id},
     )
     if int(empty_result.scalar_one()) == 0:

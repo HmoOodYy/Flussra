@@ -558,6 +558,22 @@ CREATE TRIGGER trg_PayrollStatusKeyAliases_Alias
 -- full day off, its Category and its rate column binding. The lifecycle is to deactivate the
 -- Status and create a new one. The name, display order, active flag and aliases stay editable.
 -- The identity of a Status (Company and generated code) never changes.
+--
+-- The check reads committed rows, so it must also serialize with a first reference that is
+-- still in flight: a day-entry insert holds a SHARED advisory lock on its Status until it
+-- commits (fn_guard_status_off_work), and a semantic edit takes the same lock EXCLUSIVELY
+-- before it looks for references. The edit therefore either waits for the in-flight first use
+-- and then sees it (and is refused), or commits first and the first use is checked against the
+-- new meaning. The foreign key's key-share row lock alone cannot do this, because a change of a
+-- non-key column does not conflict with it.
+
+CREATE FUNCTION payroll.fn_StatusKeyLockKey(p_StatusKeyID INTEGER)
+RETURNS BIGINT
+LANGUAGE sql
+IMMUTABLE
+AS $function$
+    SELECT hashtextextended('flussra.status-key.' || p_StatusKeyID::TEXT, 0)
+$function$;
 
 CREATE FUNCTION payroll.fn_guard_status_key_semantics()
 RETURNS trigger
@@ -575,6 +591,7 @@ BEGIN
        OR NEW.IsOffReason IS DISTINCT FROM OLD.IsOffReason
        OR NEW.AllowanceCategory IS DISTINCT FROM OLD.AllowanceCategory
        OR NEW.StatusRateColumnID IS DISTINCT FROM OLD.StatusRateColumnID THEN
+        PERFORM pg_advisory_xact_lock(payroll.fn_StatusKeyLockKey(OLD.StatusKeyID));
         IF EXISTS (
             SELECT 1 FROM payroll.PayrollPeriodDriverDayEntryState e
              WHERE e.StatusKeyID = OLD.StatusKeyID
@@ -743,6 +760,14 @@ $company_defaults$;
 -- writer that bypasses the application: each write takes an advisory lock on the
 -- (period, assignment, date) slot and then reads the other side, so two transactions that would
 -- together create the conflict serialize and the second sees the first one's committed row.
+--
+-- The rule also depends on the Status's own meaning, which a semantic edit can change. A
+-- day-entry write that references a Status (voided or not) therefore first takes the Status's
+-- SHARED advisory lock, which a semantic edit holds exclusively while it checks for references
+-- (fn_guard_status_key_semantics). An edit that races a first use serializes with it: either the
+-- edit is refused as in use, or the entry is checked against the edited meaning. The Status lock
+-- is always taken before the slot lock, and an edit takes only the Status lock, so the two
+-- cannot wait on each other in a cycle.
 
 CREATE FUNCTION payroll.fn_guard_status_off_work()
 RETURNS trigger
@@ -758,6 +783,9 @@ BEGIN
             RETURN NULL;
         END IF;
     ELSE
+        IF NEW.StatusKeyID IS NOT NULL THEN
+            PERFORM pg_advisory_xact_lock_shared(payroll.fn_StatusKeyLockKey(NEW.StatusKeyID));
+        END IF;
         IF NEW.StatusKeyID IS NULL OR NEW.IsVoided THEN
             RETURN NULL;
         END IF;

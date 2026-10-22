@@ -329,9 +329,13 @@ async def _wait_blocked(tenant, holder_pid: int, finished: threading.Event) -> N
     raise AssertionError("the second writer never waited for the first")
 
 
-async def _run_race(tenant, first, second) -> tuple[str, str]:
+async def _run_race(
+    tenant, first, second, *,
+    refusal: type[psycopg2.Error] = psycopg2.errors.CheckViolation, marker: str = CONFLICT,
+) -> tuple[str, str]:
     """Run ``first`` on connection A (uncommitted), start ``second`` on connection B, which must
-    WAIT for A, then commit A. Returns (A's outcome, B's outcome)."""
+    WAIT for A, then commit A. Returns (A's outcome, B's outcome). B's refusal is an error of
+    class ``refusal`` whose message carries ``marker``."""
     a = _connect(tenant)
     b = _connect(tenant)
     outcome: dict[str, str] = {}
@@ -348,9 +352,9 @@ async def _run_race(tenant, first, second) -> tuple[str, str]:
                     second(cur)
                 b.commit()
                 outcome["second"] = "committed"
-            except psycopg2.errors.CheckViolation as error:
+            except refusal as error:
                 b.rollback()
-                outcome["second"] = f"refused:{CONFLICT in str(error)}"
+                outcome["second"] = f"refused:{marker in str(error)}"
             finally:
                 finished.set()
 
@@ -397,6 +401,128 @@ async def test_two_writers_that_bypass_the_period_lock_cannot_create_the_conflic
     assert (first, second) == ("committed", "refused:True")
     assert _quantity_of(tenant, period, driver, ppd, 1) == 5
     assert _status_of(tenant, period, driver, 1) is None
+
+
+def _insert_selection(cur, tenant, period, driver, status_key_id, offset=0):
+    cur.execute("""
+        INSERT INTO payroll.payrollperioddriverdayentrystate
+            (companyid, branchid, payrollperiodid, workdate, driverassignmentid, statuskeyid,
+             isvoided, createdbyuserid)
+        VALUES (%s, %s, %s, %s, %s, %s, FALSE, %s)
+    """, (tenant.company_id, tenant.branch_a, period["payroll_period_id"], _day(period, offset),
+          driver, status_key_id, tenant.owner))
+
+
+def _status_state(tenant, status_key_id):
+    ((off, hours, category),) = query(tenant, """
+        SELECT isoffreason, hoursvalue, allowancecategory
+        FROM payroll.payrollstatuskeys WHERE statuskeyid = %s
+    """, (status_key_id,))
+    return off, hours, category
+
+
+@pytest.mark.parametrize("edit", [
+    "isoffreason = TRUE", "hoursvalue = 5", "allowancecategory = 'Sick'",
+], ids=["off-day semantic", "hours", "category"])
+async def test_a_semantic_edit_that_races_the_first_use_of_a_status_is_refused_not_lost(
+    p3c_client, p3c_engine, tenant, edit,
+):
+    """The reviewer's race. Writer A selects a not-yet-used non-off Status for a day and gives
+    the day ordinary work, uncommitted. Writer B changes the Status's meaning and must wait for
+    A: A's selection is a reference B could not see, and committing the edit past it would leave
+    a full-day-off Status next to ordinary work. After A commits, B is refused as in use and the
+    committed state is the one A wrote."""
+    period, ppd = await _scene(p3c_client, p3c_engine, tenant)
+    flip = seed_status_key(tenant, "FLIP", off=False)
+    before = _status_state(tenant, flip)
+    driver = tenant.driver_a
+    assert (await _add_line(p3c_client, tenant, period, ppd, "0")).status_code == 201
+
+    def first_use(cur):
+        _insert_selection(cur, tenant, period, driver, flip)
+        _set_quantity(cur, period, driver, ppd, 5)
+
+    def semantic_edit(cur):
+        cur.execute(f"UPDATE payroll.payrollstatuskeys SET {edit} WHERE statuskeyid = %s", (flip,))
+
+    first, second = await _run_race(
+        tenant, first_use, semantic_edit,
+        refusal=psycopg2.errors.RestrictViolation, marker="STATUS_KEY_IN_USE")
+
+    assert (first, second) == ("committed", "refused:True")
+    assert _status_state(tenant, flip) == before
+    assert _quantity_of(tenant, period, driver, ppd) == 5
+    assert query(tenant, """
+        SELECT count(*) FROM payroll.payrollperioddriverdayentrystate
+        WHERE payrollperiodid = %s AND statuskeyid = %s
+    """, (period["payroll_period_id"], flip)) == [(1,)]
+
+
+async def test_a_first_use_that_races_a_semantic_edit_is_checked_against_the_edited_status(
+    p3c_client, p3c_engine, tenant,
+):
+    """The other order. Writer A turns a not-yet-used Status into a full-day-off Status,
+    uncommitted; writer B selects it for a day that has ordinary work and must wait for A. After
+    A commits, B sees the Status as it now is and is refused, so the conflict never exists."""
+    period, ppd = await _scene(p3c_client, p3c_engine, tenant)
+    flip = seed_status_key(tenant, "FLIP", off=False)
+    driver = tenant.driver_a
+    assert (await _add_line(p3c_client, tenant, period, ppd, "5")).status_code == 201
+
+    first, second = await _run_race(
+        tenant,
+        lambda cur: cur.execute(
+            "UPDATE payroll.payrollstatuskeys SET isoffreason = TRUE WHERE statuskeyid = %s", (flip,)),
+        lambda cur: _insert_selection(cur, tenant, period, driver, flip))
+
+    assert (first, second) == ("committed", "refused:True")
+    assert _status_state(tenant, flip)[0] is True
+    assert _quantity_of(tenant, period, driver, ppd) == 5
+    assert query(tenant, """
+        SELECT count(*) FROM payroll.payrollperioddriverdayentrystate
+        WHERE payrollperiodid = %s AND statuskeyid = %s
+    """, (period["payroll_period_id"], flip)) == [(0,)]
+
+
+async def test_a_first_use_after_a_semantic_edit_is_allowed_when_the_day_has_no_work(
+    p3c_client, p3c_engine, tenant,
+):
+    """The serialization is not a prohibition: with no ordinary work on the day, both writers
+    commit and the day holds the full-day-off Status."""
+    period, _ = await _scene(p3c_client, p3c_engine, tenant)
+    flip = seed_status_key(tenant, "FLIP", off=False)
+
+    first, second = await _run_race(
+        tenant,
+        lambda cur: cur.execute(
+            "UPDATE payroll.payrollstatuskeys SET isoffreason = TRUE WHERE statuskeyid = %s", (flip,)),
+        lambda cur: _insert_selection(cur, tenant, period, tenant.driver_a, flip))
+
+    assert (first, second) == ("committed", "committed")
+    assert _status_state(tenant, flip)[0] is True
+    assert _status_of(tenant, period, tenant.driver_a) == "FLIP"
+
+
+async def test_a_semantic_edit_of_an_already_used_status_is_still_refused(
+    p3c_client, p3c_engine, tenant,
+):
+    """The in-use lock itself is unchanged: once a selection exists the edit is refused at once."""
+    period, _ = await _scene(p3c_client, p3c_engine, tenant)
+    flip = seed_status_key(tenant, "FLIP", off=False)
+    conn = _connect(tenant)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            _insert_selection(cur, tenant, period, tenant.driver_a, flip)
+            with pytest.raises(psycopg2.errors.RestrictViolation, match="STATUS_KEY_IN_USE"):
+                cur.execute(
+                    "UPDATE payroll.payrollstatuskeys SET isoffreason = TRUE WHERE statuskeyid = %s",
+                    (flip,))
+            cur.execute("UPDATE payroll.payrollstatuskeys SET keyname = 'FLIP renamed', "
+                        "normalizedkeyname = 'flip renamed' WHERE statuskeyid = %s", (flip,))
+    finally:
+        conn.close()
+    assert _status_state(tenant, flip)[0] is False
 
 
 async def test_concurrent_application_writers_never_leave_an_off_day_with_work(

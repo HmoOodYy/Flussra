@@ -565,6 +565,33 @@ _RESOLVE_COLS = """
 """
 
 
+async def get_status_by_id(
+    company_id: int,
+    key_id: int,
+    db: AsyncConnection,
+    *,
+    held_key_id: int | None = None,
+) -> dict:
+    """The Status with this identity, for a caller that names a Status rather than typing it.
+
+    The identity is used as is: no name, alias or code is read, so no other Status's alias can
+    redirect it. The Status must belong to the Company (422 ``STATUS_NOT_FOUND``) and be active,
+    unless it is the Status the day already holds (``held_key_id``), which may be saved again
+    after it was deactivated. Returns the Status row (id, code, canonical name, flags, hours,
+    rate column).
+    """
+    row = (await db.execute(
+        text(f"SELECT {_RESOLVE_COLS} FROM payroll.payrollstatuskeys k "
+             "WHERE k.companyid = :cid AND k.statuskeyid = :kid"),
+        {"cid": company_id, "kid": key_id},
+    )).mappings().first()
+    if row is None or (not row["isactive"] and key_id != held_key_id):
+        raise _coded(
+            422, "STATUS_NOT_FOUND",
+            "The selected Status is not a valid active Status in this Company.")
+    return dict(row)
+
+
 async def resolve_status_input(
     company_id: int,
     text_value: str | None,
@@ -572,6 +599,7 @@ async def resolve_status_input(
     allow_deactivated: bool = False,
     *,
     key_id: int | None = None,
+    held_key_id: int | None = None,
 ) -> dict | None:
     """Resolve the text typed for a Status to exactly one Status of the Company.
 
@@ -582,11 +610,24 @@ async def resolve_status_input(
     when no active Status matches the same lookup; ``key_id`` restricts the candidates to one
     Status (the caller re-saving a selection unchanged). Anything else is a 422 with a stable
     code. Returns the Status row (id, code, canonical name, flags, hours, rate column).
+
+    ``held_key_id`` is the Status the day already holds. The technical code is the opaque
+    identity a grid row carries for its Status, so text that is exactly the held Status's code
+    names that Status, ahead of the name and alias lookups; a different Status's alias that
+    happens to equal the code cannot take the day over through an unrelated save.
     """
     if text_value is None or not text_value.strip():
         return None
     normalized = normalize_status_name(text_value)
     code = text_value.strip().upper()
+    if held_key_id is not None:
+        held = (await db.execute(
+            text(f"SELECT {_RESOLVE_COLS} FROM payroll.payrollstatuskeys k "
+                 "WHERE k.companyid = :cid AND k.statuskeyid = :kid"),
+            {"cid": company_id, "kid": held_key_id},
+        )).mappings().first()
+        if held is not None and held["statuscode"].strip().upper() == code:
+            return dict(held)
     restrict = "" if key_id is None else " AND k.statuskeyid = :only_kid"
 
     lookups = (
