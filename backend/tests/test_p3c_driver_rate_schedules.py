@@ -147,27 +147,24 @@ async def test_replacing_the_value_set_overwrites_and_clears(p3c_client, tenant)
     assert cleared.json()["values"][0]["amount"] is None
 
 
-async def test_only_scalar_pay_definition_owned_definitions_are_authorable(
+async def test_a_status_rate_column_definition_is_authorable_like_a_pay_definition(
     p3c_client, tenant, cur,
 ):
-    cur.execute("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'STATUS_PAY'")
-    rate_type_id = cur.fetchone()[0]
     cur.execute("""
-        INSERT INTO payroll.statusratecolumns (companyid, branchid, ratetypeid, columnname)
-        VALUES (%s, %s, %s, 'Dormant') RETURNING statusratecolumnid
-    """, (tenant.company_id, tenant.branch_a, rate_type_id))
-    column_id = cur.fetchone()[0]
-    cur.execute("""
-        INSERT INTO payroll.ratedefinitions (companyid, statusratecolumnid, ownerbranchid, shape)
-        VALUES (%s, %s, %s, 'Scalar') RETURNING ratedefinitionid
-    """, (tenant.company_id, column_id, tenant.branch_a))
-    status_definition = cur.fetchone()[0]
+        SELECT rd.ratedefinitionid, c.statusratecolumnid
+        FROM payroll.ratedefinitions rd
+        JOIN payroll.statusratecolumns c ON c.statusratecolumnid = rd.statusratecolumnid
+        WHERE c.companyid = %s AND c.isdefault
+    """, (tenant.company_id,))
+    status_definition, column_id = cur.fetchone()
     response = await p3c_client.post(
         BASE, headers=tenant.admin,
         json={"driver_id": tenant.driver_a_id, "rate_definition_id": status_definition,
               "effective_from": "2026-01-01"})
-    assert response.status_code == 422
-    assert response.json()["detail"]["code"] == "RATE_DEFINITION_NOT_AUTHORABLE"
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "Pending" and body["pay_definition_id"] is None
+    assert body["status_rate_column_id"] == column_id
 
 
 async def test_inactive_definitions_are_not_authorable(p3c_client, tenant, cur):

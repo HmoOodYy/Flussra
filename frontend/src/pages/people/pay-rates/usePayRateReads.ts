@@ -7,7 +7,6 @@ import type {
 } from '../../../types/compensation';
 import { apiError } from './payRatesView';
 import { buildHistoryRows, type HistoryRow } from './payRatesHistory';
-import { getStatusRateMatrix, type StatusRateMatrix } from './statusRatesApi';
 import { getDriverPayRules, type DriverPayRule } from './driverPayRulesApi';
 
 /** The Driver's schedule summary and the history of each definition that has a Pending schedule. */
@@ -32,22 +31,16 @@ async function loadPendingSource(driverId: number): Promise<PendingSource> {
 }
 
 /**
- * Reads for the selected Driver. Ordinary rates, rate history and Min/Max rules are keyed by
- * the permanent Driver; the Status pay-rate matrix is keyed by one DriverAssignment, because
- * Status rates stay owned by a Branch tenure.
+ * Reads for the selected Driver. Every rate (ordinary PayDefinition rates and Status rate
+ * column rates), the rate history and the Min/Max rules belong to the permanent Driver and are
+ * keyed by driver_id.
  */
-export function usePayRateReads(
-  selectedDriverId: number | null,
-  statusAssignmentId: number | null,
-) {
+export function usePayRateReads(selectedDriverId: number | null) {
   const selectedDriverRef = useRef(selectedDriverId);
-  const statusAssignmentRef = useRef(statusAssignmentId);
   useLayoutEffect(() => {
     selectedDriverRef.current = selectedDriverId;
-    statusAssignmentRef.current = statusAssignmentId;
-  }, [selectedDriverId, statusAssignmentId]);
+  }, [selectedDriverId]);
   const ratesRequest = useRef(0);
-  const statusRequest = useRef(0);
   const rulesRequest = useRef(0);
   const historyRequest = useRef(0);
   const [rowsState, setRowsState] = useState<DriverPayRateRow[]>([]);
@@ -60,8 +53,6 @@ export function usePayRateReads(
   const [pendingSourceDriverId, setPendingSourceDriverId] = useState<number | null>(null);
   const [rowsError, setRowsError] = useState('');
   const [rowsErrorDriverId, setRowsErrorDriverId] = useState<number | null>(null);
-  const [statusMatrixState, setStatusMatrixState] = useState<StatusRateMatrix | null>(null);
-  const [statusMatrixAssignmentId, setStatusMatrixAssignmentId] = useState<number | null>(null);
   const [historyRowsState, setHistoryRows] = useState<HistoryRow[]>([]);
   const [historyDriverId, setHistoryDriverId] = useState<number | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -108,26 +99,6 @@ export function usePayRateReads(
       if (request === ratesRequest.current && selectedDriverRef.current === driverId) {
         setLoadingRows(false);
         setLoadingRowsDriverId(null);
-      }
-    }
-  }, []);
-
-  /** Status pay rates of ONE assignment (the Status pane's own picker). */
-  const loadStatus = useCallback(async (driverAssignmentId: number) => {
-    if (statusAssignmentRef.current !== driverAssignmentId) return;
-    const request = ++statusRequest.current;
-    setStatusMatrixState(null);
-    setStatusMatrixAssignmentId(null);
-    try {
-      const res = await getStatusRateMatrix(driverAssignmentId);
-      if (request === statusRequest.current && statusAssignmentRef.current === driverAssignmentId) {
-        setStatusMatrixState(res.data);
-        setStatusMatrixAssignmentId(driverAssignmentId);
-      }
-    } catch {
-      if (request === statusRequest.current && statusAssignmentRef.current === driverAssignmentId) {
-        setStatusMatrixState(null);
-        setStatusMatrixAssignmentId(driverAssignmentId);
       }
     }
   }, []);
@@ -200,10 +171,8 @@ export function usePayRateReads(
       setHistoryLoaded(false);
       setHistoryDriverId(null);
     }
-    const statusAssignment = statusAssignmentRef.current;
-    if (statusAssignment != null) await loadStatus(statusAssignment);
     if (payRulesDriverId === driverId) await loadPayRules(driverId);
-  }, [loadRates, loadStatus, loadPayRules, payRulesDriverId]);
+  }, [loadRates, loadPayRules, payRulesDriverId]);
 
   const refreshTargetRows = useCallback(async (driverId: number) => {
     if (selectedDriverRef.current !== driverId) return;
@@ -218,7 +187,6 @@ export function usePayRateReads(
   const access = accessDriverId === selectedDriverId ? accessState : null;
   const pendingSource = pendingSourceDriverId === selectedDriverId ? pendingSourceState : EMPTY_PENDING_SOURCE;
   const visibleRowsError = rowsErrorDriverId === selectedDriverId ? rowsError : '';
-  const statusMatrix = statusMatrixAssignmentId === statusAssignmentId ? statusMatrixState : null;
   const historyRows = historyDriverId === selectedDriverId ? historyRowsState : [];
   const historyLoaded = historyDriverId === selectedDriverId && historyLoadedState;
   const payRules = payRulesDriverId === selectedDriverId ? payRulesState : [];
@@ -227,11 +195,11 @@ export function usePayRateReads(
 
   return {
     rows, access, pendingSource, loadingRows: loadingRows && loadingRowsDriverId === selectedDriverId,
-    rowsError: visibleRowsError, statusMatrix, historyRows,
+    rowsError: visibleRowsError, historyRows,
     loadingHistory: loadingHistory && loadingHistoryDriverId === selectedDriverId,
     historyLoaded, setHistoryRows, setHistoryLoaded,
     payRules, loadingPayRules: loadingPayRules && loadingPayRulesDriverId === selectedDriverId,
     payRulesLoaded, setPayRules, setPayRulesLoaded, payRulesError, setPayRulesError,
-    loadRates, loadStatus, loadPayRules, loadHistory, reloadAll, refreshTargetRows,
+    loadRates, loadPayRules, loadHistory, reloadAll, refreshTargetRows,
   };
 }

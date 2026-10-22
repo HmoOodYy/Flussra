@@ -1,8 +1,10 @@
-import type { StatusKey } from '../../../types/settings';
+import type { StatusKey, StatusRateColumn } from '../../../types/settings';
 import { DeactivateIcon, ReactivateIcon, SpinnerIcon } from './StatusKeysDisplay';
+import { statusColumnName } from './statusKeysModel';
 
 export function StatusKeyDetail({
   statusKey: k,
+  columns,
   canEdit,
   isDeactivating,
   onEdit,
@@ -11,6 +13,7 @@ export function StatusKeyDetail({
   styles: s,
 }: {
   statusKey: StatusKey;
+  columns: readonly StatusRateColumn[];
   canEdit: boolean;
   isDeactivating: boolean;
   onEdit: () => void;
@@ -18,13 +21,7 @@ export function StatusKeyDetail({
   onReactivate: () => void;
   styles: Record<string, string>;
 }) {
-  const usageLimitRows: { label: string; enabled: boolean; value: number | null }[] = [
-    { label: 'Per period',         enabled: k.limit_uses_per_period_enabled,    value: k.limit_uses_per_period },
-    { label: 'Per driver',         enabled: k.limit_uses_per_driver_enabled,    value: k.limit_uses_per_driver },
-    { label: 'Across all drivers', enabled: k.limit_uses_across_drivers_enabled, value: k.limit_uses_across_drivers },
-    { label: 'Per day',            enabled: k.limit_uses_per_day_enabled,       value: k.limit_uses_per_day },
-  ];
-  const anyLimitEnabled = usageLimitRows.some(r => r.enabled);
+  const columnName = statusColumnName(columns, k.status_rate_column_id);
 
   return (
     <div className={s.keyDetailContent}>
@@ -49,59 +46,64 @@ export function StatusKeyDetail({
       {/* Body */}
       <div className={s.keyDetailBody}>
 
-        {/* Key Details */}
         <div className={s.keyDetailSection}>
-          <p className={s.keyDetailSectionTitle}>Key Details</p>
+          <p className={s.keyDetailSectionTitle}>Status</p>
           <div className={s.keyDetailRow}>
-            <span className={s.keyDetailLabel}>Hours Value</span>
-            <span className={s.keyDetailValue}>{k.hours_value}h</span>
+            <span className={s.keyDetailLabel}>Category</span>
+            <span className={s.keyDetailValue}>{k.category}</span>
           </div>
-        </div>
-
-        {/* Leave Settings */}
-        <div className={s.keyDetailSection}>
-          <p className={s.keyDetailSectionTitle}>Leave / Off Settings</p>
           <div className={s.keyDetailRow}>
-            <span className={s.keyDetailLabel}>Leave / off reason</span>
+            <span className={s.keyDetailLabel}>Hours</span>
+            <span className={s.keyDetailValue}>{Number(k.hours_value)}h</span>
+          </div>
+          <div className={s.keyDetailRow}>
+            <span className={s.keyDetailLabel}>Counts as a full day off</span>
             <span className={s.keyDetailValue}>{k.is_off_reason ? 'Yes' : 'No'}</span>
           </div>
           {k.is_off_reason && (
             <p className={s.keyDetailHint}>
-              Can be used for leave/time-off tracking during a payroll period.
+              A day with this Status cannot also have ordinary work quantities.
             </p>
           )}
           <div className={s.keyDetailRow}>
-            <span className={s.keyDetailLabel}>Deducts allowance</span>
-            <span className={s.keyDetailValue} style={{ color: 'var(--color-text-muted, #888)', fontStyle: 'italic' }}>Future feature</span>
+            <span className={s.keyDetailLabel}>Code</span>
+            <span className={s.keyDetailValue}>{k.status_code}</span>
           </div>
         </div>
 
-        {/* Usage Limits */}
         <div className={s.keyDetailSection}>
-          <div className={s.keyDetailSectionHeader}>
-            <p className={s.keyDetailSectionTitle}>Usage Limits</p>
-            {!anyLimitEnabled && <span className={s.plannedBadge}>Not configured</span>}
+          <p className={s.keyDetailSectionTitle}>Pay</p>
+          <div className={s.keyDetailRow}>
+            <span className={s.keyDetailLabel}>Status rate column</span>
+            <span className={s.keyDetailValue}>{columnName ?? 'Not paid'}</span>
           </div>
-          {!anyLimitEnabled ? (
-            <p className={s.plannedNote}>
-              No usage limits set. Edit this key to add limits.
-              <br />
-              <em>Note: limits are stored but not yet enforced at payroll entry time.</em>
-            </p>
+          <p className={s.keyDetailHint}>
+            {columnName
+              ? `Paid hours x each driver's rate for "${columnName}".`
+              : 'No pay: this Status is recorded but never paid.'}
+          </p>
+        </div>
+
+        <div className={s.keyDetailSection}>
+          <p className={s.keyDetailSectionTitle}>Aliases</p>
+          {k.aliases.length === 0 ? (
+            <p className={s.plannedNote}>No aliases. Aliases are shortcuts typed in payroll entry.</p>
           ) : (
-            <>
-              {usageLimitRows.filter(r => r.enabled).map(row => (
-                <div key={row.label} className={s.keyDetailRow}>
-                  <span className={s.keyDetailLabel}>{row.label}</span>
-                  <span className={s.keyDetailValue}>{row.value ?? '—'}</span>
-                </div>
-              ))}
-              <p className={s.plannedNote} style={{ marginTop: '0.4rem' }}>
-                <em>Usage limits are stored but not yet enforced at payroll entry time.</em>
-              </p>
-            </>
+            <div className={s.aliasChips}>
+              {k.aliases.map((alias) => <span key={alias} className={s.aliasChip}>{alias}</span>)}
+            </div>
           )}
         </div>
+
+        {k.is_in_use && (
+          <div className={s.keyDetailSection}>
+            <p className={s.lockNote}>
+              In use by payroll entries or frozen payroll. Its hours, full-day-off setting,
+              Category and rate column can no longer change; add a new Status and
+              deactivate this one to replace it. Name and aliases stay editable.
+            </p>
+          </div>
+        )}
 
       </div>
 

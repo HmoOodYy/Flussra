@@ -9,6 +9,7 @@
 > This document records the approved target architecture. P4a is closed; P4b is the current implementation unit; P4c and later units have not started.
 
 > **Stage 2 naming amendment (2026-10-19):** Durable Driver Stage 2 (Driver-owned compensation) renames the target rate tables: `DriverRateAssignment` becomes `DriverRateSchedule` (`payroll.DriverRateSchedules`, key `DriverRateScheduleID`) and `DriverRateValue` becomes `DriverRateScheduleValue` (`payroll.DriverRateScheduleValues`). A schedule is keyed by `DriverID` and carries no `BranchID` and no `DriverAssignmentID`. The sections before §13 below use the new names; the phase details and history text from §13 on keep the names of the time, and `DriverRateAssignment` there means `DriverRateSchedule`. Legacy status rates remain assignment-owned. The decisions are recorded in the [Durable Driver plan](DURABLE_DRIVER_IDENTITY_DRIVER_OWNED_COMPENSATION_PLAN.md).
+> **P5a Status amendment (2026-10-21):** Status keys and Status rate columns are Company-owned (not Branch-owned), a Status rate column owns one scalar RateDefinition, and Status rate values are owned by the permanent Driver through `DriverRateSchedules`. Statements below that call `StatusRateColumn` Branch-owned, or Status rate values assignment-owned, are superseded by the P5a definition in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md`. P5a also removes the `STATUS_PAYMENT` compatibility DraftLine projection (the removal this plan scheduled as P6B) and replaces it with direct Status calculation, so statements that the projection continues temporarily no longer apply.
 
 > **Naming note:** The Unified Refoundation Execution Plan controls work-unit boundaries and order. The internal phase labels in §12–§13 below (for example "P3A Core target schema" and "P3B Evidence-v2 schema foundation") are not Unified work-unit identifiers. The core target schema described under §13 "P3A" is delivered by the Unified P3b work unit; evidence structures are sequenced by the Unified plan's later units.
 
@@ -69,7 +70,7 @@ Company
                 -> DriverRateSchedule
                     -> DriverRateScheduleValue(s)
 
-Branch-owned StatusRateColumn
+Company-owned StatusRateColumn (P5a)
     -> RateDefinition
         -> DriverRateSchedule
             -> DriverRateScheduleValue(s)
@@ -276,7 +277,7 @@ rate = 25/hour
 result = 200
 ```
 
-`StatusRateColumn` remains **branch-owned**.
+`StatusRateColumn` is **Company-owned** from P5a (it was Branch-owned before).
 
 ## 2.10 Company currency
 
@@ -634,7 +635,7 @@ quantity 4 -> 3 + 4 + 5 + 5 = 17
 DayEntryState
     -> StatusKey VAC
         HoursValue = 8
-        -> branch-owned StatusRateColumn
+        -> Company-owned StatusRateColumn (P5a)
             -> scalar RateDefinition
                 -> John's DriverRateSchedule
                     value = 25
@@ -1196,7 +1197,7 @@ Status may still use legacy structured evidence until P6A.
 
 ## P6A — Status pay target cutover
 
-Branch-owned StatusRateColumns gain scalar hourly RateDefinitions.
+Company-owned StatusRateColumns (P5a) gain scalar hourly RateDefinitions.
 
 Existing and newly created branches/columns receive target definitions.
 
@@ -1655,7 +1656,7 @@ The modernization is complete only when all applicable statements are objectivel
 ## Status
 
 - status remains separate from PayDefinition;
-- StatusRateColumn remains branch-owned;
+- StatusRateColumn is Company-owned from P5a;
 - status compensation uses target assignment;
 - `VAC 8h * 25 = 200`;
 - no generated status RateTypes;
@@ -1730,7 +1731,7 @@ The implementation lead may **not** reinterpret:
 - zero != missing;
 - final tier open-ended;
 - PayDefinitions company-owned;
-- StatusRateColumns branch-owned;
+- StatusRateColumns Company-owned from P5a;
 - Driver assignment identity centered on DriverID + RateDefinitionID;
 - Status outside PayDefinition;
 - BonusEvent outside PayDefinition;
@@ -1763,6 +1764,6 @@ When the user later says to start the modernization:
 
 If P1–P8 are implemented correctly, Flussra must end with exactly this property:
 
-> Company-owned PayDefinitions and branch-owned StatusRateColumns own semantic RateDefinitions. Driver compensation resolves through one complete effective-dated DriverRateAssignment. PerUnit and OrdinalTier are the only first-production PayDefinition methods; arbitrary business codes/names carry no privileged meaning. Status, BonusEvent, and DriverPayRule remain separate domains. Finalized payroll is explained by immutable target evidence. No operational workflow requires RateType, PayItemRateTypeMap, legacy DriverRate routing, generated compatibility identities, or legacy implementations outside first-production scope. Future product capabilities remain subject to explicit domain design.
+> Company-owned PayDefinitions and Company-owned StatusRateColumns (P5a) own semantic RateDefinitions. Driver compensation resolves through one complete effective-dated DriverRateAssignment. PerUnit and OrdinalTier are the only first-production PayDefinition methods; arbitrary business codes/names carry no privileged meaning. Status, BonusEvent, and DriverPayRule remain separate domains. Finalized payroll is explained by immutable target evidence. No operational workflow requires RateType, PayItemRateTypeMap, legacy DriverRate routing, generated compatibility identities, or legacy implementations outside first-production scope. Future product capabilities remain subject to explicit domain design.
 
 That is the destination this plan authorizes.

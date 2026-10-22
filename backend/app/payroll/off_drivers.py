@@ -248,7 +248,6 @@ async def _status_entries(
             FROM payroll.payrolldraftlines ds
             LEFT JOIN payroll.payrollstatuskeys sk
               ON sk.companyid = ds.companyid
-             AND sk.branchid = ds.branchid
              AND sk.statuscode = ds.notes
             LEFT JOIN payroll.payrolldraftlines dn
               ON dn.payrollperiodid = ds.payrollperiodid
@@ -562,7 +561,6 @@ async def get_drivers_off(
             JOIN core.employees e  ON e.employeeid = a.employeeid
             JOIN payroll.payrollstatuskeys sk
                 ON  sk.companyid  = dl.companyid
-                AND sk.branchid   = dl.branchid
                 AND sk.statuscode = dl.notes
                 AND sk.isoffreason = TRUE
                 AND sk.isactive    = TRUE

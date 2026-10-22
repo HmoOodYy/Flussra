@@ -172,7 +172,7 @@ def _world(cursor, *, zones: tuple[str, ...] = ("UTC", "UTC"), assignment: bool 
 
 
 def _definitions(cursor, world: dict) -> None:
-    """Two PayDefinition-owned Scalar RateDefinitions and a status-owned one."""
+    """Two PayDefinition-owned Scalar RateDefinitions and the Company's Status-owned one."""
     company_id = world["company"]
     world["rate_definitions"] = []
     for _ in range(2):
@@ -195,18 +195,17 @@ def _definitions(cursor, world: dict) -> None:
         world["rate_definitions"].append(
             {"pay": pay_definition_id, "rate": rate_definition_id,
              "component": cursor.fetchone()[0]})
-    cursor.execute("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'STATUS_PAY'")
-    rate_type_id = cursor.fetchone()[0]
-    cursor.execute("""
-        INSERT INTO payroll.statusratecolumns (companyid, branchid, ratetypeid, columnname)
-        VALUES (%s, %s, %s, 'DC88 status') RETURNING statusratecolumnid
-    """, (company_id, world["branches"][0], rate_type_id))
+    # The Company's default Status rate column owns the Status RateDefinition.
+    cursor.execute("SELECT payroll.fn_EnsureDefaultStatusRateColumn(%s)", (company_id,))
     column_id = cursor.fetchone()[0]
     cursor.execute("""
-        INSERT INTO payroll.ratedefinitions (companyid, statusratecolumnid, ownerbranchid, shape)
-        VALUES (%s, %s, %s, 'Scalar') RETURNING ratedefinitionid
-    """, (company_id, column_id, world["branches"][0]))
-    world["status_rate_definition"] = cursor.fetchone()[0]
+        SELECT rd.ratedefinitionid, c.ratecomponentdefinitionid
+        FROM payroll.ratedefinitions rd
+        JOIN payroll.ratecomponentdefinitions c ON c.ratedefinitionid = rd.ratedefinitionid
+        WHERE rd.statusratecolumnid = %s
+    """, (column_id,))
+    world["status_rate_definition"], world["status_component"] = cursor.fetchone()
+    world["status_column"] = column_id
 
 
 def _calendar_source(cursor, world: dict, *, company_id: int | None = None) -> dict:
@@ -427,7 +426,7 @@ def test_0088_applies_over_a_roster_without_compensation(pre_0088_database):
     assert _alembic(env, "upgrade", "head").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         cursor.execute("SELECT version_num FROM public.alembic_version")
-        assert cursor.fetchone() == ("0089",)
+        assert cursor.fetchone() == ("0090",)
         cursor.execute("SELECT count(*) FROM core.driverassignments")
         assert cursor.fetchone() == (1,)
 
@@ -441,7 +440,7 @@ def test_0088_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0089",)
+    assert cur.fetchone() == ("0090",)
 
     def columns(table: str) -> set[str]:
         cur.execute("""
@@ -451,8 +450,9 @@ def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, c
         return {row[0] for row in cur.fetchall()}
 
     assert columns("driverrateschedules") == {
-        "driverratescheduleid", "companyid", "driverid", "paydefinitionid", "ratedefinitionid",
-        "effectivefrom", "effectiveto", "status", "createdbyuserid", "createdatutc",
+        "driverratescheduleid", "companyid", "driverid", "paydefinitionid", "statusratecolumnid",
+        "ratedefinitionid", "effectivefrom", "effectiveto", "status", "createdbyuserid",
+        "createdatutc",
         "updatedbyuserid", "updatedatutc", "approvedbyuserid", "approvedatutc",
         "voidedbyuserid", "voidedatutc", "voidreason", "notes",
     }
@@ -470,7 +470,7 @@ def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, c
     for retired in ("driverrateassignments", "driverratevalues"):
         cur.execute("SELECT to_regclass(%s)", (f"payroll.{retired}",))
         assert cur.fetchone()[0] is None
-    # Status rates stay assignment-owned.
+    # The legacy assignment-owned DriverRates remain until their final removal.
     assert {"driverassignmentid", "branchid"} <= columns("driverrates")
 
 
@@ -567,7 +567,7 @@ def test_a_schedule_belongs_to_a_driver_of_its_own_company_and_pay_definition(cu
         cur.execute(insert, (other["company"], w["driver"], rate["pay"], rate["rate"]))
     with rejected(cur, errors.ForeignKeyViolation):  # PayDefinition is not the RateDefinition's own
         cur.execute(insert, (w["company"], w["driver"], w["rate_definitions"][1]["pay"], rate["rate"]))
-    with rejected(cur, errors.NotNullViolation):
+    with rejected(cur, errors.CheckViolation):  # an owner is required
         cur.execute("""
             INSERT INTO payroll.driverrateschedules
                 (companyid, driverid, ratedefinitionid, effectivefrom)
@@ -582,7 +582,7 @@ def test_a_schedule_belongs_to_a_driver_of_its_own_company_and_pay_definition(cu
     _pending(cur, w)
 
 
-def test_a_status_owned_rate_definition_cannot_be_scheduled(cur):
+def test_a_status_owned_rate_definition_is_scheduled_by_its_status_rate_column(cur):
     w = _world(cur)
     status_rate = w["status_rate_definition"]
     cur.execute("SELECT paydefinitionid FROM payroll.ratedefinitions WHERE ratedefinitionid = %s",
@@ -590,18 +590,21 @@ def test_a_status_owned_rate_definition_cannot_be_scheduled(cur):
     assert cur.fetchone() == (None,)
     insert = """
         INSERT INTO payroll.driverrateschedules
-            (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom)
-        VALUES (%s, %s, %s, %s, DATE '2021-01-01')
+            (companyid, driverid, paydefinitionid, statusratecolumnid, ratedefinitionid,
+             effectivefrom)
+        VALUES (%s, %s, %s, %s, %s, DATE '2021-01-01')
     """
+    # A PayDefinition cannot own a schedule of a Status-owned definition.
     for pay_definition in (w["rate_definitions"][0]["pay"], w["rate_definitions"][1]["pay"]):
         with rejected(cur, errors.ForeignKeyViolation):
-            cur.execute(insert, (w["company"], w["driver"], pay_definition, status_rate))
-    with rejected(cur, errors.NotNullViolation):
-        cur.execute("""
-            INSERT INTO payroll.driverrateschedules
-                (companyid, driverid, paydefinitionid, ratedefinitionid, effectivefrom)
-            VALUES (%s, %s, NULL, %s, DATE '2021-01-01')
-        """, (w["company"], w["driver"], status_rate))
+            cur.execute(insert, (w["company"], w["driver"], pay_definition, None, status_rate))
+    # Neither owner, or both owners, are refused.
+    with rejected(cur, errors.CheckViolation):
+        cur.execute(insert, (w["company"], w["driver"], None, None, status_rate))
+    with rejected(cur, errors.CheckViolation):
+        cur.execute(insert, (w["company"], w["driver"], w["rate_definitions"][0]["pay"],
+                             w["status_column"], status_rate))
+    cur.execute(insert, (w["company"], w["driver"], None, w["status_column"], status_rate))
 
 
 def _transferred_driver(cursor) -> dict:

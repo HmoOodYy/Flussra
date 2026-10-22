@@ -1,7 +1,6 @@
 """Focused P3a currency authority, immutable evidence and read integrity proofs."""
 from __future__ import annotations
 
-from datetime import date
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -10,9 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 
 from app.company_currency import get_company_currency
-from app.payroll import finalized_library_read_model, report_read_model, status_payment_sync
-from app.payroll import rates as rates_service
-from app.payroll.schemas import DriverRateCreate
+from app.payroll import finalized_library_read_model, report_read_model
 from app.settings import audit as settings_audit
 from app.settings import company
 from app.settings import security as settings_security
@@ -240,80 +237,3 @@ async def test_finalized_currency_page_resolves_multiple_periods_setwise():
     assert currencies[10].code == "USD" and currencies[10].minor_unit_digits == 2
     assert currencies[11].code == "JPY" and currencies[11].minor_unit_digits == 0
     assert len(db.queries) == 2
-
-
-@pytest.mark.asyncio
-async def test_unauthorized_rate_request_cannot_probe_company_currency(monkeypatch):
-    currency_gate_called = False
-
-    async def deny_driver_subject(*_args, **_kwargs):
-        raise HTTPException(status_code=403, detail="DRIVER/Self cannot manage rates")
-
-    async def currency_probe(*_args, **_kwargs):
-        nonlocal currency_gate_called
-        currency_gate_called = True
-        raise HTTPException(status_code=422, detail={"code": "COMPANY_CURRENCY_REQUIRED"})
-
-    monkeypatch.setattr(rates_service, "_require_non_driver_rate_subject", deny_driver_subject)
-    monkeypatch.setattr(rates_service, "lock_and_get_company_currency_for_monetary_write", currency_probe)
-    request = DriverRateCreate(
-        driver_assignment_id=1, rate_type_id=1, amount=10, effective_from=date(2099, 1, 1),
-    )
-    with pytest.raises(HTTPException) as denied:
-        await rates_service.create_rate(1, 2, request, db=object())
-    assert denied.value.status_code == 403
-    assert "COMPANY_CURRENCY_REQUIRED" not in str(denied.value.detail)
-    assert currency_gate_called is False
-
-
-class _FirstMappingResult:
-    def __init__(self, row):
-        self.row = row
-
-    def mappings(self):
-        return self
-
-    def first(self):
-        return self.row
-
-
-class _StatusPaymentWithoutCurrencyDB:
-    def __init__(self, existing):
-        self.existing = existing
-        self.writes = []
-
-    async def execute(self, statement, _params):
-        query = str(statement)
-        if "SELECT payrollperioddriverdayentrystateid" in query:
-            return _FirstMappingResult({"payrollperioddriverdayentrystateid": 7})
-        if "FROM   payroll.payrollstatuskeys sk" in query:
-            return _FirstMappingResult({
-                "statuskeyid": 3, "statuscode": "ON_TIME", "keyname": "On time",
-                "hoursvalue": 1, "statusratecolumnid": 4, "src_col_name": "StatusPay",
-                "ratetypeid": 5, "ratecode": "STATUS_PAY",
-            })
-        if "SELECT draftlineid, sourceid" in query:
-            return _FirstMappingResult(self.existing)
-        self.writes.append(query)
-        return _FirstMappingResult(None)
-
-
-@pytest.mark.asyncio
-async def test_status_payment_without_currency_keeps_source_and_clears_stale_money():
-    db = _StatusPaymentWithoutCurrencyDB({"draftlineid": 31, "sourceid": "STATUS_PAYMENT:7:3:4"})
-    await status_payment_sync._sync_status_payment_for_entry_state(
-        company_id=1, branch_id=2, period_id=3, driver_assignment_id=4,
-        work_date=date(2099, 1, 1), status_key_id=3, user_id=5, db=db,
-        currency=None,
-    )
-    assert len(db.writes) == 1
-    assert "UPDATE payroll.payrolldraftlines SET status = 'Void'" in db.writes[0]
-    assert not any("INSERT INTO payroll.payrolldraftlines" in query for query in db.writes)
-
-    fresh = _StatusPaymentWithoutCurrencyDB(None)
-    await status_payment_sync._sync_status_payment_for_entry_state(
-        company_id=1, branch_id=2, period_id=3, driver_assignment_id=4,
-        work_date=date(2099, 1, 1), status_key_id=3, user_id=5, db=fresh,
-        currency=None,
-    )
-    assert fresh.writes == []

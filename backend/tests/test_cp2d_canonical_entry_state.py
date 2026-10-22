@@ -267,15 +267,16 @@ async def _insert_status_key(
     r = (await db.execute(
         _text("""
             INSERT INTO payroll.payrollstatuskeys
-                (companyid, branchid, statuscode, normalizedstatuscode, keyname,
-                 isoffreason, hoursvalue, isactive, displayorder)
-            VALUES (:cid, :bid, :code, :norm, :name, :off, 8.0, :active, 99)
+                (companyid, statuscode, normalizedstatuscode, keyname, normalizedkeyname,
+                 allowancecategory, isoffreason, hoursvalue, isactive, displayorder)
+            VALUES (:cid, :code, :norm, :name, :nname, 'Other', :off, 8.0, :active, 99)
             RETURNING statuskeyid
         """),
         {
-            "cid": company_id, "bid": branch_id,
+            "cid": company_id,
             "code": code, "norm": code,
-            "name": f"Test Key {code}", "off": is_off_reason, "active": is_active,
+            "name": f"Test Key {code}", "nname": f"Test Key {code}".lower(),
+            "off": is_off_reason, "active": is_active,
         },
     )).mappings().first()
     await db.commit()
@@ -553,8 +554,8 @@ class TestCp2dCanonicalEntryState:
             assert new_code in after_codes, "Newly-added Status Key must appear in dropdown"
         finally:
             await direct_db.execute(
-                _text("DELETE FROM payroll.payrollstatuskeys "
-                      "WHERE statuscode = :code AND branchid = :bid"),
+                _text("DELETE FROM payroll.payrollstatuskeys WHERE statuscode = :code AND companyid = "
+                      "(SELECT companyid FROM core.branches WHERE branchid = :bid)"),
                 {"code": new_code, "bid": ces_branch_id},
             )
             await direct_db.commit()
@@ -1022,9 +1023,9 @@ class TestCp2dCanonicalEntryState:
         ces_driver_assignment_id: int,
     ):
         """E29: Open periods are untouched by Stage B3 Unit 8C-3 -- Day Grid
-        keeps reading live StatusKey label/off-reason (mutable-state drift
-        DOES show immediately, unlike Locked/Archived), and status_evidence
-        stays absent (None)."""
+        keeps reading the live StatusKey name (a rename DOES show immediately,
+        unlike Locked/Archived), and status_evidence stays absent (None). The
+        off-day semantic of a used Status can no longer drift, so it stays."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e29")
         code = _sk_code("E29OPEN", start)
@@ -1047,7 +1048,7 @@ class TestCp2dCanonicalEntryState:
             await direct_db.execute(
                 _text("""
                     UPDATE payroll.payrollstatuskeys
-                    SET keyname = 'DRIFTED LIVE LABEL', isoffreason = FALSE
+                    SET keyname = 'DRIFTED LIVE LABEL', normalizedkeyname = 'drifted live label'
                     WHERE statuskeyid = :sid
                 """),
                 {"sid": sk_id},
@@ -1069,7 +1070,7 @@ class TestCp2dCanonicalEntryState:
             assert drv_row["status_label"] == "DRIFTED LIVE LABEL", (
                 "Open period must reflect the CURRENT live StatusKey, not a frozen value"
             )
-            assert drv_row["is_off"] is False, "Open period must reflect the CURRENT is_off"
+            assert drv_row["is_off"] is True, "the off-day semantic of a used Status never drifts"
             assert body.get("status_evidence") is None
         finally:
             await _clean_branch(direct_db, ces_branch_id)

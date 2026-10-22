@@ -23,11 +23,13 @@ def _first_full_match(path: str, method: str) -> APIRoute:
 
 
 def test_public_payroll_router_is_flat_and_handlers_live_in_owner_modules():
-    assert len(router.routes) == 60  # 61 before the transfer-copy route was retired
+    assert len(router.routes) == 46  # the assignment-owned rate routes are retired
     assert all(isinstance(route, APIRoute) for route in router.routes)
     paths = {route.path for route in router.routes}
-    # Rate copy between assignments is retired: a transfer continues the Driver's rates.
-    assert not any("/copy-from/" in path for path in paths)
+    # Every rate is a Driver-owned schedule authored under /compensation: no assignment-level
+    # rate route exists, and a transfer continues the Driver's rates by date.
+    assert not any("/copy-from/" in path or path.startswith("/rates")
+                   or "/driver-assignments/{driver_assignment_id}/rate" in path for path in paths)
     # Pay rules belong to the permanent Driver, not to an assignment.
     assert "/drivers/{driver_id}/pay-rules" in paths
     assert "/driver-assignments/{driver_assignment_id}/pay-rules" not in paths
@@ -41,10 +43,10 @@ def test_public_payroll_router_is_flat_and_handlers_live_in_owner_modules():
 
 
 def test_static_payroll_paths_resolve_to_their_static_handlers():
-    lookup = _first_full_match("/rates/lookup", "GET")
+    current = _first_full_match("/current", "GET")
     candidates = _first_full_match("/branches/5/period-candidates", "GET")
 
-    assert lookup.path == "/rates/lookup"
-    assert lookup.name == "lookup_rate_for_date"
+    assert current.path == "/current"
+    assert current.name == "get_current_payroll_hub"
     assert candidates.path == "/branches/{branch_id}/period-candidates"
     assert candidates.name == "get_period_candidates"

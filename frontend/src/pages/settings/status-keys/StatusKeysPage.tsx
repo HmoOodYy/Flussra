@@ -3,14 +3,21 @@ import { useAuth } from '../../../store/authStore';
 import { canManageSettingsAdmin } from '../../../lib/permissions';
 import { ConfirmDialog } from '../../../components/ConfirmDialog';
 import styles from './StatusKeysPage.module.css';
-import { BranchIcon, CheckIcon } from './StatusKeysDisplay';
+import { CheckIcon } from './StatusKeysDisplay';
 import { StatusKeyEditorDialog } from './StatusKeyEditorDialog';
 import { StatusKeysWorkspace } from './StatusKeysWorkspace';
+import { StatusLimitsPanel } from './StatusLimitsPanel';
+import { StatusRateColumnsPanel } from './StatusRateColumnsPanel';
 import { useStatusKeyBranches } from './useStatusKeyBranches';
 import { useStatusKeyCollection } from './useStatusKeyCollection';
 import { useStatusKeyEditor } from './useStatusKeyEditor';
+import { useStatusRateColumns } from './useStatusRateColumns';
 import type { ConfirmKind } from './statusKeysModel';
 
+/**
+ * Settings > Status Keys. The Status catalog belongs to the Company and is shared by every
+ * Branch: the list and editor have no Branch picker. Only the Branch usage limits are per Branch.
+ */
 export function StatusKeysPage() {
   const { user } = useAuth();
   const canEdit = user !== null && canManageSettingsAdmin(user);
@@ -28,13 +35,9 @@ export function StatusKeysPage() {
     setTimeout(() => setToast(''), 4000);
   }, []);
 
-  const collection = useStatusKeyCollection({
-    selectedBranchId: branches.selectedBranchId,
-    showToast,
-    setConfirmKind,
-  });
+  const collection = useStatusKeyCollection({ showToast, setConfirmKind });
+  const columns = useStatusRateColumns(showToast);
   const editor = useStatusKeyEditor({
-    selectedBranchId: branches.selectedBranchId,
     statusKeys: collection.statusKeys,
     dispatchKeys: collection.dispatchKeys,
     showToast,
@@ -66,7 +69,8 @@ export function StatusKeysPage() {
         <div>
           <h1 className={styles.pageTitle}>Status Keys</h1>
           <p className={styles.pageSubtitle}>
-            Configure branch payroll entry status keys.
+            Statuses are shared by every Branch: set their names, aliases, hours and pay once for the
+            Company, then limit their use per Branch.
           </p>
         </div>
       </div>
@@ -74,39 +78,10 @@ export function StatusKeysPage() {
       {/* Toast */}
       {toast && <div className={styles.successAlert}><CheckIcon /> {toast}</div>}
 
-      {/* Branch context card */}
-      <div className={styles.branchCtx}>
-        <div className={styles.branchCtxLeft}>
-          <span className={styles.branchCtxLabel}><BranchIcon /> Branch</span>
-          {branches.branchesLoading ? (
-            <span className={styles.branchCtxMuted}>Loading…</span>
-          ) : branches.branches.length === 0 ? (
-            <span className={styles.branchCtxMuted}>No branches available</span>
-          ) : canEdit && branches.branches.length > 1 ? (
-            <select
-              className={styles.branchSelect}
-              value={branches.selectedBranchId ?? ''}
-              onChange={e => branches.setSelectedBranchId(Number(e.target.value))}
-            >
-              {branches.branches.map(b => (
-                <option key={b.branch_id} value={b.branch_id}>
-                  {b.branch_name} ({b.branch_code})
-                </option>
-              ))}
-            </select>
-          ) : (
-            <span className={styles.branchCtxValue}>
-              {branches.selectedBranch?.branch_name ?? '—'}
-              {branches.selectedBranch?.branch_code && (
-                <span className={styles.branchCodePill}>{branches.selectedBranch.branch_code}</span>
-              )}
-            </span>
-          )}
-        </div>
-      </div>
-
       <StatusKeysWorkspace
         statusKeys={collection.statusKeys}
+        visibleKeys={collection.visibleKeys}
+        columns={columns.columns}
         keysLoading={collection.keysLoading}
         keysError={collection.keysError}
         keyStatusFilter={collection.keyStatusFilter}
@@ -122,24 +97,34 @@ export function StatusKeysPage() {
         requestReactivate={collection.requestReactivate}
       />
 
+      <StatusRateColumnsPanel columns={columns} statusKeys={collection.statusKeys} canEdit={canEdit} />
+
+      <StatusLimitsPanel
+        branches={branches.branches}
+        branchesLoading={branches.branchesLoading}
+        selectedBranchId={branches.selectedBranchId}
+        setSelectedBranchId={branches.setSelectedBranchId}
+        canEdit={canEdit}
+      />
+
       {/* Confirm dialog */}
       <ConfirmDialog
         open={confirmKind !== null}
         title={
-          confirmKind === 'save-key'         ? (editor.keyModal === 'create' ? 'Create status key?' : 'Save status key changes?') :
-          confirmKind === 'deactivate-key'   ? 'Deactivate status key?' :
-          confirmKind === 'reactivate-key'   ? 'Reactivate status key?' :
+          confirmKind === 'save-key'         ? (editor.keyModal === 'create' ? 'Create Status?' : 'Save Status changes?') :
+          confirmKind === 'deactivate-key'   ? 'Deactivate Status?' :
+          confirmKind === 'reactivate-key'   ? 'Reactivate Status?' :
           'Confirm'
         }
         message={
           confirmKind === 'save-key'
             ? editor.keyModal === 'create'
-              ? `Create status key "${editor.keyForm.key_name || '…'}"?`
+              ? `Create Status "${editor.keyForm.key_name || '…'}" for every Branch?`
               : `Save changes to "${editor.editingKey?.key_name}"?`
             : confirmKind === 'deactivate-key'
-            ? `Deactivate "${collection.targetKey?.key_name}"? It will no longer appear in payroll entry.`
+            ? `Deactivate "${collection.targetKey?.key_name}"? It can no longer be chosen in payroll entry; days that already have it keep it.`
             : confirmKind === 'reactivate-key'
-            ? `Reactivate "${collection.targetKey?.key_name}"? It will appear in payroll entry again.`
+            ? `Reactivate "${collection.targetKey?.key_name}"? It can be chosen in payroll entry again.`
             : ''
         }
         confirmLabel={
@@ -159,6 +144,7 @@ export function StatusKeysPage() {
         editingKey={editor.editingKey}
         keyForm={editor.keyForm}
         setKeyForm={editor.setKeyForm}
+        columns={columns.columns}
         savingKey={editor.savingKey}
         keySaveErr={editor.keySaveErr}
         requestSaveKey={editor.requestSaveKey}

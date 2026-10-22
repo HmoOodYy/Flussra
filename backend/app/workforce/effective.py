@@ -3,12 +3,9 @@
 from datetime import datetime
 from typing import Any
 
-from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
-
-from app.workforce.ops import decision_instant
 
 
 def _require_aware(effective_at: datetime | None) -> None:
@@ -84,7 +81,8 @@ DRIVER_ASSIGNMENT_ENDED_MESSAGE = (
 )
 # The one SQLSTATE for a database refusal of historical compensation. Raised with the
 # message prefix DRIVER_ASSIGNMENT_ENDED by core.trg_CompensationAssignmentWritable
-# (migration 0087; a status rate of an ended DriverAssignment) and with the prefix
+# (migration 0087; the retired assignment-owned rate tables, which no application writer uses
+# any more and which go with them) and with the prefix
 # DRIVER_COMPENSATION_HISTORICAL by core.trg_DriverCompensationContextWritable (migration
 # 0088; a Driver-owned change whose context tenure has ended).
 DRIVER_ASSIGNMENT_ENDED_SQLSTATE = "FL001"
@@ -118,66 +116,15 @@ def is_driver_assignment_ended_error(exc: DBAPIError) -> bool:
 def historical_compensation_refusal_detail(exc: DBAPIError) -> dict[str, str] | None:
     """The API error body for a database refusal of historical compensation (FL001), or None.
 
-    The single mapping point for both triggers: the message prefix tells a status rate of an
-    ended assignment (DRIVER_ASSIGNMENT_ENDED) from a Driver-owned change in an ended tenure
-    (DRIVER_COMPENSATION_HISTORICAL).
+    The single mapping point for both triggers: the message prefix tells a write to a retired
+    assignment-owned rate of an ended assignment (DRIVER_ASSIGNMENT_ENDED) from a Driver-owned
+    change in an ended tenure (DRIVER_COMPENSATION_HISTORICAL).
     """
     if not is_driver_assignment_ended_error(exc):
         return None
     if "DRIVER_COMPENSATION_HISTORICAL" in str(exc.orig):
         return driver_compensation_historical_detail()
     return driver_assignment_ended_detail()
-
-
-async def require_writable_driver_assignment(
-    company_id: int,
-    driver_assignment_id: int,
-    db: AsyncConnection,
-) -> None:
-    """Refuse EARLY a status-rate write against an already-ENDED DriverAssignment (409).
-
-    Only the legacy status rates (``payroll.DriverRates`` / ``DriverRateTiers``, in
-    ``payroll/rates.py``) are assignment-owned and call this. Ordinary rate schedules and
-    Min/Max pay rules belong to the permanent Driver and are judged by the context tenure of
-    the change's start date instead (``app.compensation.driver_context``).
-
-    Ended means ``EffectiveToAt IS NOT NULL AND EffectiveToAt <= now`` at one wall-clock
-    decision instant, which includes the empty never-effective window of a terminated
-    destination. A current source whose Transferred end is still in the future and any
-    pending/future-effective assignment stay writable.
-
-    Acceptance here is never final. The writer can still block afterwards (advisory
-    lock, row lock, unique-index wait) while a Scheduled source's future end passes, and
-    ``FOR SHARE`` freezes the ``EffectiveToAt`` value, not time. The authority is the
-    database trigger ``core.trg_CompensationAssignmentWritable`` (on the status-rate tables only): it re-decides at each
-    mutation's own wall-clock instant, after that statement's waits, and its refusal
-    reaches the client as the same 409 through the application's DBAPIError handler. This
-    call refuses only what is already ended, so such a request does not wait for the
-    Branch advisory lock first.
-
-    Call it after the writer's authorization and after any Company-currency or
-    RateDefinition-structure lock, and BEFORE the Branch workflow advisory lock and the
-    first DML. The row is locked FOR SHARE so a concurrent transfer/termination (FOR NO
-    KEY UPDATE, which conflicts with FOR SHARE but not with the FOR KEY SHARE that
-    child-row inserts take) cannot close the assignment between this decision and the
-    write's commit; the instant is read only after that lock. Transfers and termination
-    take the assignment row and THEN the Branch advisory lock, so this row lock must stay
-    ahead of the advisory lock or the two orders form a deadlock cycle.
-    """
-    row = (await db.execute(text("""
-        SELECT EffectiveToAt
-        FROM core.DriverAssignments
-        WHERE DriverAssignmentID = :assignment_id AND CompanyID = :company_id
-        FOR SHARE
-    """), {"assignment_id": driver_assignment_id, "company_id": company_id})
-    ).mappings().one_or_none()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Driver assignment not found.")
-    ended_at = row["effectivetoat"]
-    if ended_at is None:
-        return
-    if ended_at <= await decision_instant(db):
-        raise HTTPException(status_code=409, detail=driver_assignment_ended_detail())
 
 
 # Joins one assignment (alias ``va``) per Driver (alias ``dr``): the current

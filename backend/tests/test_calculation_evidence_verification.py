@@ -50,7 +50,7 @@ _USED_RATE_TAMPERING = [
      "WHERE payrollcalculationsnapshotid = {snapshot} AND evidencekind = 'DriverRateSchedule'"),
     ("Status rate amount",
      "UPDATE payroll.payrollcalculationsnapshotusedratedefinitions SET rateamountsnapshot = 999 "
-     "WHERE payrollcalculationsnapshotid = {snapshot} AND evidencekind = 'StatusDriverRate'"),
+     "WHERE payrollcalculationsnapshotid = {snapshot} AND sourcetypesnapshot = 'StatusEntryState'"),
     ("rate effective window",
      "UPDATE payroll.payrollcalculationsnapshotusedratedefinitions "
      "SET effectivefromsnapshot = effectivefromsnapshot - 30 "
@@ -58,24 +58,21 @@ _USED_RATE_TAMPERING = [
     ("rate status",
      "UPDATE payroll.payrollcalculationsnapshotusedratedefinitions "
      "SET ratestatussnapshot = 'Pending' WHERE payrollcalculationsnapshotid = {snapshot}"),
-    ("Status rate type label",
-     "UPDATE payroll.payrollcalculationsnapshotusedratedefinitions "
-     "SET ratetypenamesnapshot = 'Other' "
-     "WHERE payrollcalculationsnapshotid = {snapshot} AND evidencekind = 'StatusDriverRate'"),
     ("an extra used-rate row",
      "INSERT INTO payroll.payrollcalculationsnapshotusedratedefinitions "
      "(payrollcalculationsnapshotid, companyid, branchid, payrollperiodid, driverassignmentid, "
      "driverid, definitionfingerprint, evidencekind, sourcetypesnapshot, driverratescheduleid, "
-     "ratedefinitionid, paydefinitionid, ratecomponentdefinitionid, rateamountsnapshot, "
-     "effectivefromsnapshot, ratestatussnapshot, currencycodesnapshot, "
+     "ratedefinitionid, paydefinitionid, statusratecolumnid, ratecomponentdefinitionid, "
+     "rateamountsnapshot, effectivefromsnapshot, ratestatussnapshot, currencycodesnapshot, "
      "currencyminorunitdigitssnapshot) "
      "SELECT payrollcalculationsnapshotid, companyid, branchid, payrollperiodid, "
      "driverassignmentid, driverid, repeat('b', 64), evidencekind, sourcetypesnapshot, "
-     "driverratescheduleid, ratedefinitionid, paydefinitionid, ratecomponentdefinitionid, "
+     "driverratescheduleid, ratedefinitionid, paydefinitionid, statusratecolumnid, "
+     "ratecomponentdefinitionid, "
      "rateamountsnapshot + 1, effectivefromsnapshot, ratestatussnapshot, currencycodesnapshot, "
      "currencyminorunitdigitssnapshot "
      "FROM payroll.payrollcalculationsnapshotusedratedefinitions "
-     "WHERE payrollcalculationsnapshotid = {snapshot} AND evidencekind = 'DriverRateSchedule' "
+     "WHERE payrollcalculationsnapshotid = {snapshot} AND sourcetypesnapshot = 'DraftLine' "
      "LIMIT 1"),
 ]
 
@@ -91,6 +88,16 @@ _REPORT_EVIDENCE_TAMPERING = [
     ("Status report off-reason flag",
      "UPDATE payroll.payrollcalculationsnapshotstatusentries "
      "SET statusisoffreasonsnapshot = NOT statusisoffreasonsnapshot "
+     "WHERE payrollcalculationsnapshotid = {snapshot}",
+     "REPORT_EVIDENCE_HASH_MISMATCH"),
+    ("Status report hours",
+     "UPDATE payroll.payrollcalculationsnapshotstatusentries "
+     "SET statushoursvaluesnapshot = statushoursvaluesnapshot + 1 "
+     "WHERE payrollcalculationsnapshotid = {snapshot}",
+     "REPORT_EVIDENCE_HASH_MISMATCH"),
+    ("Status report category",
+     "UPDATE payroll.payrollcalculationsnapshotstatusentries "
+     "SET statuscategorysnapshot = 'Sick' "
      "WHERE payrollcalculationsnapshotid = {snapshot}",
      "REPORT_EVIDENCE_HASH_MISMATCH"),
     ("report evidence hash",
@@ -157,10 +164,10 @@ def _first_line(content: dict, source_type: str) -> dict:
         if line["SourceType"] == source_type)
 
 
-def _reseal(content: dict, kind: str, **fields) -> None:
-    """Change one rate row and keep its fingerprint and every link consistent with the change,
-    so only the agreement with the lines can reject it."""
-    rate = next(r for r in content["UsedRates"] if r["EvidenceKind"] == kind)
+def _reseal(content: dict, source_type: str, **fields) -> None:
+    """Change one rate row (of the ordinary or the Status lines) and keep its fingerprint and
+    every link consistent with the change, so only the agreement with the lines can reject it."""
+    rate = next(r for r in content["UsedRates"] if r["SourceType"] == source_type)
     old = rate["DefinitionFingerprint"]
     rate.update(fields)
     rate["DefinitionFingerprint"] = used_rate_fingerprint(rate)
@@ -182,30 +189,38 @@ async def test_used_rates_must_agree_with_the_lines_that_link_to_them(
     _, frozen = await _full_snapshot(p3c_client, p3c_engine, tenant)
     content = await _loaded(p3c_engine, frozen.snapshot_id)
     reconcile_used_rate_evidence(content)
-    assert {rate["EvidenceKind"] for rate in content["UsedRates"]} == {
-        "DriverRateSchedule", "StatusDriverRate"}
+    assert {rate["EvidenceKind"] for rate in content["UsedRates"]} == {"DriverRateSchedule"}
+    assert {rate["SourceType"] for rate in content["UsedRates"]} == {"DraftLine", "StatusEntryState"}
 
     cases = {
         "an orphan used-rate row": _orphan,
         "a stale fingerprint": lambda c: c["UsedRates"][0].update({"RateAmount": D("999")}),
         "a schedule row for another schedule": lambda c: _reseal(
-            c, "DriverRateSchedule", DriverRateScheduleID=987654),
+            c, "DraftLine", DriverRateScheduleID=987654),
         "a schedule row with another amount": lambda c: _reseal(
-            c, "DriverRateSchedule", RateAmount=D("999")),
+            c, "DraftLine", RateAmount=D("999")),
         "a schedule row for another pay definition": lambda c: _reseal(
-            c, "DriverRateSchedule", PayDefinitionID=987654),
-        "a Status row for another rate": lambda c: _reseal(
-            c, "StatusDriverRate", DriverRateID=987654),
-        "a Status row for another rate type": lambda c: _reseal(
-            c, "StatusDriverRate", RateTypeID=987654),
+            c, "DraftLine", PayDefinitionID=987654),
+        "an ordinary row that also names a Status rate column": lambda c: _reseal(
+            c, "DraftLine", StatusRateColumnID=987654),
+        "a Status row for another schedule": lambda c: _reseal(
+            c, "StatusEntryState", DriverRateScheduleID=987654),
+        "a Status row for another rate definition": lambda c: _reseal(
+            c, "StatusEntryState", RateDefinitionID=987654),
+        "a Status row for another Status rate column": lambda c: _reseal(
+            c, "StatusEntryState", StatusRateColumnID=987654),
+        "a Status row owned by a pay definition as well": lambda c: _reseal(
+            c, "StatusEntryState", PayDefinitionID=987654),
+        "a Status row without an owner": lambda c: _reseal(
+            c, "StatusEntryState", StatusRateColumnID=None),
         "a Status row with another amount": lambda c: _reseal(
-            c, "StatusDriverRate", RateAmount=D("999")),
+            c, "StatusEntryState", RateAmount=D("999")),
         "an ordinary line without a rate": lambda c: _first_line(c, "DraftLine").update(
             {"UsedRateFingerprint": None}),
         "a Bonus line with a rate": lambda c: _first_line(c, "BonusEvent").update(
             {"UsedRateFingerprint": c["UsedRates"][0]["DefinitionFingerprint"]}),
         "a row in another currency": lambda c: _reseal(
-            c, "DriverRateSchedule", CurrencyCodeSnapshot="XXX"),
+            c, "DraftLine", CurrencyCodeSnapshot="XXX"),
     }
     for label, change in cases.items():
         broken = copy.deepcopy(content)
@@ -213,6 +228,10 @@ async def test_used_rates_must_agree_with_the_lines_that_link_to_them(
         with pytest.raises(SnapshotEvidenceError) as failed:
             reconcile_used_rate_evidence(broken)
         assert failed.value.code == "USED_RATE_EVIDENCE_INTEGRITY_ERROR", label
+
+
+def _status_line(content: dict) -> dict:
+    return _first_line(content, "StatusEntryState")
 
 
 def _rehashed(content: dict) -> dict:
@@ -248,6 +267,16 @@ async def test_report_evidence_must_agree_with_the_financial_evidence(
             {"WorkDate": first_status(c)["WorkDate"] + timedelta(days=1)}),
         "a Status entry of another key": lambda c: first_status(c).update({"StatusKeyID": 987654}),
         "a Status entry naming another Driver": lambda c: first_status(c).update({"DriverID": 987654}),
+        "a Status line quantity that is not the frozen hours": lambda c: _status_line(c).update(
+            {"Quantity": _status_line(c)["Quantity"] + 1}),
+        "Status hours that are not the line quantity": lambda c: first_status(c).update(
+            {"StatusHoursValueSnapshot": first_status(c)["StatusHoursValueSnapshot"] + 1}),
+        "a Status line amount that is not hours times its rate": lambda c: _status_line(c).update(
+            {"CalculatedAmount": _status_line(c)["CalculatedAmount"] + D("1")}),
+        "a Status entry freezing more than a day of hours": lambda c: first_status(c).update(
+            {"StatusHoursValueSnapshot": D("25")}),
+        "a Status entry freezing an unknown Category": lambda c: first_status(c).update(
+            {"StatusCategorySnapshot": "Weekend"}),
         "an off-reason entry on a day Min/Max counted": lambda c: c["ReportEvidence"][
             "StatusEntries"].append({
                 **first_status(c), "PayrollPeriodDriverDayEntryStateID": 987654,

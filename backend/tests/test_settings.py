@@ -256,12 +256,13 @@ class TestListBranches:
         client: httpx.AsyncClient,
         auth_token: str,
     ):
-        """Each branch object must have the 5 metric fields (can be None but must exist)."""
+        """Each branch object must have its metric fields (can be None but must exist). The Status
+        catalog belongs to the Company, so a Branch has no Status key count."""
         resp = await client.get("/settings/branches", headers=auth(auth_token))
         assert resp.status_code == 200
         for branch in resp.json():
             assert "payroll_setup_done"    in branch
-            assert "status_keys_count"     in branch
+            assert "status_keys_count"     not in branch
             assert "total_people_count"    in branch
             assert "active_drivers_count"  in branch
             assert "pending_approvals_count" in branch

@@ -53,11 +53,11 @@ async def fetch_branch_metrics(
     db: AsyncConnection,
 ) -> dict[int, dict]:
     """
-    Resolve canonical Payroll Setup readiness for each branch and run four
+    Resolve canonical Payroll Setup readiness for each branch and run three
     operational metric queries against the given branch IDs.
 
     Each operational query is individually wrapped in try/except so a missing
-    table or failing index on one metric does not prevent the other three from
+    table or failing index on one metric does not prevent the other two from
     loading.
 
     Returns dict[branch_id → {metric_name: value}].  A missing key in the
@@ -80,25 +80,7 @@ async def fetch_branch_metrics(
         if ready:
             _put(branch_id, "payroll_setup_done", True)
 
-    # 2 — Active status-keys count.
-    try:
-        r = await db.execute(
-            text(f"""
-                SELECT branchid, COUNT(*) AS cnt
-                FROM   payroll.payrollstatuskeys
-                WHERE  companyid = :cid
-                  AND  isactive  = TRUE
-                  AND  branchid IN ({in_clause})
-                GROUP  BY branchid
-            """),
-            base,
-        )
-        for row in r.mappings().all():
-            _put(row["branchid"], "status_keys_count", int(row["cnt"]))
-    except Exception:
-        pass
-
-    # 3 — Total people count (core.employees, all employment types).
+    # 2 — Total people count (core.employees, all employment types).
     try:
         counts = await count_employee_branch_projections(company_id, branch_ids, db)
         for branch_id, count in counts.items():
@@ -106,7 +88,7 @@ async def fetch_branch_metrics(
     except Exception:
         pass
 
-    # 4 — Current active drivers. Status can change before a scheduled instant,
+    # 3 — Current active drivers. Status can change before a scheduled instant,
     # so the assignment function remains the current-identity authority.
     try:
         r = await db.execute(
@@ -131,7 +113,7 @@ async def fetch_branch_metrics(
     except Exception:
         pass
 
-    # 5 — Pending review-items count.
+    # 4 — Pending review-items count.
     try:
         r = await db.execute(
             text(f"""
@@ -183,7 +165,6 @@ def row_to_branch_admin(row, metrics: dict) -> BranchAdmin:
         created_at_utc=row["createdatutc"],
         updated_at_utc=row.get("updatedatutc"),
         payroll_setup_done=m.get("payroll_setup_done", False),
-        status_keys_count=m.get("status_keys_count"),
         total_people_count=m.get("total_people_count"),
         active_drivers_count=m.get("active_drivers_count"),
         pending_approvals_count=m.get("pending_approvals_count"),

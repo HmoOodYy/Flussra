@@ -20,7 +20,7 @@ from app.payroll_setup.locks import lock_company, lock_setups
 from app.payroll_setup.payroll_policy import assign_setup
 from app.payroll_setup.readiness import branch_schedule_readiness
 from app.payroll_setup.schemas import SetupResponse
-from app.settings import audit, branch_reads, security, status_rate_columns
+from app.settings import audit, branch_reads, security
 from app.settings.schemas import BranchAdmin, BranchCreate, BranchUpdate, OnboardingOptionsResponse
 
 
@@ -188,9 +188,6 @@ async def create_branch(
             "time_zone_id": data.time_zone_id,
         },
     )
-
-    # CP-2D2: every new branch gets a default Status Pay rate column automatically.
-    await status_rate_columns.ensure_default_status_rate_column_for_branch(company_id, new_id, db)
 
     if data.first_payroll_start_date is not None and default_setup_id is not None:
         await assign_setup(

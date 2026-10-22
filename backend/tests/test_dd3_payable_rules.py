@@ -38,8 +38,10 @@ from tests.payroll_runtime_fixtures import (
     query,
     rated_definition,
     seed_status_key,
+    seed_status_rate,
     set_employment,
     setup_anchor,
+    status_column_of,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -265,22 +267,10 @@ async def test_a_missing_rate_still_blocks_and_is_never_a_silent_zero(p3c_client
 
 def _status_pay_setup(tenant, rate: str) -> tuple[int, int]:
     """A paid (non-off) Status key worth one hour, its rate column, and the Driver's rate."""
-    (rate_type_id,) = query(tenant, "SELECT ratetypeid FROM payroll.ratetypes "
-                                    "WHERE ratecode = 'STATUS_PAY'")[0]
-    column_id = query(tenant, """
-        INSERT INTO payroll.statusratecolumns
-            (companyid, branchid, ratetypeid, columnname, normalizedcolumnname, isdefault, isactive)
-        VALUES (%s, %s, %s, %s, %s, TRUE, TRUE) RETURNING statusratecolumnid
-    """, (tenant.company_id, tenant.branch_a, rate_type_id, "Status pay", "STATUS PAY"))[0][0]
+    column_id, _, _ = status_column_of(tenant)
     key_id = seed_status_key(tenant, "PAID", off=False, hoursvalue=D("1"),
                              statusratecolumnid=column_id)
-    query(tenant, """
-        INSERT INTO payroll.driverrates
-            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status,
-             createdbyuserid, approvedbyuserid, approvedatutc)
-        VALUES (%s, %s, %s, %s, %s, DATE '2000-01-01', 'Approved', %s, %s, NOW())
-    """, (tenant.company_id, tenant.branch_a, tenant.driver_a, rate_type_id, D(rate),
-          tenant.owner, tenant.owner))
+    seed_status_rate(tenant, D(rate))
     return column_id, key_id
 
 

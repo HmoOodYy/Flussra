@@ -134,7 +134,7 @@ Cancel and reschedule may re-capture the named assignment's eligibility row, wit
 - **Ownership boundaries stay:**
   - PayDefinitions stay **company-owned**.
   - Branch applicability stays **branch-owned**. Whether a rate applies is decided by the period’s frozen definitions.
-  - Status rate columns stay **branch-owned**; P5 decides how a driver’s status values bind to them.
+  - Status rate columns stay **branch-owned** until P5a, which makes them Company-owned with Driver-owned values (see the Unified plan, P5a).
 - **Authority:** authoring and approval belong to the home Branch of the **assignment effective for the rate’s start-date context**, plus company-wide roles. A future permanent transfer that isn’t yet authoritative gives the target Branch no authority. History is read-only.
 - **Permanent transfers carry Driver-owned compensation over automatically.** The P6 copy design and the legacy copy route are retired.
 - **Temporary cross-branch work does not transfer compensation ownership and does not change the Min/Max home pay calendar.**
@@ -157,7 +157,7 @@ Cancel and reschedule may re-capture the named assignment's eligibility row, wit
 
 - A permanently transferred Driver’s rates and Min/Max continue with zero manual steps when the new home pay calendar matches.
 - Temporary cross-branch work leaves the Driver’s home Min/Max calendar unchanged.
-- Ordinary rate schedules and Min/Max are Driver-owned; legacy Status rates remain assignment-owned until P5.
+- Ordinary rate schedules and Min/Max are Driver-owned; legacy Status rates remain assignment-owned until P5a makes Status rate values Driver-owned as well.
 - One finalized guard protects every branch.
 - The copy route is gone.
 - A Min/Max rule whose recorded home pay calendar is incompatible with a payroll period blocks that period instead of being rescaled, dropped or duplicated (moved here from Stage 3, decision D6).
@@ -170,7 +170,7 @@ Recorded by the Lead on 2026-10-19 before implementation. They resolve the "impl
 
 - Ordinary rate schedules, their values and `DriverPayRule`s are owned by the permanent Driver (`DriverID`). `DriverAssignmentID` and `BranchID` are removed from those tables. These ordinary schedule/value and pay-rule tables have no foreign key to a `DriverAssignment`; legacy Status rates remain assignment-owned, and nothing is copied at transfer time.
 - PayDefinitions stay company-owned. Branch applicability stays Branch-owned and is decided at calculation, where a missing value still blocks and zero is still legitimate.
-- Status rates (legacy `payroll.DriverRates` / `DriverRateTiers`, the status `RateType` runtime) stay assignment-owned. They keep the Stage 1 ended-assignment guard and its trigger. Status-owned target RateDefinitions are not authorable in Stage 2.
+- Status rates (legacy `payroll.DriverRates` / `DriverRateTiers`, the status `RateType` runtime) stay assignment-owned. They keep the Stage 1 ended-assignment guard and its trigger. Status-owned target RateDefinitions are not authorable in Stage 2; P5a makes them authorable as Driver schedules.
 - Temporary cross-branch work changes nothing here and is not built.
 - Payroll history and provenance (drafts, eligibility, bonus events, snapshots, final lines, evidence) stay on `DriverAssignmentID`; ordinary compensation ownership moves to `DriverID`. Each former use is classified by business meaning, never renamed mechanically.
 

@@ -199,10 +199,16 @@ export interface ScheduleBrief {
   amount: string | null;
 }
 
+/** What owns a rate definition: a PayDefinition, or a Company Status rate column. */
+export type RateOwnerKind = 'PayDefinition' | 'StatusRateColumn';
+
 /** One rate definition the Driver has schedules for, whatever its PayDefinition's status. */
 export interface DriverRateSummaryItem {
   rate_definition_id: number;
+  kind: RateOwnerKind;
   pay_definition_id: number | null;
+  status_rate_column_id: number | null;
+  status_rate_column_name: string | null;
   definition_code: string | null;
   definition_name: string | null;
   unit: string | null;
@@ -213,9 +219,16 @@ export interface DriverRateSummaryItem {
   pending_schedule_id: number | null;
 }
 
+/**
+ * One authorable rate of a Driver: a PayDefinition, or a Company Status rate column (a Status
+ * is paid hours x this rate; it has no code, no Branch applicability and a fixed hourly unit).
+ */
 export interface DriverPayRateRow {
-  pay_definition_id: number;
-  definition_code: string;
+  kind: RateOwnerKind;
+  pay_definition_id: number | null;
+  status_rate_column_id: number | null;
+  status_rate_column_name: string | null;
+  definition_code: string | null;
   definition_name: string;
   input_type: PayDefinitionInputType;
   unit: string | null;
@@ -257,7 +270,9 @@ export interface ScheduleSummary {
   driver_rate_schedule_id: number;
   company_id: number;
   driver_id: number;
-  pay_definition_id: number;
+  /** Null for a Status rate column schedule. */
+  pay_definition_id: number | null;
+  status_rate_column_id: number | null;
   rate_definition_id: number;
   effective_from: string;
   effective_to: string | null;

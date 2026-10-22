@@ -24,38 +24,57 @@ _SQL_DIR = Path(__file__).resolve().parents[2] / "migrations" / "sql"
 TIERS = [(1, 1), (2, 2), (3, None)]
 
 
-@pytest.fixture(scope="session", name="p3b_dsn")
+def _run_on_cluster(dsn: dict[str, Any], statement: sql.Composable) -> None:
+    """One statement on a short-lived autocommit connection that is always closed."""
+    admin = psycopg2.connect(client_encoding="utf-8", **dsn)
+    try:
+        admin.autocommit = True
+        with admin.cursor() as cur:
+            cur.execute(statement)
+    finally:
+        admin.close()
+
+
+def _bootstrap_schema(target: dict[str, Any]) -> None:
+    bootstrap = psycopg2.connect(client_encoding="utf-8", **target)
+    try:
+        bootstrap.autocommit = True
+        with bootstrap.cursor() as cur:
+            for path in sorted(_SQL_DIR.glob("*.sql")):
+                cur.execute(path.read_text(encoding="utf-8"))
+            cur.execute("""
+                INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended)
+                VALUES ('P3BUSERCO', 'P3b users', 'P3b users', 'Active', FALSE)
+                RETURNING companyid
+            """)
+            cur.execute("""
+                INSERT INTO sec.users (companyid, username, displayname)
+                VALUES (%s, 'p3b_user', 'P3b User')
+            """, (cur.fetchone()[0],))
+    finally:
+        bootstrap.close()
+
+
+# Module scope is the lifetime this fixture has always had in effect: every test module imports
+# it, and pytest registers an imported fixture once per importing module, so each module gets its
+# own database whatever scope is declared. Declared "session", each of those per-module instances
+# (a database, an administrative connection and, for the engine fixtures built on it, a pool)
+# stayed alive until the process ended, so the live PostgreSQL backends grew with every module and
+# a full run reached the server's connection limit. At module scope an instance is torn down, and
+# its database dropped, when its module is done. No connection is held for its own sake: the
+# administrative connections that create and drop the database are opened only for that.
+@pytest.fixture(scope="module", name="p3b_dsn")
 def p3b_database(pg_instance):
     dsn = pg_instance.dsn()
     name = "p3b_" + uuid4().hex[:12]
-    admin = psycopg2.connect(client_encoding="utf-8", **dsn)
-    admin.autocommit = True
-    with admin.cursor() as cur:
-        cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    _run_on_cluster(dsn, sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     target = {**dsn, "database": name}
-    bootstrap = psycopg2.connect(client_encoding="utf-8", **target)
-    bootstrap.autocommit = True
-    with bootstrap.cursor() as cur:
-        for path in sorted(_SQL_DIR.glob("*.sql")):
-            cur.execute(path.read_text(encoding="utf-8"))
-        cur.execute("""
-            INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended)
-            VALUES ('P3BUSERCO', 'P3b users', 'P3b users', 'Active', FALSE)
-            RETURNING companyid
-        """)
-        cur.execute("""
-            INSERT INTO sec.users (companyid, username, displayname)
-            VALUES (%s, 'p3b_user', 'P3b User')
-        """, (cur.fetchone()[0],))
-    bootstrap.close()
     try:
+        _bootstrap_schema(target)
         yield target
     finally:
-        with admin.cursor() as cur:
-            cur.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
-            )
-        admin.close()
+        _run_on_cluster(
+            dsn, sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
 
 
 @pytest.fixture(name="cur")
@@ -92,7 +111,10 @@ def make_company(cur, currency: str | None = "USD") -> int:
                                 currencycode)
         VALUES (%s, %s, %s, 'Active', FALSE, %s) RETURNING companyid
     """, (code, code, code, currency))
-    return cur.fetchone()[0]
+    company_id = cur.fetchone()[0]
+    # A Company starts with its default Status rate column and the rate definition it owns.
+    cur.execute("SELECT payroll.fn_EnsureDefaultStatusRateColumn(%s)", (company_id,))
+    return company_id
 
 
 def make_branch(cur, company_id: int, *, is_default: bool = False) -> int:

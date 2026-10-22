@@ -11,7 +11,6 @@ from app.payroll.schemas import (
     finalized,
     pay_rules,
     periods,
-    rates,
     reporting,
 )
 
@@ -20,7 +19,6 @@ def test_schema_facade_preserves_owner_identity_and_legacy_pickle_names():
     owned_models = (
         (periods, "PeriodSummary"),
         (entry, "DraftLineCreate"),
-        (rates, "DriverRateCreate"),
         (bonus, "BonusEventCreate"),
         (pay_rules, "DriverPayRuleCreate"),
         (calculation, "FinalizationPreviewResponse"),

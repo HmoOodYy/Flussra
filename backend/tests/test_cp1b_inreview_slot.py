@@ -17,7 +17,6 @@ Dates: 2094-* — isolated year.  Run from backend/:
 """
 import datetime
 import itertools
-import uuid
 
 import psycopg2
 import pytest
@@ -119,105 +118,6 @@ async def _reject_to_returned(client, token, ri_id) -> None:
     assert dec.status_code == 200, f"reject: {dec.text}"
 
 
-async def _create_cp1b_driver(client, token: str, branch_id: int) -> int:
-    """
-    Create a CP-1B-owned driver on the given branch; return its driver_assignment_id.
-
-    TestDeterministicConcurrency seeds an approved HOURLY rate for its driver.
-    Doing that on the session-scoped paytest_driver_assignment_id leaked a future-dated
-    Approved rate into later tests (e.g. backdated approvals then hit the
-    future-approved-rate conflict guard), so the rate-dependent scenarios use
-    their own driver instead.
-    """
-    r = await client.post(
-        "/core/drivers",
-        json={"branch_id": branch_id, "full_name": f"CP1B Driver {uuid.uuid4().hex[:8]}"},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, f"create CP-1B driver: {r.text}"
-    return r.json()["driver_assignment_id"]
-
-
-async def _ensure_hourly_rate(
-    session_client, auth_token: str, driver_assignment_id: int, direct_db
-) -> None:
-    """
-    Ensure an approved HOURLY rate (25.00/hr, effective only through 2094) exists for driver.
-    Idempotent: skips seeding if a suitable approved rate already exists.
-    """
-    existing = (await direct_db.execute(
-        _text("""
-            SELECT 1 FROM payroll.driverrates dr
-            JOIN payroll.ratetypes rt ON rt.ratetypeid = dr.ratetypeid
-            WHERE dr.driverassignmentid = :did
-              AND rt.ratecode = 'HOURLY'
-              AND dr.status = 'Approved'
-              AND dr.effectivefrom <= '2094-12-31'
-              AND (dr.effectiveto IS NULL OR dr.effectiveto >= '2094-01-01')
-            LIMIT 1
-        """),
-        {"did": driver_assignment_id},
-    )).first()
-    if existing is not None:
-        return
-
-    rt_resp = await session_client.get("/payroll/rate-types", headers=_auth(auth_token))
-    assert rt_resp.status_code == 200, rt_resp.text
-    hourly_rt = next(
-        (rt for rt in rt_resp.json() if rt["rate_code"] == "HOURLY"), None
-    )
-    if hourly_rt is None:
-        pytest.skip("HOURLY rate type not found; cannot prove calculation-refresh rollback")
-
-    rate_resp = await session_client.post(
-        "/payroll/rates",
-        json={
-            "driver_assignment_id": driver_assignment_id,
-            "rate_type_id": hourly_rt["rate_type_id"],
-            "amount": "25.00",
-            "effective_from": "2094-01-01",
-            "effective_to": "2094-12-31",
-        },
-        headers=_auth(auth_token),
-    )
-    if rate_resp.status_code != 201:
-        pytest.skip(f"Cannot seed HOURLY rate ({rate_resp.status_code}): {rate_resp.text}")
-    driver_rate_id = rate_resp.json()["driver_rate_id"]
-
-    approve_resp = await session_client.post(
-        f"/payroll/rates/{driver_rate_id}/approve",
-        headers=_auth(auth_token),
-    )
-    assert approve_resp.status_code == 200, f"approve HOURLY rate: {approve_resp.text}"
-
-
-async def _add_hours_line(
-    client, token: str, pid: int, driver_assignment_id: int, work_date: str
-) -> int:
-    """Add an HOURS (PerUnit, rate-dependent) draft line. Returns draft_line_id."""
-    r = await client.post(
-        f"/payroll/periods/{pid}/lines",
-        json={"driver_assignment_id": driver_assignment_id, "work_date": work_date,
-              "line_type": "HOURS", "quantity": 8},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, f"add HOURS line to period {pid}: {r.text}"
-    return r.json()["draft_line_id"]
-
-
-async def _stale_calc(direct_db, line_id: int) -> None:
-    """Set calculatedamount=0.01, needsmanagerreview=FALSE as sentinel for rollback proof."""
-    await direct_db.execute(
-        _text(
-            "UPDATE payroll.payrolldraftlines "
-            "SET calculatedamount = 0.01, needsmanagerreview = FALSE "
-            "WHERE draftlineid = :lid"
-        ),
-        {"lid": line_id},
-    )
-    await direct_db.commit()
-
-
 # ---------------------------------------------------------------------------
 # 1. Migration / index metadata
 # ---------------------------------------------------------------------------
@@ -251,8 +151,8 @@ class TestMigration:
             f"Expected exactly one alembic head (linear chain), got {len(lines)}: "
             f"{result.stdout}\n{result.stderr}"
         )
-        assert "0089" in lines[0], (
-            f"Expected head 0089, got: {lines[0]}\n{result.stderr}"
+        assert "0090" in lines[0], (
+            f"Expected head 0090, got: {lines[0]}\n{result.stderr}"
         )
 
     @pytest.mark.asyncio

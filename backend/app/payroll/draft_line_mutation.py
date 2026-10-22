@@ -44,6 +44,7 @@ from app.payroll.schemas import (
 )
 from app.payroll.source_evidence import _capture_source_evidence
 from app.payroll.source_line_read import _get_line_by_id
+from app.payroll.status_work_conflict import assert_no_off_status_with_work
 
 
 def _ordinary_lines_only() -> HTTPException:
@@ -108,8 +109,14 @@ async def add_draft_line(
     user_id: int,
     data: DraftLineCreate,
     db: AsyncConnection,
+    *,
+    enforce_status_conflict: bool = True,
 ) -> DraftLineSummary:
-    """Insert one ordinary source row against a period definition."""
+    """Insert one ordinary source row against a period definition.
+
+    ``enforce_status_conflict`` is cleared only by Day Grid, which validates the final merged
+    Status and quantities of the whole batch itself under the same Period lock.
+    """
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     # Draft (Prepared) and the editable statuses accept operational source entry.
@@ -144,6 +151,10 @@ async def add_draft_line(
         company_id, period.branch_id, period_id, data.driver_assignment_id, data.work_date, db,
         allow_existing_source_rescue=False,
     )
+
+    if enforce_status_conflict and data.quantity > 0:
+        await assert_no_off_status_with_work(
+            period_id, company_id, data.driver_assignment_id, data.work_date, db)
 
     duplicate = await db.execute(
         text("""
@@ -216,8 +227,13 @@ async def update_draft_line(
     user_id: int,
     data: DraftLineUpdate,
     db: AsyncConnection,
+    *,
+    enforce_status_conflict: bool = True,
 ) -> DraftLineSummary:
-    """Partially update an ordinary source row — only supplied fields are touched."""
+    """Partially update an ordinary source row — only supplied fields are touched.
+
+    ``enforce_status_conflict`` is cleared only by Day Grid (see ``add_draft_line``).
+    """
     period = await get_period_by_id(company_id, user_id, period_id, db)
 
     if period.status != "Draft" and period.status in _WRITE_BLOCKED_STATUSES:
@@ -264,6 +280,12 @@ async def update_draft_line(
         await _assert_driver_eligible_for_workdate_via_snapshot(
             company_id, period.branch_id, period_id, line.driver_assignment_id, line.work_date, db,
         )
+    if fields and enforce_status_conflict:
+        final_quantity = fields.get("quantity", line.quantity)
+        final_status = fields.get("status", line.status)
+        if final_status != "Void" and final_quantity is not None and Decimal(str(final_quantity)) > 0:
+            await assert_no_off_status_with_work(
+                period_id, company_id, line.driver_assignment_id, line.work_date, db)
     if fields:
         set_clause = ", ".join(f"{col} = :{col}" for col in fields)
         await db.execute(

@@ -1,14 +1,12 @@
-"""Legacy PayDefinition, CDPI and ordinary PerUnit rate authorities are closed.
+"""Legacy PayDefinition, CDPI, ordinary PerUnit and assignment-owned rate authorities are gone.
 
-Status pay still uses the temporary Status-only rate path until Status
-compensation is cut over; these tests pin both sides of that boundary.
+Every rate is a Driver-owned schedule: ordinary rates target a PayDefinition and Status rates
+target a Company Status rate column. These tests pin that no assignment-level rate route is
+mounted any more and that ordinary authoring stays on the compensation path.
 """
 from __future__ import annotations
 
-from uuid import uuid4
-
 import pytest
-from sqlalchemy import text
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -43,64 +41,31 @@ async def test_legacy_definition_and_configuration_writers_are_not_mounted(
     assert response.status_code == 404, (method, path, response.status_code, response.text)
 
 
-async def _status_rate_column(session_client, token: str, branch_id: int) -> dict:
-    """Create a Status rate column for the Branch (the Status-only RateType owner)."""
-    created = await session_client.post(
-        f"/settings/branches/{branch_id}/status-rate-columns", headers=_auth(token),
-        json={"column_name": f"P4A {uuid4().hex[:8]}"})
-    assert created.status_code in (200, 201), created.text
-    return created.json()
+RETIRED_RATE_ROUTES = [
+    ("post", "/payroll/rates"),
+    ("get", "/payroll/rates"),
+    ("get", "/payroll/rates/1"),
+    ("patch", "/payroll/rates/1"),
+    ("post", "/payroll/rates/1/approve"),
+    ("delete", "/payroll/rates/1"),
+    ("post", "/payroll/driver-assignments/1/rates/batch"),
+    ("get", "/payroll/driver-assignments/1/rates"),
+    ("get", "/payroll/driver-assignments/1/rate-matrix"),
+    ("post", "/payroll/driver-assignments/1/rates/copy-from/2"),
+]
 
 
-async def test_ordinary_legacy_rate_writers_are_closed(
-    session_client, auth_token, paytest_rate_type_id, created_driver_assignment_id, direct_db,
+@pytest.mark.parametrize("method,path", RETIRED_RATE_ROUTES)
+async def test_assignment_owned_rate_routes_are_not_mounted(
+    session_client, auth_token, method, path,
 ):
-    headers = _auth(auth_token)
-    create = await session_client.post("/payroll/rates", headers=headers, json={
-        "driver_assignment_id": created_driver_assignment_id, "rate_type_id": paytest_rate_type_id,
-        "amount": "10", "effective_from": "2088-01-01"})
-    assert create.status_code == 409, create.text
-    assert create.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
-
-    batch = await session_client.post(
-        f"/payroll/driver-assignments/{created_driver_assignment_id}/rates/batch", headers=headers,
-        json={"effective_from": "2088-01-01",
-              "changes": [{"pay_item_id": 1, "rate_type_id": paytest_rate_type_id, "amount": "5"}]})
-    assert batch.status_code == 409, batch.text
-    assert batch.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
-
-    # A pre-existing ordinary Pending rate cannot be edited, approved or voided either.
-    branch_id = (await direct_db.execute(
-        text("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :d"),
-        {"d": created_driver_assignment_id})).scalar_one()
-    rate_id = (await direct_db.execute(text("""
-        INSERT INTO payroll.driverrates
-            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status)
-        VALUES (1, :b, :d, :r, 3, DATE '2088-02-01', 'PendingApproval') RETURNING driverrateid
-    """), {"b": branch_id, "d": created_driver_assignment_id, "r": paytest_rate_type_id})).scalar_one()
-    try:
-        for call in (
-            session_client.patch(f"/payroll/rates/{rate_id}", headers=headers, json={"amount": "4"}),
-            session_client.post(f"/payroll/rates/{rate_id}/approve", headers=headers),
-            session_client.delete(f"/payroll/rates/{rate_id}", headers=headers),
-        ):
-            response = await call
-            assert response.status_code == 409, response.text
-            assert response.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
-        status = (await direct_db.execute(
-            text("SELECT status FROM payroll.driverrates WHERE driverrateid = :r"),
-            {"r": rate_id})).scalar_one()
-        assert status == "PendingApproval"
-    finally:
-        await direct_db.execute(text("DELETE FROM payroll.driverrates WHERE driverrateid = :r"),
-                                {"r": rate_id})
+    response = await session_client.request(
+        method.upper(), path, headers=_auth(auth_token),
+        json={} if method in ("post", "patch") else None)
+    assert response.status_code in (404, 405), (method, path, response.status_code, response.text)
 
 
-async def test_the_rate_copy_route_no_longer_exists(
-    session_client, auth_token, created_driver_assignment_id,
-):
-    """Compensation follows the Driver, so there is nothing to copy at transfer time and the
-    legacy copy-from route is gone (not refused: absent)."""
+async def test_no_mounted_route_names_assignment_rates():
     from app.main import create_app
 
     mounted = set()
@@ -113,88 +78,8 @@ async def test_the_rate_copy_route_no_longer_exists(
                 walk(route.original_router, prefix + route.include_context.prefix)
 
     walk(create_app().router)
-    assert not [r for r in mounted if "copy-from" in r]
-
-    response = await session_client.post(
-        f"/payroll/driver-assignments/{created_driver_assignment_id}/rates/copy-from/{created_driver_assignment_id}",
-        headers=_auth(auth_token), json={"effective_from": "2088-01-01"})
-    assert response.status_code in (404, 405), response.text
-
-
-async def test_rate_matrix_exposes_only_status_rate_columns(
-    session_client, auth_token, created_driver_assignment_id, direct_db,
-):
-    branch_id = (await direct_db.execute(
-        text("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :d"),
-        {"d": created_driver_assignment_id})).scalar_one()
-    await _status_rate_column(session_client, auth_token, branch_id)
-    response = await session_client.get(
-        f"/payroll/driver-assignments/{created_driver_assignment_id}/rate-matrix", headers=_auth(auth_token))
-    assert response.status_code == 200, response.text
-    groups = response.json()["groups"]
-    assert groups, "the Branch has a default Status rate column"
-    assert {g["rate_source"] for g in groups} == {"StatusRateColumn"}
-    assert all(g["pay_item_id"] is None for g in groups)
-
-
-async def test_status_pay_rates_still_use_the_temporary_status_only_path(
-    session_client, auth_token, created_driver_assignment_id, direct_db,
-):
-    headers = _auth(auth_token)
-    branch_id = (await direct_db.execute(
-        text("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :d"),
-        {"d": created_driver_assignment_id})).scalar_one()
-    rate_type_id = (await _status_rate_column(session_client, auth_token, branch_id))["rate_type_id"]
-
-    created = await session_client.post("/payroll/rates", headers=headers, json={
-        "driver_assignment_id": created_driver_assignment_id, "rate_type_id": rate_type_id,
-        "amount": "12.5", "effective_from": "2088-03-01"})
-    assert created.status_code == 201, created.text
-    rate_id = created.json()["driver_rate_id"]
-    approved = await session_client.post(f"/payroll/rates/{rate_id}/approve", headers=headers)
-    assert approved.status_code == 200, approved.text
-    voided = await session_client.delete(f"/payroll/rates/{rate_id}", headers=headers)
-    assert voided.status_code in (200, 204), voided.text
-
-
-async def test_status_owned_rate_type_cannot_carry_a_pay_item_change_through_batch(
-    session_client, auth_token, created_driver_assignment_id, direct_db,
-):
-    """A real Status-column RateType must not open the retired PayItem batch branch."""
-    headers = _auth(auth_token)
-    branch_id = (await direct_db.execute(
-        text("SELECT branchid FROM core.driverassignments WHERE driverassignmentid = :d"),
-        {"d": created_driver_assignment_id})).scalar_one()
-    rate_type_id = (await _status_rate_column(session_client, auth_token, branch_id))["rate_type_id"]
-    pay_item_id = (await direct_db.execute(text("""
-        SELECT pi.payitemid
-        FROM   payroll.payitems pi
-        JOIN   payroll.payitemratetypemap m ON m.payitemid = pi.payitemid AND m.status = 'Active'
-        WHERE  pi.requiresrate AND pi.status <> 'Retired' AND pi.companyid IS NULL
-        LIMIT 1
-    """))).scalar_one()
-    # Make the pair look valid to the old PayItem validation: map the Status RateType.
-    await direct_db.execute(text("""
-        INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, isprimary, status)
-        VALUES (:p, :r, FALSE, 'Active') ON CONFLICT DO NOTHING
-    """), {"p": pay_item_id, "r": rate_type_id})
-    try:
-        response = await session_client.post(
-            f"/payroll/driver-assignments/{created_driver_assignment_id}/rates/batch", headers=headers,
-            json={"effective_from": "2088-04-01",
-                  "changes": [{"pay_item_id": pay_item_id, "rate_type_id": rate_type_id,
-                               "amount": "7"}]})
-        assert response.status_code == 409, response.text
-        assert response.json()["detail"]["code"] == "ORDINARY_RATE_AUTHORING_RETIRED"
-        written = (await direct_db.execute(text("""
-            SELECT count(*) FROM payroll.driverrates
-            WHERE driverassignmentid = :d AND ratetypeid = :r
-        """), {"d": created_driver_assignment_id, "r": rate_type_id})).scalar_one()
-        assert written == 0
-    finally:
-        await direct_db.execute(text(
-            "DELETE FROM payroll.payitemratetypemap WHERE payitemid = :p AND ratetypeid = :r"),
-            {"p": pay_item_id, "r": rate_type_id})
+    assert not [r for r in mounted if "copy-from" in r or "/payroll/rates" in r
+                or "/rate-matrix" in r or ("driver-assignments" in r and "/rates" in r)]
 
 
 async def test_ordinary_authoring_still_works_on_the_target_path(
@@ -211,4 +96,5 @@ async def test_ordinary_authoring_still_works_on_the_target_path(
     assert configured.status_code == 200, configured.text
     rows = await session_client.get(
         f"/compensation/drivers/{created_driver_id}/pay-rates", headers=headers)
-    assert body["pay_definition_id"] in {r["pay_definition_id"] for r in rows.json()}
+    ordinary = [r for r in rows.json() if r["kind"] == "PayDefinition"]
+    assert body["pay_definition_id"] in {r["pay_definition_id"] for r in ordinary}

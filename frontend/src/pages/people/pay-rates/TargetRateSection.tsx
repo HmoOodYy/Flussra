@@ -1,9 +1,15 @@
+import type { ReactNode } from 'react';
 import type { DriverPayRateRow } from '../../../types/compensation';
 import { fmtAmount } from './payRatesView';
 import { applicabilityFlag } from './payRatesDrivers';
 import styles from './PayRatesPage.module.css';
 
 type TargetRateSectionProps = {
+  title: string;
+  /** The first column's header: what each row is. */
+  rowHeader: string;
+  note?: string;
+  empty: ReactNode;
   rows: DriverPayRateRow[];
   canEditMatrix: boolean;
   referenceDate: string | undefined;
@@ -18,13 +24,14 @@ type TargetRateSectionProps = {
   startTargetEdit: (row: DriverPayRateRow) => void;
 };
 
-export function TargetRateSection({ rows, canEditMatrix, referenceDate, currencyCode, currencyDigits, targetDrafts, targetErrors, targetSavingId, setTargetField, saveTargetRow, cancelTargetEdit, startTargetEdit }: TargetRateSectionProps) {
+export function TargetRateSection({ title, rowHeader, note, empty, rows, canEditMatrix, referenceDate, currencyCode, currencyDigits, targetDrafts, targetErrors, targetSavingId, setTargetField, saveTargetRow, cancelTargetEdit, startTargetEdit }: TargetRateSectionProps) {
   return (
     <div className={styles.section}>
-      <div className={styles.sectionHead}><span className={styles.sectionTitle}>Pay Item Rates</span></div>
+      <div className={styles.sectionHead}><span className={styles.sectionTitle}>{title}</span></div>
+      {note && <div className={styles.statusPaneNote}>{note}</div>}
       {rows.length > 0 ? (
         <table className={styles.rateTable}>
-          <thead><tr><th>Pay Item</th><th>Amount</th><th>Effective From</th><th>Status</th>{canEditMatrix && <th>Actions</th>}</tr></thead>
+          <thead><tr><th>{rowHeader}</th><th>Amount</th><th>Effective From</th><th>Status</th>{canEditMatrix && <th>Actions</th>}</tr></thead>
           <tbody>
             {rows.map((row) => {
               const id = row.rate_definition_id;
@@ -35,7 +42,7 @@ export function TargetRateSection({ rows, canEditMatrix, referenceDate, currency
                 <tr key={id}>
                   <td>
                     <strong>{row.definition_name}</strong>
-                    <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{row.definition_code}</div>
+                    {row.definition_code && <div style={{ fontSize: '0.74rem', color: '#6b7280' }}>{row.definition_code}</div>}
                     {applicabilityFlag(row) && <div className={styles.notApplicableFlag}>{applicabilityFlag(row)}</div>}
                     {row.future && <div style={{ fontSize: '0.72rem', color: '#d97706', marginTop: '2px' }}>Next: {fmtAmount(row.future.amount, row.unit, currencyCode, currencyDigits)} from {row.future.effective_from}</div>}
                     {targetErrors[id] && <div className={styles.actionErr} style={{ marginTop: '0.35rem' }}>{targetErrors[id]}</div>}
@@ -64,10 +71,7 @@ export function TargetRateSection({ rows, canEditMatrix, referenceDate, currency
           </tbody>
         </table>
       ) : (
-        <div className={styles.emptySection}>
-          <p>No pay items are available to rate yet.</p>
-          <p className={styles.emptySectionHint}>Pay items are created and activated per branch under <strong>Settings &gt; Pay Items</strong>.</p>
-        </div>
+        <div className={styles.emptySection}>{empty}</div>
       )}
     </div>
   );

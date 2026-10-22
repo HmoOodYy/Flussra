@@ -10,8 +10,8 @@ Owns one REST resource end to end, GET and POST on
   - save_day_grid      batch write orchestrator: validates the whole payload before
                        any DML (all-or-nothing), then acquires locks, drives source-line
                        mutation, writes its own DailyStatus/DailyNote rows, upserts
-                       canonical entry state, syncs Status Payment, and returns
-                       get_day_grid's refreshed response.
+                       canonical entry state, and returns get_day_grid's refreshed
+                       response.
   - _parse_quantity    save-payload quantity parser; raises 422 before any DB write so
                        the batch stays atomic.
 
@@ -46,7 +46,7 @@ from app.payroll import status_evidence
 from app.payroll.day_entry_state import (
     _enforce_status_key_limits,
     _upsert_entry_state,
-    _validate_status_key,
+    lock_selected_status_keys,
 )
 from app.payroll.definition_calculation import is_method_operational, quantity_error
 from app.payroll.draft_line_mutation import (
@@ -81,7 +81,8 @@ from app.payroll.schemas import (
     DraftLineCreate,
     DraftLineUpdate,
 )
-from app.payroll.status_payment_sync import _sync_status_payment_for_entry_state
+from app.payroll.status_work_conflict import FinalDayState, assert_no_off_status_work_conflicts
+from app.settings.status_keys import get_status_by_id, resolve_status_input
 
 # ===========================================================================
 # CP-1 — Day Grid
@@ -128,7 +129,7 @@ async def get_day_grid(
       - period.start_date otherwise
 
     - Columns: active Daily-scope pay items for the branch.
-    - Status keys: active PayrollStatusKeys for the branch.
+    - Status keys: the Company's active Statuses (names and aliases), shared by every Branch.
     - Rows: all eligible active drivers; populated with existing draft lines.
     """
     await require_non_driver_subject(company_id, user_id, db)
@@ -171,17 +172,19 @@ async def get_day_grid(
         for d in period_definitions
     ]
 
-    # ── Load status keys for the branch ──────────────────────────────────── #
+    # ── Load the Company's active Statuses (one catalog for every Branch) ── #
     sk_result = await db.execute(
         text("""
-            SELECT statuskeyid, statuscode, keyname, isoffreason, hoursvalue
-            FROM   payroll.payrollstatuskeys
+            SELECT statuskeyid, statuscode, keyname, isoffreason, hoursvalue,
+                   COALESCE((SELECT array_agg(a.aliastext ORDER BY a.statuskeyaliasid)
+                             FROM payroll.payrollstatuskeyaliases a
+                             WHERE a.statuskeyid = k.statuskeyid), ARRAY[]::varchar[]) AS aliases
+            FROM   payroll.payrollstatuskeys k
             WHERE  companyid = :cid
-              AND  branchid  = :bid
               AND  isactive  = TRUE
             ORDER BY displayorder, keyname
         """),
-        {"cid": company_id, "bid": branch_id},
+        {"cid": company_id},
     )
     status_keys: list[DayGridStatusKey] = []
     status_key_map: dict[str, DayGridStatusKey] = {}  # statuscode -> key
@@ -192,6 +195,7 @@ async def get_day_grid(
             label=row["keyname"] or row["statuscode"],
             is_off_reason=bool(row["isoffreason"]),
             hours_value=row["hoursvalue"],
+            aliases=list(row["aliases"]),
         )
         status_keys.append(sk)
         status_key_map[row["statuscode"]] = sk
@@ -405,6 +409,7 @@ async def get_day_grid(
 
         values: dict[str, DayGridLineValue] = {}
         status_key_code: str | None = None
+        status_key_id_held: int | None = None
         notes_text: str | None = None
         sk_label: str | None = None
         is_off: bool = False
@@ -430,12 +435,14 @@ async def get_day_grid(
                     if sk_id is not None:
                         live_sk = status_key_id_map.get(sk_id)
                         if live_sk is not None:
+                            status_key_id_held = sk_id
                             status_key_code = live_sk.key_code
                             sk_label = live_sk.label
                             is_off = bool(live_sk.is_off_reason)
                         else:
                             dk = deactivated_key_map.get(sk_id)
                             if dk:
+                                status_key_id_held = sk_id
                                 status_key_code = dk["statuscode"]
                                 sk_label = dk["keyname"]
                                 is_off = bool(dk["isoffreason"])
@@ -537,6 +544,7 @@ async def get_day_grid(
             driver_id=drv["permanentdriverid"],
             driver_name=drv["drivername"],
             driver_number=drv.get("drivernumber"),
+            status_key_id=status_key_id_held,
             status_key=status_key_code,
             status_label=sk_label,
             is_off=is_off,
@@ -630,7 +638,7 @@ async def save_day_grid(
     # ── Permission: payroll.entry ─────────────────────────────────────────── #
     await check_permission(company_id, user_id, period.branch_id, "payroll.entry", db)
 
-    currency = await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
+    await lock_and_get_company_currency_for_monetary_write(company_id, db, required=False)
     branch_id = period.branch_id
 
     # ── Active definitions: the only identities a save may name ──────────── #
@@ -699,33 +707,41 @@ async def save_day_grid(
                         status_code=422, detail=f"{definition.name}: {problem}")
             parsed_values[definition.payroll_period_definition_id] = quantity
 
-        # P1 #3: validate status key — raises 422 for invalid/inactive.
-        # Returns the full key row (with limit fields) or None when clearing.
-        # CP-2D1: if the submitted code matches the existing DraftLine value,
-        # the user is not changing the status — allow saves of deactivated keys
-        # that were applied before the key was deactivated.
-        allow_deactivated = False
-        if save_row.status_key:
-            existing_sk_q = await db.execute(
+        # The Status of the row is either a canonical identity (`status_key_id`: the Status the
+        # row already holds, used as is) or newly typed text (`status_key`: a name, an alias or
+        # a code, resolved Company-wide to exactly one Status). Keeping a held Status and
+        # choosing one by text are different operations: an unrelated edit of the row, such as
+        # its note, must never re-read the held Status as free text, where another Status's
+        # alias could take the day over. Any resolution failure rejects the whole batch before
+        # a write (422). Re-saving the held Status is allowed even when it was deactivated since.
+        key_row = None
+        has_status_id = save_row.status_key_id is not None
+        has_status_text = bool(save_row.status_key and save_row.status_key.strip())
+        if has_status_id or has_status_text:
+            held_key_id = (await db.execute(
                 text("""
-                    SELECT notes FROM payroll.payrolldraftlines
-                    WHERE  payrollperiodid = :pid AND workdate = :dt AND driverassignmentid = :did
-                      AND  linetype = 'DailyStatus' AND status != 'Void'
-                    LIMIT 1
+                    SELECT statuskeyid FROM payroll.payrollperioddriverdayentrystate
+                    WHERE  payrollperiodid = :pid AND workdate = :dt
+                      AND  driverassignmentid = :did AND isvoided = FALSE
                 """),
                 {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
-            )
-            existing_sk_row = existing_sk_q.mappings().first()
-            if (
-                existing_sk_row is not None
-                and existing_sk_row["notes"] == save_row.status_key.strip()
-            ):
-                allow_deactivated = True
-        key_row = await _validate_status_key(
-            save_row.status_key, company_id, branch_id, db,
-            allow_deactivated=allow_deactivated,
-        )
-        validated_status_key = save_row.status_key  # None/blank = clear
+            )).scalar_one_or_none()
+            if has_status_id:
+                key_row = await get_status_by_id(
+                    company_id, save_row.status_key_id, db, held_key_id=held_key_id)
+            else:
+                try:
+                    key_row = await resolve_status_input(
+                        company_id, save_row.status_key, db, held_key_id=held_key_id)
+                except HTTPException:
+                    if held_key_id is None:
+                        raise
+                    key_row = await resolve_status_input(
+                        company_id, save_row.status_key, db,
+                        allow_deactivated=True, key_id=held_key_id,
+                    )
+        # The legacy DailyStatus duplicate row carries the canonical technical code.
+        validated_status_key = key_row["statuscode"] if key_row is not None else None
 
         parsed_rows.append((save_row, driver_assignment_id, parsed_values, validated_status_key, key_row))
 
@@ -744,6 +760,33 @@ async def save_day_grid(
     for save_row in data.rows:
         await _assert_row_eligible(save_row.driver_assignment_id)
 
+    # The Statuses this batch selects are locked FOR SHARE until the transaction ends, so a
+    # concurrent catalog edit of their hours, off-day semantic, Category or rate column either
+    # committed before this save (and is seen) or waits and is then refused as in use. A Status
+    # deactivated since it was resolved cannot be newly selected.
+    await lock_selected_status_keys(
+        [(row["statuskeyid"], bool(row["isactive"])) for _, _, _, _, row in parsed_rows
+         if row is not None],
+        company_id, db,
+    )
+
+    # ── Full-day-off integrity (under the Period lock) ──────────────────── #
+    # The final state of every row of the batch (its resolved Status and the ordinary
+    # quantities left after the save) must not combine a full-day-off Status with ordinary
+    # work. A whole batch with one such row is refused before any write.
+    await assert_no_off_status_work_conflicts(
+        period_id=period_id, company_id=company_id, work_date=work_date,
+        rows=[
+            FinalDayState(
+                driver_assignment_id=driver_assignment_id,
+                status_is_off=bool(key_row["isoffreason"]) if key_row is not None else False,
+                quantities=parsed_values,
+            )
+            for _, driver_assignment_id, parsed_values, _, key_row in parsed_rows
+        ],
+        db=db,
+    )
+
     # ── Status key usage limit enforcement (under the Period lock) ─────── #
     # All existence/active checks passed. Enforce configured usage limits
     # batch-wide so that intra-batch writes that would collectively exceed a
@@ -751,20 +794,17 @@ async def save_day_grid(
     # The counts must be read only after the Period lock is held, so a
     # concurrent Status save for this Period has already committed or waits.
     all_batch_pairs: list[tuple] = [(r.driver_assignment_id, work_date) for r in data.rows]
-    batch_by_code: dict[str, list[int]] = {}
-    for _, drv_id, _, vsk, _ in parsed_rows:
-        if vsk:
-            batch_by_code.setdefault(vsk, []).append(drv_id)
+    batch_by_key: dict[int, list[int]] = {}
+    key_by_id: dict[int, dict] = {}
+    for _, drv_id, _, _, krow in parsed_rows:
+        if krow is not None:
+            batch_by_key.setdefault(krow["statuskeyid"], []).append(drv_id)
+            key_by_id[krow["statuskeyid"]] = krow
 
-    for status_code, batch_driver_assignment_ids in batch_by_code.items():
-        code_key_row = next(
-            krow
-            for _, _, _, vsk, krow in parsed_rows
-            if vsk == status_code and krow is not None
-        )
+    for status_key_id, batch_driver_assignment_ids in batch_by_key.items():
         await _enforce_status_key_limits(
-            status_code=status_code,
-            key_row=code_key_row,
+            key_row=key_by_id[status_key_id],
+            branch_id=branch_id,
             period_id=period_id,
             company_id=company_id,
             work_date=work_date,
@@ -776,56 +816,70 @@ async def save_day_grid(
     for save_row, driver_assignment_id, parsed_values, validated_status_key, key_row in parsed_rows:
 
         # ── Ordinary pay lines, by period definition ─────────────────────── #
-        for ppd_id, qty in parsed_values.items():
-            # Treat None (empty/blank) as zero (clear)
-            effective_qty: Decimal = qty if qty is not None else Decimal("0")
+        # Two passes around the Status write keep every intermediate database state free of a
+        # full-day-off Status beside ordinary work: lines being cleared go first, lines being
+        # set go after the Status and entry state. The final state was validated above.
+        async def apply_quantities(
+            *, clearing: bool, driver_assignment_id=driver_assignment_id,
+            parsed_values=parsed_values,
+        ) -> None:
+            for ppd_id, qty in parsed_values.items():
+                # Treat None (empty/blank) as zero (clear)
+                effective_qty: Decimal = qty if qty is not None else Decimal("0")
+                if (effective_qty == 0) != clearing:
+                    continue
 
-            existing_result = await db.execute(
-                text("""
-                    SELECT draftlineid FROM payroll.payrolldraftlines
-                    WHERE  payrollperiodid = :pid
-                      AND  workdate        = :dt
-                      AND  driverassignmentid        = :did
-                      AND  payrollperioddefinitionid = :ppd
-                      AND  status         != 'Void'
-                """),
-                {"pid": period_id, "dt": work_date, "did": driver_assignment_id, "ppd": ppd_id},
-            )
-            existing = existing_result.mappings().first()
+                existing_result = await db.execute(
+                    text("""
+                        SELECT draftlineid FROM payroll.payrolldraftlines
+                        WHERE  payrollperiodid = :pid
+                          AND  workdate        = :dt
+                          AND  driverassignmentid        = :did
+                          AND  payrollperioddefinitionid = :ppd
+                          AND  status         != 'Void'
+                    """),
+                    {"pid": period_id, "dt": work_date, "did": driver_assignment_id,
+                     "ppd": ppd_id},
+                )
+                existing = existing_result.mappings().first()
 
-            if effective_qty == 0 and existing:
-                await void_draft_line(
-                    period_id=period_id,
-                    draft_line_id=existing["draftlineid"],
-                    company_id=company_id,
-                    user_id=user_id,
-                    db=db,
-                )
-            elif effective_qty == 0 and not existing:
-                continue  # don't create zero rows
-            elif not existing:
-                await add_draft_line(
-                    period_id=period_id,
-                    company_id=company_id,
-                    user_id=user_id,
-                    data=DraftLineCreate(
-                        driver_assignment_id=driver_assignment_id,
-                        work_date=work_date,
-                        payroll_period_definition_id=ppd_id,
-                        quantity=effective_qty,
-                        source_type="Manual",
-                    ),
-                    db=db,
-                )
-            else:
-                await update_draft_line(
-                    period_id=period_id,
-                    draft_line_id=existing["draftlineid"],
-                    company_id=company_id,
-                    user_id=user_id,
-                    data=DraftLineUpdate(quantity=effective_qty),
-                    db=db,
-                )
+                if effective_qty == 0 and existing:
+                    await void_draft_line(
+                        period_id=period_id,
+                        draft_line_id=existing["draftlineid"],
+                        company_id=company_id,
+                        user_id=user_id,
+                        db=db,
+                    )
+                elif effective_qty == 0 and not existing:
+                    continue  # don't create zero rows
+                elif not existing:
+                    await add_draft_line(
+                        period_id=period_id,
+                        company_id=company_id,
+                        user_id=user_id,
+                        data=DraftLineCreate(
+                            driver_assignment_id=driver_assignment_id,
+                            work_date=work_date,
+                            payroll_period_definition_id=ppd_id,
+                            quantity=effective_qty,
+                            source_type="Manual",
+                        ),
+                        db=db,
+                        enforce_status_conflict=False,
+                    )
+                else:
+                    await update_draft_line(
+                        period_id=period_id,
+                        draft_line_id=existing["draftlineid"],
+                        company_id=company_id,
+                        user_id=user_id,
+                        data=DraftLineUpdate(quantity=effective_qty),
+                        db=db,
+                        enforce_status_conflict=False,
+                    )
+
+        await apply_quantities(clearing=True)
 
         # ── DailyStatus upsert ────────────────────────────────────────────── #
         # P1 #4: write audit via _write_line_audit for all DailyStatus mutations
@@ -1029,21 +1083,7 @@ async def save_day_grid(
             note_text=notes_val if notes_val else None,
         )
 
-        # CP-2D2: sync STATUS_PAYMENT draft line from the updated entry state.
-        # CP-2F: Draft (Prepared) is source-only — skip money derivation.
-        if period.status == "Draft":
-            continue
-        await _sync_status_payment_for_entry_state(
-            company_id=company_id,
-            branch_id=branch_id,
-            period_id=period_id,
-            driver_assignment_id=driver_assignment_id,
-            work_date=work_date,
-            status_key_id=key_row["statuskeyid"] if key_row else None,
-            user_id=user_id,
-            db=db,
-            currency=currency,
-        )
+        await apply_quantities(clearing=False)
 
     # Return the refreshed grid
     return await get_day_grid(

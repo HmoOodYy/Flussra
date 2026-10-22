@@ -33,7 +33,6 @@ from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_calculation import _build_live_calculation_packet
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import _VALID_TRANSITIONS, PeriodStatusChange, PeriodSummary
-from app.payroll.status_payment_sync import _refresh_status_payment_lines
 from app.payroll.workflow_lock import acquire_branch_workflow_lock
 
 # ---------------------------------------------------------------------------
@@ -58,6 +57,31 @@ _TRANSITION_PERMISSIONS: dict[tuple[str, str], str] = {
     #   Approved exits only via POST /finalize (→ Locked).
     ("Locked",   "Archived"):   "payroll.finalize",
 }
+
+
+# What makes a period non-empty for submit and resubmit: a non-voided payroll source line, an
+# Active Bonus event, or a canonical Status selection (a non-void day entry that holds a Status).
+# A note is never payroll content: the DailyNote compatibility row a note save writes, and a day
+# entry that only carries a note, are excluded. The canonical selection is the Status
+# authority; a legacy DailyStatus row still counts as a source line so that a Status that exists
+# only as that legacy row reaches (and is refused by) the canonicalization blocker, but it is
+# never required for a canonical Status to count. An ordinary pay line has no line type (NULL),
+# so the note row is excluded with IS DISTINCT FROM, which keeps a NULL line type counted.
+_PERIOD_CONTENT_SQL = """
+    SELECT (
+        SELECT COUNT(*) FROM payroll.payrolldraftlines
+        WHERE  payrollperiodid = :pid AND companyid = :cid
+          AND  status != 'Void' AND linetype IS DISTINCT FROM 'DailyNote'
+    ) + (
+        SELECT COUNT(*) FROM payroll.payrollbonusevents
+        WHERE  payrollperiodid = :pid AND companyid = :cid
+          AND  status = 'Active'
+    ) + (
+        SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate
+        WHERE  payrollperiodid = :pid AND companyid = :cid
+          AND  isvoided = FALSE AND statuskeyid IS NOT NULL
+    ) AS total_lines
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -205,32 +229,10 @@ async def change_period_status(
         # common (non-race) path.
         await _check_inreview_slot_available(company_id, existing.branch_id, period_id, db)
 
-        # CP-2D2: re-sync status payment lines from canonical PPDES state before
-        # refresh so that rate changes (new/backdated driver rates for STATUS_PAY)
-        # are reflected before submit guards run.
-        await _refresh_status_payment_lines(
-            period_id=period_id,
-            company_id=company_id,
-            branch_id=existing.branch_id,
-            user_id=user_id,
-            db=db,
-            currency=currency,
-        )
-
-        # Guard 1: empty period — refuse to submit a period with no payroll data.
-        # Count DraftLines + Active BonusEvents (bonus data lives in PayrollBonusEvents).
+        # Guard 1: empty period — refuse to submit a period with no payroll data
+        # (source lines, Active Bonus events or canonical Status selections).
         empty_result = await db.execute(
-            text("""
-                SELECT (
-                    SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE  payrollperiodid = :pid AND companyid = :cid
-                      AND  status != 'Void'
-                ) + (
-                    SELECT COUNT(*) FROM payroll.payrollbonusevents
-                    WHERE  payrollperiodid = :pid AND companyid = :cid
-                      AND  status = 'Active'
-                ) AS total_lines
-            """),
+            text(_PERIOD_CONTENT_SQL),
             {"pid": period_id, "cid": company_id},
         )
         if int(empty_result.scalar_one()) == 0:
@@ -475,16 +477,6 @@ async def change_period_status(
                 created_by_user_id=user_id,
                 frozen_by_user_id=user_id,
             )
-            # CP-2F: refresh status payment lines for Draft-era PPDES rows now that
-            # the period is Open and rates are resolved.
-            await _refresh_status_payment_lines(
-                period_id=_eligible_draft["payrollperiodid"],
-                company_id=company_id,
-                branch_id=existing.branch_id,
-                user_id=user_id,
-                db=db,
-                currency=currency,
-            )
     else:
         # CP-0B: All non-Open→InReview transitions use an expected-status predicate
         # so that a stale request whose pre-flight read is now out of date cannot
@@ -674,31 +666,9 @@ async def resubmit_period(
 
     # ── Step 4: run submission guards (same as Open→InReview) ────────────── #
 
-    # Keep Returned resubmission in parity with first submission. The stored
-    # projection remains compatibility-only; the captured packet uses live PPDES.
-    await _refresh_status_payment_lines(
-        period_id=period_id,
-        company_id=company_id,
-        branch_id=existing.branch_id,
-        user_id=user_id,
-        db=db,
-        currency=currency,
-    )
-
-    # Guard 1: empty period.
-    # Count DraftLines + Active BonusEvents.
+    # Guard 1: empty period (source lines, Active Bonus events or canonical Status selections).
     empty_result = await db.execute(
-        text("""
-            SELECT (
-                SELECT COUNT(*) FROM payroll.payrolldraftlines
-                WHERE  payrollperiodid = :pid AND companyid = :cid
-                  AND  status != 'Void'
-            ) + (
-                SELECT COUNT(*) FROM payroll.payrollbonusevents
-                WHERE  payrollperiodid = :pid AND companyid = :cid
-                  AND  status = 'Active'
-            ) AS total_lines
-        """),
+        text(_PERIOD_CONTENT_SQL),
         {"pid": period_id, "cid": company_id},
     )
     if int(empty_result.scalar_one()) == 0:

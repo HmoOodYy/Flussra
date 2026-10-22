@@ -98,8 +98,8 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
         {"branch_id": branch_id},
     )
     await db.execute(
-        _text("DELETE FROM payroll.payrollstatuskeys WHERE branchid = :branch_id AND statuscode = 'CP5A_STATUS'"),
-        {"branch_id": branch_id},
+        _text("DELETE FROM payroll.payrollstatuskeys WHERE companyid = :company_id AND statuscode = 'CP5A_STATUS'"),
+        {"company_id": _COMPANY_ID},
     )
     await db.commit()
 
@@ -264,23 +264,23 @@ async def _insert_canonical_status(
         _text("""
             SELECT statuskeyid
             FROM payroll.payrollstatuskeys
-            WHERE companyid = :company_id AND branchid = :branch_id AND isactive = TRUE
+            WHERE companyid = :company_id AND isactive = TRUE
             ORDER BY statuskeyid
             LIMIT 1
         """),
-        {"company_id": _COMPANY_ID, "branch_id": branch_id},
+        {"company_id": _COMPANY_ID},
     )).scalar_one_or_none()
     if status_key_id is None:
         status_key_id = (await db.execute(
             _text("""
                 INSERT INTO payroll.payrollstatuskeys
-                    (companyid, branchid, statuscode, normalizedstatuscode, keyname,
-                     hoursvalue, isoffreason, isactive, displayorder)
-                VALUES (:company_id, :branch_id, 'CP5A_STATUS', 'CP5A_STATUS', 'CP5A Status',
-                        0, TRUE, TRUE, 999)
+                    (companyid, statuscode, normalizedstatuscode, keyname, normalizedkeyname,
+                     allowancecategory, hoursvalue, isoffreason, isactive, displayorder)
+                VALUES (:company_id, 'CP5A_STATUS', 'CP5A_STATUS', 'CP5A Status', 'cp5a status',
+                        'Other', 0, TRUE, TRUE, 999)
                 RETURNING statuskeyid
             """),
-            {"company_id": _COMPANY_ID, "branch_id": branch_id},
+            {"company_id": _COMPANY_ID},
         )).scalar_one()
     work_date = (await db.execute(
         _text("SELECT startdate FROM payroll.payrollperiods WHERE payrollperiodid = :period_id"),

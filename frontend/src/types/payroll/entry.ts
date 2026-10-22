@@ -24,6 +24,8 @@ export interface DayGridStatusKey {
   label: string;
   is_off_reason: boolean;
   hours_value: number | null;
+  /** Input shortcuts of the Status; `label` is its canonical primary name. */
+  aliases: string[];
 }
 
 export interface DayGridLineValue {
@@ -40,6 +42,8 @@ export interface DayGridRow {
   driver_id: number;
   driver_name: string;
   driver_number: string | null;
+  /** The canonical identity of the Status the day holds; sent back to keep it unchanged. */
+  status_key_id: number | null;
   status_key: string | null;
   status_label: string | null;
   is_off: boolean;
@@ -99,6 +103,12 @@ export interface DayGridSaveRow {
   driver_assignment_id: number;
   /** Keyed by String(payroll_period_definition_id), never by code or name. */
   values: Record<string, string>;
+  /**
+   * The Status the row already holds, as an identity: used as is by the server, which then
+   * reads no text. Cleared when new Status text is typed.
+   */
+  status_key_id: number | null;
+  /** Newly typed Status text (name, alias or code); resolved by the server. */
   status_key: string | null;
   notes: string | null;
 }

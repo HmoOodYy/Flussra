@@ -11,6 +11,8 @@
 
 This document is authoritative for future Current Payroll backend work. Source code, current migrations, the live schema, and executable tests remain authoritative for statements about what exists today. Older planning/status markdown files are historical unless a statement is revalidated here.
 
+> **P5a Status amendment (2026-10-21):** Statements below that describe the derived `STATUS_PAYMENT` DraftLine, `status_payment_sync`, Branch-owned Status keys or Status rate columns, or assignment-owned Status rates (`/payroll/rates`, the Status rate matrix and batch routes) as current are superseded. From migration `0090` the Status catalog is Company-owned, a Status selection is paid directly from the permanent Driver's Status rate schedule (`app.payroll.status_calculation`), no `STATUS_PAYMENT` line is written or authoritative, the assignment-level rate routes are removed, and snapshots are `payroll-calculation-v3`. See `backend/app/payroll/INTERNAL_CONTRACTS.md` and the P5a section of `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md`.
+
 ---
 
 ## 1. Product Goal

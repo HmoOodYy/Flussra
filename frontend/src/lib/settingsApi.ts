@@ -7,7 +7,13 @@ import type {
   CompanyProfile,
   CompanyUpdate,
   StatusKey,
+  StatusKeyBranchLimits,
+  StatusKeyBranchLimitsUpdate,
   StatusKeyCreate,
+  StatusKeyUpdate,
+  StatusRateColumn,
+  StatusRateColumnCreate,
+  StatusRateColumnUpdate,
   SupportedCurrency,
 } from '../types/settings';
 
@@ -43,24 +49,56 @@ export function setDefaultSettingsBranch(branchId: number): AxiosPromise<BranchA
   return apiClient.post<BranchAdmin>(`/settings/branches/${branchId}/set-default`);
 }
 
-export function getBranchStatusKeys(branchId: number, includeInactiveKeys: boolean): AxiosPromise<StatusKey[]> {
-  return apiClient.get<StatusKey[]>(`/settings/branches/${branchId}/status-keys`, {
-    params: { include_inactive: includeInactiveKeys },
+// ─── Company Status catalog ───────────────────────────────────────────────────
+
+export function getStatusKeys(includeInactive: boolean): AxiosPromise<StatusKey[]> {
+  return apiClient.get<StatusKey[]>('/settings/status-keys', {
+    params: { include_inactive: includeInactive },
   });
 }
 
-export function createBranchStatusKey(branchId: number, payload: StatusKeyCreate): AxiosPromise<StatusKey> {
-  return apiClient.post<StatusKey>(`/settings/branches/${branchId}/status-keys`, payload);
+export function createStatusKey(payload: StatusKeyCreate): AxiosPromise<StatusKey> {
+  return apiClient.post<StatusKey>('/settings/status-keys', payload);
 }
 
-export function updateBranchStatusKey(
+export function updateStatusKey(statusKeyId: number, payload: StatusKeyUpdate): AxiosPromise<StatusKey> {
+  return apiClient.patch<StatusKey>(`/settings/status-keys/${statusKeyId}`, payload);
+}
+
+export function deactivateStatusKey(statusKeyId: number): AxiosPromise<StatusKey> {
+  return apiClient.delete<StatusKey>(`/settings/status-keys/${statusKeyId}`);
+}
+
+// ─── Status rate columns (Company-owned) ──────────────────────────────────────
+
+export function getStatusRateColumns(includeInactive: boolean): AxiosPromise<StatusRateColumn[]> {
+  return apiClient.get<StatusRateColumn[]>('/settings/status-rate-columns', {
+    params: { include_inactive: includeInactive },
+  });
+}
+
+export function createStatusRateColumn(payload: StatusRateColumnCreate): AxiosPromise<StatusRateColumn> {
+  return apiClient.post<StatusRateColumn>('/settings/status-rate-columns', payload);
+}
+
+export function updateStatusRateColumn(
+  columnId: number,
+  payload: StatusRateColumnUpdate,
+): AxiosPromise<StatusRateColumn> {
+  return apiClient.patch<StatusRateColumn>(`/settings/status-rate-columns/${columnId}`, payload);
+}
+
+// ─── Branch usage limits of the Company Statuses ──────────────────────────────
+
+export function getBranchStatusKeyLimits(branchId: number): AxiosPromise<StatusKeyBranchLimits[]> {
+  return apiClient.get<StatusKeyBranchLimits[]>(`/settings/branches/${branchId}/status-key-limits`);
+}
+
+export function putBranchStatusKeyLimits(
   branchId: number,
   statusKeyId: number,
-  payload: Record<string, unknown>,
-): AxiosPromise<StatusKey> {
-  return apiClient.patch<StatusKey>(`/settings/branches/${branchId}/status-keys/${statusKeyId}`, payload);
-}
-
-export function deactivateBranchStatusKey(branchId: number, statusKeyId: number): AxiosPromise<StatusKey> {
-  return apiClient.delete<StatusKey>(`/settings/branches/${branchId}/status-keys/${statusKeyId}`);
+  payload: StatusKeyBranchLimitsUpdate,
+): AxiosPromise<StatusKeyBranchLimits> {
+  return apiClient.put<StatusKeyBranchLimits>(
+    `/settings/branches/${branchId}/status-keys/${statusKeyId}/limits`, payload);
 }

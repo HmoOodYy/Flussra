@@ -9,8 +9,6 @@ import {
   applicabilityFlag,
   canEditDriverCompensation,
   canDiscardPendingRates,
-  canEditStatusRates,
-  defaultStatusAssignment,
   driverBranchSummary,
   filterDrivers,
   groupRosterByDriver,
@@ -69,8 +67,6 @@ test('the home tenure is current, else upcoming, else the latest ended one', () 
   assert.equal(byId(9).home.driver_assignment_id, 11);
   assert.equal(byId(20).home.driver_assignment_id, 12);
   assert.equal(byId(21).home.driver_assignment_id, 13);
-  assert.equal(defaultStatusAssignment(byId(9))?.driver_assignment_id, 11);
-  assert.equal(defaultStatusAssignment(null), null);
 });
 
 test('the roster flags a Driver with no current or pending tenure, for presentation only', () => {
@@ -133,15 +129,6 @@ test('Driver-owned edit authority follows the current (else upcoming) Branch, no
   assert.equal(canEditDriverCompensation(byId(9), currentBranchEditor, onlyNorth), false); // North is the past Branch
   assert.equal(canEditDriverCompensation(byId(9), currentBranchEditor, onlySouth), true);
   assert.equal(canEditDriverCompensation(byId(20), currentBranchEditor, (branchId) => branchId === 5), true);
-});
-
-test('Status rates stay assignment-addressed: only a current or upcoming assignment is writable', () => {
-  const allow = () => true;
-  assert.equal(canEditStatusRates(ended, allow), false);
-  assert.equal(canEditStatusRates(current, allow), true);
-  assert.equal(canEditStatusRates(pending, allow), true);
-  assert.equal(canEditStatusRates(current, (branchId) => branchId === 3), false);
-  assert.equal(canEditStatusRates(null, allow), false);
 });
 
 test('the default list view hides Drivers who are readable only through a past Branch', () => {

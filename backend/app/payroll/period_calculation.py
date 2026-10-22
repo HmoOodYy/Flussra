@@ -11,8 +11,9 @@ Live Period Calculation — the payroll domain's owner of:
 Ordinary PayDefinition earnings are derived LIVE: each source line is resolved and
 calculated through app.payroll.live_source_calculation and the method-owned boundary
 in app.payroll.definition_calculation. No ordinary amount is read from a stored column.
-Status pay remains on its temporary Status-only path; Bonus is BonusEvent; minimum/
-maximum is DriverPayRule.
+Status pay is derived directly from the canonical Status selections and the Driver's Status
+rate schedules (app.payroll.status_calculation); Bonus is BonusEvent; minimum/maximum is
+DriverPayRule.
 
 Preview is read-only by construction: get_calculation_preview ->
 _build_live_calculation_packet emits no INSERT/UPDATE/DELETE.
@@ -52,9 +53,7 @@ from app.payroll.eligibility import (
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import ENTRY_ALLOWED_STATUSES, PeriodSummary
-from app.payroll.status_payment_sync import (
-    _resolve_live_status_payment_lines,
-)
+from app.payroll.status_calculation import load_live_status_lines
 from app.payroll_setup.chronology import Schedule, period_matches_schedule
 
 if TYPE_CHECKING:
@@ -161,6 +160,17 @@ _CALCULATION_BLOCKER_REASONS: dict[CalculationStatus, str] = {
 }
 
 
+_STATUS_BLOCKER_REASONS: dict[CalculationStatus, str] = {
+    CalculationStatus.MISSING_RATE: (
+        "No effective Status rate is assigned to this driver for this Status's rate column "
+        "on the work date."
+    ),
+    CalculationStatus.INCOMPLETE_RATE: (
+        "The effective Status rate schedule is missing its value."
+    ),
+}
+
+
 @dataclass(frozen=True)
 class _CalculationPacketLine:
     """Persistence-grade result from the live CP-4B calculation assembly."""
@@ -181,8 +191,6 @@ class _CalculationPacketLine:
     definition_name: str | None = None
     calculation_status: str | None = None
     rate_column_id: int | None = None
-    rate_type_id: int | None = None
-    driver_rate_id: int | None = None
     bonus_event_id: int | None = None
     source_evidence: dict[str, Any] | None = None
     snapshot_source_type: str | None = None
@@ -190,7 +198,7 @@ class _CalculationPacketLine:
     snapshot_calculated_amount: Decimal | None = None
     # The rate an ordinary line used, as resolved for its WorkDate: the target definition,
     # the whole schedule, the schedule value and its status and window. ``resolved_rate_amount``
-    # is the rate amount itself. Status lines keep rate_type_id / driver_rate_id instead.
+    # is the rate amount itself. A Status line carries its Status rate column in ``rate_column_id``.
     rate_definition_id: int | None = None
     driver_rate_schedule_id: int | None = None
     rate_component_definition_id: int | None = None
@@ -789,13 +797,13 @@ async def _build_live_calculation_packet(
     db: AsyncConnection,
 ) -> _LiveCalculationPacket:
     """
-    Assemble live financial results without writes, audit, or projection refresh.
+    Assemble live financial results without writes or audit.
 
     Ordinary source money comes from load_live_source_lines and its frozen-method
-    calculation boundary. Status pay resolves current rates from canonical day
-    selections, never the stored compatibility projection, to avoid stale money
-    and double counting. Minimum/maximum adjustments exclude Active Bonus events
-    from their base; Bonus is added afterward.
+    calculation boundary. Status pay is hours x the Driver's rate, derived from the
+    canonical day selections and nothing else (no draft line carries Status money).
+    Minimum/maximum adjustments exclude Active Bonus events from their base; Bonus is
+    added afterward.
 
     Official amounts (payable-rounding-v1): raw line contributions stay at internal
     precision and are summed per component (ordinary: DriverAssignment x period
@@ -851,8 +859,7 @@ async def _build_live_calculation_packet(
         return round_payable(amount, digits)
 
     # ── Ordinary daily lines: live, derived from the effective DriverRateSchedule
-    # (never from a stored column). The persisted STATUS_PAYMENT/STATUS_PAY
-    # compatibility projection is not a target ordinary line and is excluded.
+    # (never from a stored column).
     driver_names: dict[int, str | None] = {}
     driver_numbers: dict[int, str | None] = {}
     driver_permanent_ids: dict[int, int] = {}
@@ -913,16 +920,13 @@ async def _build_live_calculation_packet(
             calculation_version=calc.calculation_version,
         ))
 
-    # ── Canonical live Status-derived pay (CP-4B) — never the stored
-    # STATUS_PAYMENT/STATUS_PAY projection, which was already excluded above.
-    live_status_lines = await _resolve_live_status_payment_lines(
-        period_id, company_id, period.branch_id, db,
-    )
-    for sl in live_status_lines:
+    # ── Status pay, derived live from the canonical Status selections (hours x the Driver's
+    # Status rate for the WorkDate). A Status without a rate column is non-monetary and absent.
+    for sl in await load_live_status_lines(period_id, company_id, period.branch_id, db):
         drv = sl.driver_assignment_id
+        calc = sl.calculation
         driver_lines.setdefault(drv, [])
-
-        if sl.needs_manager_review:
+        if calc.needs_attention:
             driver_line_nmr[drv] = True
 
         source_id = f"STATUS_LIVE:{drv}:{sl.work_date}:{sl.status_key_id}"
@@ -932,38 +936,35 @@ async def _build_live_calculation_packet(
                 "status_rate_column_id": sl.status_rate_column_id,
                 "status_rate_column_name": sl.status_rate_column_name,
             }),
-        ).add(sl.calculated_amount, source_id, unresolved=sl.needs_manager_review)
+        ).add(calc.amount, source_id, unresolved=calc.needs_attention)
         driver_lines[drv].append(_CalculationPacketLine(
             source_type="StatusEntryState",
             source_id=source_id,
-            line_type=sl.line_type,
+            line_type="STATUS_PAY",
             line_scope="Daily",
             work_date=sl.work_date,
             driver_assignment_id=drv,
-            quantity=sl.hours_value,
-            resolved_rate_amount=sl.resolved_rate_amount,
-            calculated_amount=sl.calculated_amount,
-            needs_manager_review=sl.needs_manager_review,
-            blocker_reason=(
-                "No applicable approved DriverRate found for this driver's "
-                "selected Status as of its work date."
-                if sl.needs_manager_review else None
-            ),
-            rate_type_id=sl.rate_type_id,
+            quantity=sl.hours,
+            resolved_rate_amount=calc.rate_amount,
+            calculated_amount=calc.amount,
+            needs_manager_review=calc.needs_attention,
+            blocker_reason=_STATUS_BLOCKER_REASONS.get(calc.status),
+            calculation_status=calc.status.value,
             rate_column_id=sl.status_rate_column_id,
-            driver_rate_id=sl.driver_rate_id,
+            rate_definition_id=sl.rate_definition_id,
+            driver_rate_schedule_id=calc.driver_rate_schedule_id,
+            rate_component_definition_id=calc.rate_component_definition_id,
+            schedule_status=calc.schedule_status,
+            schedule_effective_from=calc.schedule_effective_from,
+            schedule_effective_to=calc.schedule_effective_to,
+            calculation_version=calc.calculation_version,
             source_evidence={
                 "StatusKeyID": sl.status_key_id,
                 "StatusCode": sl.status_code,
             },
             snapshot_source_type="StatusEntryState",
             snapshot_source_id=str(sl.entry_state_id),
-            # A resolved rate with zero hours earns nothing: that is an official zero line,
-            # not an unresolved one (the live line itself keeps its unset amount).
-            snapshot_calculated_amount=(
-                Decimal("0")
-                if sl.calculated_amount is None and not sl.needs_manager_review else None
-            ),
+            snapshot_calculated_amount=calc.amount,
         ))
 
     # ── Canonical Active bonus (never Voided).

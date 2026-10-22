@@ -67,7 +67,9 @@ async def _load_report_evidence(
                 ppdes.statuskeyid,
                 sk.statuscode,
                 sk.keyname,
-                sk.isoffreason
+                sk.isoffreason,
+                sk.hoursvalue,
+                sk.allowancecategory
             FROM payroll.payrollperioddriverdayentrystate ppdes
             JOIN payroll.payrollstatuskeys sk ON sk.statuskeyid = ppdes.statuskeyid
             JOIN core.driverassignments a ON a.driverassignmentid = ppdes.driverassignmentid
@@ -98,6 +100,8 @@ async def _load_report_evidence(
             "StatusCodeSnapshot": row["statuscode"],
             "StatusLabelSnapshot": row["keyname"],
             "StatusIsOffReasonSnapshot": bool(row["isoffreason"]),
+            "StatusHoursValueSnapshot": Decimal(str(row["hoursvalue"])),
+            "StatusCategorySnapshot": row["allowancecategory"],
         }
         for row in status_result.mappings().all()
     ]
@@ -147,11 +151,9 @@ def _line_content(line: _CalculationPacketLine) -> dict[str, Any]:
         "PayDefinitionID": line.pay_definition_id,
         "RateDefinitionID": line.rate_definition_id,
         "DriverRateScheduleID": line.driver_rate_schedule_id,
-        "CalculationStatus": line.calculation_status if source_type == "DraftLine" else None,
+        "CalculationStatus": line.calculation_status if source_type != "BonusEvent" else None,
         "CalculationVersion": line.calculation_version,
         "StatusRateColumnID": line.rate_column_id,
-        "RateTypeID": line.rate_type_id,
-        "DriverRateID": line.driver_rate_id,
         "BonusEventID": line.bonus_event_id,
         "Quantity": line.quantity,
         "ResolvedRateAmount": line.resolved_rate_amount,
@@ -427,8 +429,8 @@ async def _capture_calculation_snapshot(
                         for field in (
                             "SourceType", "SourceID", "LineScope", "WorkDate", "Quantity",
                             "PayrollPeriodDefinitionID", "PayDefinitionID", "RateDefinitionID",
-                            "DriverRateScheduleID", "StatusRateColumnID", "RateTypeID",
-                            "DriverRateID", "BonusEventID", "ResolvedRateAmount",
+                            "DriverRateScheduleID", "StatusRateColumnID",
+                            "BonusEventID", "ResolvedRateAmount",
                             "SourceEvidenceJSONB",
                         )
                     }
@@ -449,9 +451,7 @@ async def _capture_calculation_snapshot(
         {"DriverAssignmentID": total["DriverAssignmentID"], "DriverID": total["DriverID"], **line}
         for total in content["DriverTotals"] for line in total["Lines"]
     ]
-    used_rates, line_fingerprints = await build_used_rate_evidence(
-        company_id=company_id, branch_id=period.branch_id, lines=flat_lines,
-        currency=currency, db=db)
+    used_rates, line_fingerprints = build_used_rate_evidence(lines=flat_lines, currency=currency)
     fingerprints = iter(line_fingerprints)
     for total in content["DriverTotals"]:
         for line in total["Lines"]:
@@ -656,14 +656,14 @@ async def _capture_calculation_snapshot(
                      sourcetype, sourceid, linetype, linescope, workdate,
                      payrollperioddefinitionid, paydefinitionid, ratedefinitionid,
                      driverratescheduleid, calculationstatus, calculationversion,
-                     statusratecolumnid, ratetypeid, driverrateid, bonuseventid, quantity,
+                     statusratecolumnid, bonuseventid, quantity,
                      resolvedrateamount, calculatedamount, sourceevidencejsonb,
                      usedratedefinitionid)
                 VALUES
                     (:driver_total_id, :component_id, :source_type, :source_id, :line_type,
                      :line_scope, :work_date, :ppd_id, :pay_definition_id, :rate_definition_id,
                      :schedule_id, :calculation_status, :calculation_version,
-                     :status_column_id, :rate_type_id, :driver_rate_id, :bonus_event_id,
+                     :status_column_id, :bonus_event_id,
                      :quantity, :resolved_rate, :calculated_amount, CAST(:evidence AS jsonb),
                      :used_rate_definition_id)
             """), {
@@ -681,8 +681,6 @@ async def _capture_calculation_snapshot(
                 "calculation_status": line["CalculationStatus"],
                 "calculation_version": line["CalculationVersion"],
                 "status_column_id": line["StatusRateColumnID"],
-                "rate_type_id": line["RateTypeID"],
-                "driver_rate_id": line["DriverRateID"],
                 "bonus_event_id": line["BonusEventID"],
                 "quantity": line["Quantity"],
                 "resolved_rate": line["ResolvedRateAmount"],
@@ -699,11 +697,12 @@ async def _capture_calculation_snapshot(
                      payrollperiodid, driverassignmentid, driverid, workdate,
                      payrollperioddriverdayentrystateid, statuskeyid,
                      statuscodesnapshot, statuslabelsnapshot,
-                     statusisoffreasonsnapshot)
+                     statusisoffreasonsnapshot, statushoursvaluesnapshot,
+                     statuscategorysnapshot)
                 VALUES
                     (:snapshot_id, :cid, :bid, :pid, :driver_assignment_id, :driver_id, :work_date,
                      :entry_state_id, :status_key_id, :status_code,
-                     :status_label, :status_is_off_reason)
+                     :status_label, :status_is_off_reason, :status_hours, :status_category)
             """),
             {
                 "snapshot_id": snapshot_id,
@@ -718,6 +717,8 @@ async def _capture_calculation_snapshot(
                 "status_code": entry["StatusCodeSnapshot"],
                 "status_label": entry["StatusLabelSnapshot"],
                 "status_is_off_reason": entry["StatusIsOffReasonSnapshot"],
+                "status_hours": entry["StatusHoursValueSnapshot"],
+                "status_category": entry["StatusCategorySnapshot"],
             },
         )
 

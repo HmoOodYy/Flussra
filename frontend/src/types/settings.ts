@@ -62,7 +62,6 @@ export interface BranchAdmin {
   schedule_readiness_reason: string | null;
   // Period start date the reason was evaluated against (ISO date); same visibility as the reason.
   schedule_readiness_date: string | null;
-  status_keys_count: number | null;
   total_people_count: number | null;
   active_drivers_count: number | null;
   pending_approvals_count: number | null;
@@ -98,24 +97,93 @@ export interface OnboardingOptionsResponse {
   choices: BoundaryChoicesResponse | null;
 }
 
-// ─── Status Keys ──────────────────────────────────────────────────────────────
+// ─── Status catalog (Company-owned) ───────────────────────────────────────────
 
+/** The fixed Category set. A Category groups and reports; it never decides pay. */
+export const STATUS_CATEGORIES = [
+  'Vacation', 'Sick', 'Bereavement', 'Jury Duty', 'Personal', 'Holiday', 'Unpaid', 'Other',
+] as const;
+export type StatusCategory = (typeof STATUS_CATEGORIES)[number];
+
+/**
+ * One Status of the Company catalog, shared by every Branch.
+ * `key_name` is the canonical primary name every display shows; `aliases` are input
+ * shortcuts only (a selection stores the Status, never the alias); `status_code` is the
+ * generated technical code.
+ */
 export interface StatusKey {
   status_key_id: number;
   company_id: number;
-  branch_id: number;
-  /** User-facing label ("Vacation", "Sick Day", …). Shown in the UI. */
   key_name: string;
-  /** Internal generated code (SK_XXXXXXXX). Not user-editable. */
+  aliases: string[];
   status_code: string;
-  normalized_status_code: string;
-  hours_value: number;               // 0–24
+  category: StatusCategory;
+  hours_value: number | string;      // 0-24 (the server sends a decimal)
+  /** The Status counts as a full day off: it cannot share a day with ordinary work. */
   is_off_reason: boolean;
   deducts_from_yearly_allowance: boolean;
-  allowance_category: string | null; // Vacation | Sick | Bereavement | Jury Duty | Personal | Other
   is_active: boolean;
-  display_order: number;             // legacy — not exposed in UI
-  // Usage limits
+  display_order: number;
+  /** The Status rate column that makes the Status monetary; null means it is not paid. */
+  status_rate_column_id: number | null;
+  /** A selection or frozen evidence references it: hours, off semantic, Category and column are locked. */
+  is_in_use: boolean;
+  created_at_utc: string;
+  updated_at_utc: string | null;
+}
+
+export interface StatusKeyCreate {
+  key_name: string;
+  category: StatusCategory;
+  aliases?: string[];
+  hours_value?: number;
+  is_off_reason?: boolean;
+  is_active?: boolean;
+  display_order?: number;
+  status_rate_column_id?: number | null;
+}
+
+/** Partial update: only the fields sent change; `aliases` replaces the whole alias set. */
+export interface StatusKeyUpdate {
+  key_name?: string;
+  category?: StatusCategory;
+  aliases?: string[];
+  hours_value?: number;
+  is_off_reason?: boolean;
+  is_active?: boolean;
+  display_order?: number;
+  status_rate_column_id?: number | null;
+}
+
+/** A Company Status rate column: what makes a Status monetary (hours x the Driver's rate). */
+export interface StatusRateColumn {
+  status_rate_column_id: number;
+  company_id: number;
+  column_name: string;
+  is_default: boolean;
+  is_active: boolean;
+  rate_definition_id: number;
+  rate_component_definition_id: number;
+  created_at_utc: string;
+  updated_at_utc: string | null;
+}
+
+export interface StatusRateColumnCreate {
+  column_name: string;
+  is_default?: boolean;
+}
+
+export interface StatusRateColumnUpdate {
+  column_name?: string;
+  is_default?: boolean;
+  is_active?: boolean;
+}
+
+/** The four optional hard usage limits of one Status in one Branch. */
+export interface StatusKeyBranchLimits {
+  branch_id: number;
+  status_key_id: number;
+  key_name: string;
   limit_uses_per_period_enabled: boolean;
   limit_uses_per_period: number | null;
   limit_uses_per_driver_enabled: boolean;
@@ -124,25 +192,6 @@ export interface StatusKey {
   limit_uses_across_drivers: number | null;
   limit_uses_per_day_enabled: boolean;
   limit_uses_per_day: number | null;
-  created_at_utc: string;
-  updated_at_utc: string | null;
 }
 
-export interface StatusKeyCreate {
-  /** User-facing label — the only required field from the user. */
-  key_name: string;
-  hours_value?: number;
-  is_off_reason?: boolean;
-  deducts_from_yearly_allowance?: boolean;
-  allowance_category?: string | null;
-  is_active?: boolean;
-  // Usage limits
-  limit_uses_per_period_enabled?: boolean;
-  limit_uses_per_period?: number | null;
-  limit_uses_per_driver_enabled?: boolean;
-  limit_uses_per_driver?: number | null;
-  limit_uses_across_drivers_enabled?: boolean;
-  limit_uses_across_drivers?: number | null;
-  limit_uses_per_day_enabled?: boolean;
-  limit_uses_per_day?: number | null;
-}
+export type StatusKeyBranchLimitsUpdate = Omit<StatusKeyBranchLimits, 'branch_id' | 'status_key_id' | 'key_name'>;

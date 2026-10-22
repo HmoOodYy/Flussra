@@ -183,6 +183,8 @@ class DayGridStatusKey(BaseModel):
     label: str
     is_off_reason: bool
     hours_value: Decimal | None = None
+    # Input shortcuts of the Status (the label is its canonical primary name).
+    aliases: list[str] = []
 
 
 
@@ -202,6 +204,10 @@ class DayGridRow(BaseModel):
     driver_id: int
     driver_name: str
     driver_number: str | None = None
+    # The canonical identity (id, technical code) and primary name of the Status the day holds
+    # (never the alias that was typed). A client that saves the row unchanged sends the id back
+    # as `status_key_id`, so the held Status is kept as the identity it is, not re-read as text.
+    status_key_id: int | None = None
     status_key: str | None = None
     status_label: str | None = None
     is_off: bool = False
@@ -269,6 +275,14 @@ class DayGridSaveRow(BaseModel):
     driver_assignment_id: int
     # Keyed by str(payroll_period_definition_id); never by code or name.
     values: dict[str, str] = {}
+    # The Status the day is saved with, in one of two distinct forms:
+    #  * `status_key_id`: the canonical Status the row already holds (as returned by the grid)
+    #    or was resolved to. It is the identity and is used as is: no text is read. When it is
+    #    given, `status_key` is ignored.
+    #  * `status_key`: Status text newly typed (its primary name, an alias or its code). The
+    #    server resolves it Company-wide to exactly one Status.
+    # Neither (or blank text) clears the day's Status.
+    status_key_id: int | None = None
     status_key: str | None = None
     notes: str | None = None
 

@@ -1,7 +1,8 @@
 """
-Canonical driver/day Status and note state, StatusKey validation, usage limits, and mutation evidence.
+Canonical driver/day Status and note state, Branch usage limits, and mutation evidence.
 
-Status payment derivation belongs to status_payment_sync; Day Grid orchestrates entry batches.
+Status resolution from typed input belongs to the Company Status catalog
+(app.settings.status_keys.resolve_status_input); Day Grid orchestrates entry batches.
 """
 from datetime import date
 from typing import Any
@@ -11,71 +12,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.payroll.audit_evidence import capture_period_audit_evidence
-
-
-async def _validate_status_key(
-    key_code: str | None,
-    company_id: int,
-    branch_id: int,
-    db: AsyncConnection,
-    *,
-    allow_deactivated: bool = False,
-) -> dict | None:
-    """
-    Validate that key_code exists in payrollstatuskeys for the branch.
-
-    - None / blank           → returns None (caller treats as clear)
-    - Valid active           → returns the full row dict (including all limit fields)
-    - Not found              → raises HTTP 422
-    - Inactive key           → raises HTTP 422 unless allow_deactivated=True
-      (allow_deactivated is used when the user is re-submitting a status code that
-       matches an existing DraftLine selection — key was deactivated after it was
-       originally applied, so saving the same value unchanged should not be blocked)
-    """
-    if not key_code or key_code.strip() == "":
-        return None
-    result = await db.execute(
-        text("""
-            SELECT statuskeyid, statuscode, keyname, isoffreason, hoursvalue, isactive,
-                   limitusesperperiodenabled, limitusesperperiod,
-                   limitusesperdriverenabled, limitusesperdriver,
-                   limitusesacrossdriversenabled, limitusesacrossdrivers,
-                   limitusesperdayenabled, limitusesperday
-            FROM   payroll.payrollstatuskeys
-            WHERE  companyid  = :cid
-              AND  branchid   = :bid
-              AND  statuscode = :code
-        """),
-        {"cid": company_id, "bid": branch_id, "code": key_code.strip()},
-    )
-    row = result.mappings().first()
-    if row is None or (not allow_deactivated and not row["isactive"]):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Status key '{key_code}' is not a valid active status "
-                "for this branch."
-            ),
-        )
-    return dict(row)
-
-
-async def _resolve_status_key_id(
-    company_id: int,
-    branch_id: int,
-    status_code: str,
-    db: AsyncConnection,
-) -> "int | None":
-    """Return StatusKeyID for status_code — no isactive filter (accepts deactivated)."""
-    result = await db.execute(
-        text(
-            "SELECT statuskeyid FROM payroll.payrollstatuskeys "
-            "WHERE companyid = :cid AND branchid = :bid AND statuscode = :code LIMIT 1"
-        ),
-        {"cid": company_id, "bid": branch_id, "code": status_code},
-    )
-    row = result.first()
-    return row[0] if row else None
 
 
 async def _upsert_entry_state(
@@ -298,9 +234,61 @@ async def _void_entry_state_field(
         )
 
 
+async def lock_selected_status_keys(
+    selections: list[tuple[int, bool]], company_id: int, db: AsyncConnection,
+) -> None:
+    """Lock the Statuses a batch selects FOR SHARE, in key order, and recheck that a Status
+    resolved as active still is. ``selections`` are (StatusKeyID, resolved as active).
+
+    A Status that was already inactive when it was resolved is the re-save of a selection the
+    day already holds and needs no recheck.
+    """
+    resolved_active = {key_id for key_id, active in selections if active}
+    key_ids = sorted({key_id for key_id, _ in selections})
+    if not key_ids:
+        return
+    rows = (await db.execute(
+        text("""
+            SELECT statuskeyid, isactive, keyname
+            FROM   payroll.payrollstatuskeys
+            WHERE  companyid = :cid AND statuskeyid = ANY(:ids)
+            ORDER  BY statuskeyid
+            FOR SHARE
+        """),
+        {"cid": company_id, "ids": key_ids},
+    )).mappings().all()
+    for row in rows:
+        if row["statuskeyid"] in resolved_active and not row["isactive"]:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "STATUS_NOT_FOUND",
+                    "message": f"'{row['keyname']}' is no longer an active Status.",
+                },
+            )
+
+
+async def _load_branch_limits(
+    status_key_id: int, branch_id: int, company_id: int, db: AsyncConnection,
+) -> dict | None:
+    """The Branch's usage limits of one Status, or None when the Branch has none."""
+    row = (await db.execute(
+        text("""
+            SELECT limitusesperperiodenabled, limitusesperperiod,
+                   limitusesperdriverenabled, limitusesperdriver,
+                   limitusesacrossdriversenabled, limitusesacrossdrivers,
+                   limitusesperdayenabled, limitusesperday
+            FROM   payroll.payrollstatuskeybranchlimits
+            WHERE  branchid = :bid AND statuskeyid = :skid AND companyid = :cid
+        """),
+        {"bid": branch_id, "skid": status_key_id, "cid": company_id},
+    )).mappings().first()
+    return None if row is None else dict(row)
+
+
 async def _enforce_status_key_limits(
-    status_code: str,
     key_row: dict,
+    branch_id: int,
     period_id: int,
     company_id: int,
     work_date: "date",
@@ -309,36 +297,33 @@ async def _enforce_status_key_limits(
     db: AsyncConnection,
 ) -> None:
     """
-    Enforce the four optional usage limits for a status key within save_day_grid.
+    Enforce the Branch's four optional usage limits of one Status within save_day_grid.
 
-    Called once per unique status_code being SET in the batch, after all
-    existence/active checks have passed.
+    Called once per unique Status being SET in the batch, after resolution and the Period
+    lock. The limits are the Branch's (a missing row means no limits); a Period belongs to
+    one Branch, so the counts are Branch-specific.
 
     Counting rules:
-      - Only active (non-Void) DailyStatus lines are counted.
-      - The batch's own (driver_assignment_id, work_date) pairs are excluded from
-        existing counts (those slots are being overwritten).
+      - Only canonical, non-voided PayrollPeriodDriverDayEntryState selections of this Status
+        in this Period are counted. The legacy DailyStatus duplicate is never read.
+      - The batch's own (driver_assignment_id, work_date) pairs are excluded from the
+        existing counts (those slots are being overwritten, whatever they held).
       - The batch's new contributions are counted separately and added.
-      - Per-period:  total row count in period ≤ LimitUsesPerPeriod
-      - Per-driver:  row count per driver in period ≤ LimitUsesPerDriver
-      - Across-all-drivers: distinct driver count in period ≤ LimitUsesAcrossDrivers
-      - Per-day:    row count on this work_date ≤ LimitUsesPerDay
+      - Per-period:  total row count in period <= LimitUsesPerPeriod
+      - Per-driver:  row count per driver in period <= LimitUsesPerDriver
+      - Across-all-drivers: distinct driver count in period <= LimitUsesAcrossDrivers
+      - Per-day:    row count on this work_date <= LimitUsesPerDay
 
     Raises HTTP 422 if any enabled limit would be exceeded; does not write.
     """
-    any_limit = (
-        key_row["limitusesperperiodenabled"]
-        or key_row["limitusesperdriverenabled"]
-        or key_row["limitusesacrossdriversenabled"]
-        or key_row["limitusesperdayenabled"]
-    )
-    if not any_limit:
+    limits = await _load_branch_limits(key_row["statuskeyid"], branch_id, company_id, db)
+    if limits is None:
         return
-
+    name = key_row["keyname"]
     batch_count = len(batch_driver_assignment_ids)
 
-    # Build exclusion clause: exclude all (driver_assignment_id, work_date) pairs in
-    # this batch because those slots will be overwritten regardless.
+    # Exclude every (driver_assignment_id, work_date) pair of this batch: those slots are
+    # overwritten regardless of what they currently hold.
     pair_params: dict = {}
     if all_batch_pairs:
         pair_conds = " OR ".join(
@@ -355,139 +340,83 @@ async def _enforce_status_key_limits(
     base_params = {
         "period_id": period_id,
         "company_id": company_id,
-        "status_code": status_code,
+        "status_key_id": key_row["statuskeyid"],
         **pair_params,
     }
+    canonical = """
+        FROM payroll.payrollperioddriverdayentrystate
+        WHERE payrollperiodid = :period_id
+          AND companyid       = :company_id
+          AND statuskeyid     = :status_key_id
+          AND isvoided        = FALSE
+    """
 
     # ── Per-period limit ─────────────────────────────────────────────── #
-    if key_row["limitusesperperiodenabled"]:
-        limit = key_row["limitusesperperiod"]
-        r = await db.execute(
-            text(f"""
-                SELECT COUNT(*) FROM payroll.payrolldraftlines
-                WHERE payrollperiodid = :period_id
-                  AND companyid      = :company_id
-                  AND linetype       = 'DailyStatus'
-                  AND status        != 'Void'
-                  AND notes          = :status_code
-                  {excl}
-            """),
-            base_params,
-        )
-        existing = r.scalar_one()
+    if limits["limitusesperperiodenabled"]:
+        limit = limits["limitusesperperiod"]
+        existing = (await db.execute(
+            text(f"SELECT COUNT(*) {canonical} {excl}"), base_params,
+        )).scalar_one()
         if existing + batch_count > limit:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"Status key '{status_code}' has reached its period limit "
+                    f"Status key '{name}' has reached its period limit "
                     f"of {limit} use(s). "
                     f"({existing} existing + {batch_count} in this save = {existing + batch_count})"
                 ),
             )
 
     # ── Per-driver limit ─────────────────────────────────────────────── #
-    if key_row["limitusesperdriverenabled"]:
-        limit = key_row["limitusesperdriver"]
+    if limits["limitusesperdriverenabled"]:
+        limit = limits["limitusesperdriver"]
         for driver_assignment_id in batch_driver_assignment_ids:
-            r = await db.execute(
-                text(f"""
-                    SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :period_id
-                      AND companyid      = :company_id
-                      AND driverassignmentid       = :driver_assignment_id
-                      AND linetype       = 'DailyStatus'
-                      AND status        != 'Void'
-                      AND notes          = :status_code
-                      {excl}
-                """),
+            existing = (await db.execute(
+                text(f"SELECT COUNT(*) {canonical} AND driverassignmentid = :driver_assignment_id {excl}"),
                 {"driver_assignment_id": driver_assignment_id, **base_params},
-            )
-            existing = r.scalar_one()
+            )).scalar_one()
             if existing + 1 > limit:
                 raise HTTPException(
                     status_code=422,
                     detail=(
-                        f"Status key '{status_code}' has reached its per-driver limit "
+                        f"Status key '{name}' has reached its per-driver limit "
                         f"of {limit} use(s) per period. "
                         f"Driver {driver_assignment_id} already has {existing} use(s) in this period."
                     ),
                 )
 
     # ── Across-all-drivers limit (distinct drivers in period) ─────────── #
-    if key_row["limitusesacrossdriversenabled"]:
-        limit = key_row["limitusesacrossdrivers"]
-        # Compute total distinct drivers after the batch by unioning:
-        #   existing rows (excl. batch pairs) UNION batch drivers setting this key.
-        # This correctly handles drivers who appear in both (counted once).
-        if batch_driver_assignment_ids:
-            new_selects = " UNION ALL ".join(
-                f"SELECT :new_did_{i} AS driverassignmentid"
-                for i in range(len(batch_driver_assignment_ids))
-            )
-            new_params = {f"new_did_{i}": d for i, d in enumerate(batch_driver_assignment_ids)}
-            combined_query = f"""
-                SELECT COUNT(DISTINCT driverassignmentid) FROM (
-                    SELECT driverassignmentid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :period_id
-                      AND companyid      = :company_id
-                      AND linetype       = 'DailyStatus'
-                      AND status        != 'Void'
-                      AND notes          = :status_code
-                      {excl}
-                    UNION ALL
-                    {new_selects}
-                ) combined
-            """
-        else:
-            new_params = {}
-            combined_query = f"""
-                SELECT COUNT(DISTINCT driverassignmentid) FROM (
-                    SELECT driverassignmentid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :period_id
-                      AND companyid      = :company_id
-                      AND linetype       = 'DailyStatus'
-                      AND status        != 'Void'
-                      AND notes          = :status_code
-                      {excl}
-                ) combined
-            """
-        r = await db.execute(
-            text(combined_query),
-            {**base_params, **new_params},
-        )
-        total_distinct = r.scalar_one()
-        if total_distinct > limit:
+    if limits["limitusesacrossdriversenabled"]:
+        limit = limits["limitusesacrossdrivers"]
+        # Distinct drivers after the batch: the existing selections (excluding the batch's
+        # slots) unioned with the batch's drivers, so a driver in both counts once.
+        drivers_after = {
+            int(r) for r in (await db.execute(
+                text(f"SELECT DISTINCT driverassignmentid {canonical} {excl}"), base_params,
+            )).scalars().all()
+        } | set(batch_driver_assignment_ids)
+        if len(drivers_after) > limit:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"Status key '{status_code}' has reached its across-all-drivers limit "
+                    f"Status key '{name}' has reached its across-all-drivers limit "
                     f"of {limit} distinct driver(s) per period. "
-                    f"Would have {total_distinct} distinct driver(s)."
+                    f"Would have {len(drivers_after)} distinct driver(s)."
                 ),
             )
 
     # ── Per-day limit ─────────────────────────────────────────────────── #
-    if key_row["limitusesperdayenabled"]:
-        limit = key_row["limitusesperday"]
-        r = await db.execute(
-            text(f"""
-                SELECT COUNT(*) FROM payroll.payrolldraftlines
-                WHERE payrollperiodid = :period_id
-                  AND companyid      = :company_id
-                  AND workdate       = :work_date
-                  AND linetype       = 'DailyStatus'
-                  AND status        != 'Void'
-                  AND notes          = :status_code
-                  {excl}
-            """),
+    if limits["limitusesperdayenabled"]:
+        limit = limits["limitusesperday"]
+        existing = (await db.execute(
+            text(f"SELECT COUNT(*) {canonical} AND workdate = :work_date {excl}"),
             {"work_date": work_date, **base_params},
-        )
-        existing = r.scalar_one()
+        )).scalar_one()
         if existing + batch_count > limit:
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    f"Status key '{status_code}' has reached its per-day limit "
+                    f"Status key '{name}' has reached its per-day limit "
                     f"of {limit} use(s) for {work_date}. "
                     f"({existing} existing + {batch_count} in this save = {existing + batch_count})"
                 ),

@@ -170,18 +170,18 @@ async def _insert_off_status_key(
     result = await direct_db.execute(
         _text("""
             INSERT INTO payroll.payrollstatuskeys
-                (companyid, branchid, statuscode, normalizedstatuscode, keyname,
-                 hoursvalue, isoffreason, isactive, displayorder)
+                (companyid, statuscode, normalizedstatuscode, keyname, normalizedkeyname,
+                 allowancecategory, hoursvalue, isoffreason, isactive, displayorder)
             VALUES
-                (:cid, :bid, :code, :code, :name,
-                 0, TRUE, TRUE, 99)
+                (:cid, :code, :code, :name, :nname,
+                 'Other', 0, TRUE, TRUE, 99)
             RETURNING statuskeyid
         """),
         {
             "cid": company_id,
-            "bid": branch_id,
             "code": key_code,
             "name": f"Test Off Key {key_code}",
+            "nname": f"Test Off Key {key_code}".lower(),
         },
     )
     return result.scalar_one()
@@ -657,7 +657,8 @@ async def _clean_finalized(direct_db, branch_id: int) -> None:
             ):
                 await direct_db.execute(_text(stmt), {"ids": period_ids})
     await direct_db.execute(
-        _text("DELETE FROM payroll.payrollstatuskeys WHERE branchid = :branch_id AND statuscode LIKE 'CP25FIN_%'"),
+        _text("DELETE FROM payroll.payrollstatuskeys WHERE statuscode LIKE 'CP25FIN_%' AND companyid = "
+              "(SELECT companyid FROM core.branches WHERE branchid = :branch_id)"),
         {"branch_id": branch_id},
     )
     await direct_db.commit()

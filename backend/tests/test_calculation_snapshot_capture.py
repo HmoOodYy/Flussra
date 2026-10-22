@@ -83,7 +83,7 @@ async def test_a_snapshot_freezes_versions_currency_identity_and_totals(
     frozen = await capture(p3c_engine, tenant, period)
     content = await _content(p3c_engine, frozen.snapshot_id)
 
-    assert content["CalculationVersion"] == CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v2"
+    assert content["CalculationVersion"] == CURRENT_PAYROLL_CALCULATION_VERSION == "payroll-calculation-v3"
     assert (content["PayableRoundingVersion"], content["MinMaxProrationVersion"]) == (
         "payable-rounding-v1", "minmax-proration-v1")
     assert (content["CurrencyCode"], content["CurrencyMinorUnitDigits"]) == ("USD", 2)
@@ -175,7 +175,6 @@ async def test_lines_are_per_source_detail_with_target_rate_provenance_and_no_sy
         assert line["CalculationVersion"] == "cp4a-per-unit-v1"
         assert line["ResolvedRateAmount"] == D("0.3333")
         assert line["Quantity"] == D("1") and line["CalculatedAmount"] == D("0.3333")
-        assert line["RateTypeID"] is None and line["DriverRateID"] is None
     (bonus_line,) = [ln for ln in total["Lines"] if ln["SourceType"] == "BonusEvent"]
     assert bonus_line["LineType"] == "BONUS" and bonus_line["LineScope"] == "Period"
     assert bonus_line["CalculatedAmount"] == D("2.00") and bonus_line["BonusEventID"] is not None
@@ -200,18 +199,17 @@ async def test_the_used_rate_evidence_records_the_target_schedule_and_never_a_pa
         SELECT evidencekind, sourcetypesnapshot, driverratescheduleid, ratedefinitionid,
                paydefinitionid, ratecomponentdefinitionid, rateamountsnapshot,
                ratestatussnapshot, effectivefromsnapshot, effectivetosnapshot,
-               driverassignmentid, driverid, ratetypeid, driverrateid
+               driverassignmentid, driverid, statusratecolumnid
         FROM payroll.payrollcalculationsnapshotusedratedefinitions
         WHERE payrollcalculationsnapshotid = %s
     """, frozen.snapshot_id)
     ((kind, source, schedule_id, rate_definition_id, pay_definition_id, component_id, amount,
-      status, effective_from, effective_to, assignment_id, driver_id, rate_type_id,
-      driver_rate_id),) = evidence
+      status, effective_from, effective_to, assignment_id, driver_id, status_column_id),) = evidence
     assert (kind, source) == ("DriverRateSchedule", "DraftLine")
     assert pay_definition_id == definition["pay_definition_id"] and component_id is not None
     assert amount == D("0.3333") and status == "Approved"
     assert (assignment_id, driver_id) == (tenant.driver_a, tenant.driver_a_id)
-    assert rate_type_id is None and driver_rate_id is None
+    assert status_column_id is None
     ((live_schedule, live_definition, live_from),) = rows(tenant, """
         SELECT driverratescheduleid, ratedefinitionid, effectivefrom
         FROM payroll.driverrateschedules WHERE driverratescheduleid = %s
@@ -349,7 +347,7 @@ async def test_a_negative_maximum_adjustment_is_frozen_with_its_rule_evidence(
 async def test_status_pay_and_bonus_freeze_as_components_with_reconciling_evidence(
     p3c_client, p3c_engine, tenant,
 ):
-    column_id, driver_rate_id = status_pay_setup(tenant, "0.3333")
+    column_id, schedule_id = status_pay_setup(tenant, "0.3333")
     period, _, _ = await open_period(p3c_client, p3c_engine, tenant)
     for offset in range(3):
         await enter(p3c_client, tenant, period, offset, status_key="PAID")
@@ -360,27 +358,30 @@ async def test_status_pay_and_bonus_freeze_as_components_with_reconciling_eviden
 
     (status,) = _kind(total, "STATUS")
     assert status["StatusRateColumnID"] == column_id
-    assert status["StatusRateColumnNameSnapshot"] == "Status pay"
+    assert status["StatusRateColumnNameSnapshot"] == "Status Pay"
     assert (status["PreRoundingAmount"], status["OfficialAmount"], status["SourceCount"]) == (
         D("0.9999"), D("1.00"), 3)
     assert (total["StatusPay"], total["DailyPay"], total["BonusTotal"]) == (D("1.00"), D("0"), D("1.50"))
     status_lines = [ln for ln in total["Lines"] if ln["SourceType"] == "StatusEntryState"]
     assert len(status_lines) == 3
     for line in status_lines:
-        # Status stays assignment-owned: the legacy rate provenance is on the Status line only.
+        # A Status line freezes its target provenance: the Status rate column, its
+        # RateDefinition and the exact Driver schedule; hours are the quantity.
         assert line["LineType"] == "STATUS" and line["StatusRateColumnID"] == column_id
-        assert line["DriverRateID"] == driver_rate_id and line["RateTypeID"] is not None
+        assert line["DriverRateScheduleID"] == schedule_id and line["RateDefinitionID"] is not None
         assert line["ResolvedRateAmount"] == D("0.3333") and line["PayrollPeriodDefinitionID"] is None
-        assert line["DriverRateScheduleID"] is None
+        assert line["PayDefinitionID"] is None and line["Quantity"] == D("1")
+        assert line["CalculationStatus"] == "Calculated"
     assert total["MinMax"]["BaseStatusAmount"] == D("1.00")
     assert total["MinMax"]["BaseAmount"] == D("1.00")
-    ((kind, source, driver_rate, amount),) = rows(tenant, """
-        SELECT evidencekind, sourcetypesnapshot, driverrateid, rateamountsnapshot
+    ((kind, source, used_schedule, used_column, pay_definition, amount),) = rows(tenant, """
+        SELECT evidencekind, sourcetypesnapshot, driverratescheduleid, statusratecolumnid,
+               paydefinitionid, rateamountsnapshot
         FROM payroll.payrollcalculationsnapshotusedratedefinitions
         WHERE payrollcalculationsnapshotid = %s
     """, frozen.snapshot_id)
-    assert (kind, source, driver_rate, amount) == (
-        "StatusDriverRate", "StatusEntryState", driver_rate_id, D("0.3333"))
+    assert (kind, source, used_schedule, used_column, pay_definition, amount) == (
+        "DriverRateSchedule", "StatusEntryState", schedule_id, column_id, None, D("0.3333"))
 
     counts = snapshot_table_counts(tenant, frozen.snapshot_id)
     assert counts["status_entries"] == 3 and counts["bonus_events"] == 1

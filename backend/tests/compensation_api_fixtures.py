@@ -26,7 +26,10 @@ from tests.compensation_database_fixtures import make_branch, make_company, make
 PERMISSIONS = ["payitems.view", "payitems.edit", "payrates.view", "payrates.edit"]
 
 
-@pytest_asyncio.fixture(scope="session", name="p3c_engine")
+# Module scope, like the database they are built on (see ``p3b_database``): every importing module
+# has always had its own instance, and at session scope each one kept its pooled connections
+# open until the process ended.
+@pytest_asyncio.fixture(scope="module", name="p3c_engine")
 async def p3c_database_engine(p3b_dsn):
     url = (
         f"postgresql+asyncpg://{p3b_dsn['user']}@{p3b_dsn['host']}:{p3b_dsn['port']}"
@@ -39,7 +42,7 @@ async def p3c_database_engine(p3b_dsn):
         await engine.dispose()
 
 
-@pytest_asyncio.fixture(scope="session", name="p3c_app")
+@pytest_asyncio.fixture(scope="module", name="p3c_app")
 async def p3c_application(p3c_engine):
     from app.main import create_app
 

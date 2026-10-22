@@ -1,6 +1,7 @@
 """
 Settings domain router — /settings/company, /settings/branches,
-and per-branch payroll setup + status keys.
+per-branch payroll setup, and the Company Status catalog (keys, Branch usage limits and
+Status rate columns).
 
 All endpoints require a valid JWT.
 Company and user identity come from the token; access checks are enforced
@@ -15,7 +16,14 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.dependencies import get_current_user, get_db
-from app.settings import branch_reads, branches, company, status_keys, status_rate_columns
+from app.settings import (
+    branch_reads,
+    branches,
+    company,
+    status_key_limits,
+    status_keys,
+    status_rate_columns,
+)
 from app.settings.schemas import (
     BranchAdmin,
     BranchCreate,
@@ -24,10 +32,13 @@ from app.settings.schemas import (
     CompanyUpdate,
     OnboardingOptionsResponse,
     StatusKey,
+    StatusKeyBranchLimits,
+    StatusKeyBranchLimitsUpdate,
     StatusKeyCreate,
     StatusKeyUpdate,
     StatusRateColumn,
     StatusRateColumnCreate,
+    StatusRateColumnUpdate,
     SupportedCurrency,
 )
 
@@ -299,30 +310,28 @@ async def set_default_branch(
 
 
 # ---------------------------------------------------------------------------
-# Payroll status keys
+# Company Status catalog
 # ---------------------------------------------------------------------------
 
 @router.get(
-    "/branches/{branch_id}/status-keys",
+    "/status-keys",
     response_model=list[StatusKey],
-    summary="List payroll status keys for a branch",
+    summary="List the Company's payroll Statuses",
     description=(
-        "Returns the work-status codes configured for the branch "
-        "(e.g. Vacation, Sick Day, On Leave).  By default only active keys "
-        "are returned; pass `include_inactive=true` to see deactivated ones "
-        "as well.\n\n"
-        "Any authenticated user with branch access can read this."
+        "Returns the Company-wide Status catalog shared by every Branch (for example "
+        "Vacation, Sick Day), each with its canonical name, aliases, Category, hours, "
+        "full-day-off setting and rate column. By default only active Statuses are "
+        "returned; pass `include_inactive=true` to see deactivated ones as well.\n\n"
+        "Any authenticated user with access to the Company can read this."
     ),
-    responses={403: {"description": "No access to this branch"}},
+    responses={403: {"description": "No access to this company"}},
 )
 async def list_status_keys(
-    branch_id: int,
     token: TokenDep,
     db: DbDep,
-    include_inactive: bool = Query(False, description="Include deactivated keys"),
+    include_inactive: bool = Query(False, description="Include deactivated Statuses"),
 ) -> list[StatusKey]:
     return await status_keys.get_status_keys(
-        branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -331,34 +340,32 @@ async def list_status_keys(
 
 
 @router.post(
-    "/branches/{branch_id}/status-keys",
+    "/status-keys",
     response_model=StatusKey,
     status_code=201,
-    summary="Create a new payroll status key",
+    summary="Create a Company Status",
     description=(
-        "Adds a new work-status code for the branch.  The normalized code "
-        "(uppercased, non-alphanumeric chars replaced by `_`) must be unique "
-        "among active keys for this branch.\n\n"
+        "Adds a Status to the Company catalog. The technical code is generated. The "
+        "normalized name must be unique among the Company's active Statuses and, with each "
+        "alias, must not equal another active Status's name or alias "
+        "(`STATUS_NAME_NOT_UNIQUE`, `STATUS_ALIAS_AMBIGUOUS`).\n\n"
         "Business rules:\n"
-        "- `hours_value` must be 0–24.\n"
-        "- `deducts_from_yearly_allowance=true` is **not available yet** — "
-        "yearly allowance tracking is a future feature; sending `true` returns 422.\n\n"
+        "- `category` is required, from a fixed set.\n"
+        "- `hours_value` must be 0-24, and greater than 0 when a rate column is set.\n"
+        "- `deducts_from_yearly_allowance=true` is **not available yet**.\n\n"
         "Requires AllCompanyBranches scope."
     ),
     responses={
         403: {"description": "Insufficient scope"},
-        404: {"description": "Branch not found"},
-        422: {"description": "Validation error or duplicate code"},
+        422: {"description": "Validation error, duplicate name or ambiguous alias"},
     },
 )
 async def create_status_key(
-    branch_id: int,
     body: StatusKeyCreate,
     token: TokenDep,
     db: DbDep,
 ) -> StatusKey:
     return await status_keys.create_status_key(
-        branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
@@ -367,46 +374,45 @@ async def create_status_key(
 
 
 @router.patch(
-    "/branches/{branch_id}/status-keys/{key_id}",
+    "/status-keys/{key_id}",
     response_model=StatusKey,
-    summary="Partially update a status key",
+    summary="Partially update a Company Status",
     description=(
-        "Applies non-null fields from the request body.  The same business "
-        "rules as creation apply to the merged result.\n\n"
+        "Applies the fields sent. `aliases` replaces the whole alias set atomically. Once a "
+        "Status has been selected its hours, full-day-off setting, Category and rate "
+        "column cannot change (409 `STATUS_KEY_IN_USE`): deactivate it and create a new "
+        "Status. Name, display order, active flag and aliases stay editable.\n\n"
         "Requires AllCompanyBranches scope."
     ),
     responses={
         403: {"description": "Insufficient scope"},
         404: {"description": "Status key not found"},
-        422: {"description": "Validation error or duplicate code"},
+        409: {"description": "STATUS_KEY_IN_USE"},
+        422: {"description": "Validation error, duplicate name or ambiguous alias"},
     },
 )
 async def update_status_key(
-    branch_id: int,
     key_id: int,
     body: StatusKeyUpdate,
     token: TokenDep,
     db: DbDep,
 ) -> StatusKey:
     return await status_keys.update_status_key(
-        key_id=key_id,
-        branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
+        key_id=key_id,
         data=body,
         db=db,
     )
 
 
 @router.delete(
-    "/branches/{branch_id}/status-keys/{key_id}",
+    "/status-keys/{key_id}",
     response_model=StatusKey,
-    summary="Deactivate a status key (soft delete)",
+    summary="Deactivate a Company Status (soft delete)",
     description=(
-        "Sets `is_active=false` on the key.  The key is not removed from the "
-        "database; it remains visible with `include_inactive=true`.  "
-        "Idempotent: calling DELETE on an already-inactive key returns it "
-        "unchanged.\n\n"
+        "Sets `is_active=false`. The Status is not removed: selections and frozen evidence "
+        "keep naming it, and it stays visible with `include_inactive=true`. Idempotent.\n\n"
         "Requires AllCompanyBranches scope."
     ),
     responses={
@@ -415,13 +421,39 @@ async def update_status_key(
     },
 )
 async def delete_status_key(
-    branch_id: int,
     key_id: int,
     token: TokenDep,
     db: DbDep,
 ) -> StatusKey:
     return await status_keys.delete_status_key(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
         key_id=key_id,
+        db=db,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Branch usage limits of Company Statuses
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/branches/{branch_id}/status-key-limits",
+    response_model=list[StatusKeyBranchLimits],
+    summary="List the Branch usage limits of the Company's Statuses",
+    description=(
+        "One entry per active Status of the Company with the Branch's four optional hard "
+        "limits (all disabled when the Branch has none).\n\n"
+        "Any authenticated user with access to the Branch can read this."
+    ),
+    responses={403: {"description": "No access to this branch"}, 404: {"description": "Branch not found"}},
+)
+async def list_status_key_limits(
+    branch_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> list[StatusKeyBranchLimits]:
+    return await status_key_limits.list_branch_limits(
         branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
@@ -429,29 +461,59 @@ async def delete_status_key(
     )
 
 
+@router.put(
+    "/branches/{branch_id}/status-keys/{key_id}/limits",
+    response_model=StatusKeyBranchLimits,
+    summary="Set the Branch usage limits of one Status",
+    description=(
+        "Replaces the four optional hard limits of the Status in this Branch. Every limit "
+        "disabled removes the Branch's row (no limits).\n\n"
+        "Requires AllCompanyBranches scope."
+    ),
+    responses={
+        403: {"description": "Insufficient scope"},
+        404: {"description": "Branch or Status key not found"},
+        422: {"description": "Validation error"},
+    },
+)
+async def put_status_key_limits(
+    branch_id: int,
+    key_id: int,
+    body: StatusKeyBranchLimitsUpdate,
+    token: TokenDep,
+    db: DbDep,
+) -> StatusKeyBranchLimits:
+    return await status_key_limits.put_branch_limits(
+        branch_id=branch_id,
+        key_id=key_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        data=body,
+        db=db,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Status rate columns (CP-2D2)
+# Status rate columns (Company-owned)
 # ---------------------------------------------------------------------------
 
 @router.get(
-    "/branches/{branch_id}/status-rate-columns",
+    "/status-rate-columns",
     response_model=list[StatusRateColumn],
-    summary="List status rate columns for a branch",
+    summary="List the Company's Status rate columns",
     description=(
-        "Returns all active status rate columns for the branch.  Each column "
-        "is backed by a RateType and can be assigned to a status key to enable "
-        "automatic payment calculation (HoursValue × driver rate).\n\n"
-        "Any authenticated user with branch access can read this."
+        "Returns the Company's active Status rate columns. A Status bound to a column is "
+        "paid hours x the Driver's rate for that column; each column owns one scalar rate "
+        "definition against which a Driver's Status rates are authored.\n\n"
+        "Any authenticated user with access to the Company can read this."
     ),
 )
 async def list_status_rate_columns(
-    branch_id: int,
     token: TokenDep,
     db: DbDep,
     include_inactive: bool = Query(False),
 ) -> list[StatusRateColumn]:
     return await status_rate_columns.list_status_rate_columns(
-        branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         db=db,
@@ -460,30 +522,86 @@ async def list_status_rate_columns(
 
 
 @router.post(
-    "/branches/{branch_id}/status-rate-columns",
+    "/status-rate-columns",
     response_model=StatusRateColumn,
     status_code=201,
-    summary="Create a status rate column",
+    summary="Create a Status rate column",
     description=(
-        "Creates a named rate-column config for status payment.  Requires "
-        "AllCompanyBranches scope."
+        "Creates a Company Status rate column together with its scalar rate definition. "
+        "`is_default=true` makes it the Company default (the previous default is "
+        "demoted). Requires AllCompanyBranches scope."
     ),
-    responses={
-        403: {"description": "Insufficient scope"},
-        404: {"description": "Branch not found"},
-        422: {"description": "Validation error"},
-    },
+    responses={403: {"description": "Insufficient scope"}, 422: {"description": "Validation error"}},
 )
 async def create_status_rate_column(
-    branch_id: int,
     body: StatusRateColumnCreate,
     token: TokenDep,
     db: DbDep,
 ) -> StatusRateColumn:
     return await status_rate_columns.create_status_rate_column(
-        branch_id=branch_id,
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         data=body,
+        db=db,
+    )
+
+
+@router.patch(
+    "/status-rate-columns/{column_id}",
+    response_model=StatusRateColumn,
+    summary="Rename, activate or make a Status rate column the default",
+    description=(
+        "Applies the fields sent. The default column cannot be cleared or deactivated "
+        "(409 `STATUS_RATE_COLUMN_IS_DEFAULT`): make another column the default instead. A "
+        "column active Statuses are bound to cannot be deactivated (409 "
+        "`STATUS_RATE_COLUMN_IN_USE`). Requires AllCompanyBranches scope."
+    ),
+    responses={
+        403: {"description": "Insufficient scope"},
+        404: {"description": "Status rate column not found"},
+        409: {"description": "Default or in-use column"},
+        422: {"description": "Validation error"},
+    },
+)
+async def update_status_rate_column(
+    column_id: int,
+    body: StatusRateColumnUpdate,
+    token: TokenDep,
+    db: DbDep,
+) -> StatusRateColumn:
+    return await status_rate_columns.update_status_rate_column(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        column_id=column_id,
+        data=body,
+        db=db,
+    )
+
+
+@router.delete(
+    "/status-rate-columns/{column_id}",
+    response_model=StatusRateColumn,
+    summary="Deactivate a Status rate column (soft delete)",
+    description=(
+        "Sets `is_active=false` (idempotent). The column and its rate definition stay for "
+        "the Driver schedules and frozen evidence that name them. Refused for the default "
+        "column and for a column active Statuses are bound to. Requires AllCompanyBranches "
+        "scope."
+    ),
+    responses={
+        403: {"description": "Insufficient scope"},
+        404: {"description": "Status rate column not found"},
+        409: {"description": "Default or in-use column"},
+    },
+)
+async def delete_status_rate_column(
+    column_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> StatusRateColumn:
+    return await status_rate_columns.deactivate_status_rate_column(
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
+        column_id=column_id,
         db=db,
     )

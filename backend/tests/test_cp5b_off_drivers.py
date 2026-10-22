@@ -155,8 +155,8 @@ async def _clean(db: AsyncConnection, branch_id: int) -> None:
             ):
                 await db.execute(_text(stmt), {"ids": period_ids})
     await db.execute(
-        _text("DELETE FROM payroll.payrollstatuskeys WHERE branchid = :branch_id AND statuscode LIKE 'CP5B_%'"),
-        {"branch_id": branch_id},
+        _text("DELETE FROM payroll.payrollstatuskeys WHERE companyid = :company_id AND statuscode LIKE 'CP5B_%'"),
+        {"company_id": _COMPANY_ID},
     )
     await db.commit()
 
@@ -303,16 +303,16 @@ async def _status_key(db: AsyncConnection, branch_id: int, code: str, is_off: bo
     return int((await db.execute(
         _text("""
             INSERT INTO payroll.payrollstatuskeys
-                (companyid, branchid, statuscode, normalizedstatuscode, keyname,
-                 hoursvalue, isoffreason, isactive, displayorder)
-            VALUES (:company_id, :branch_id, :code, :code, :name, 0, :is_off, TRUE, 990)
+                (companyid, statuscode, normalizedstatuscode, keyname, normalizedkeyname,
+                 allowancecategory, hoursvalue, isoffreason, isactive, displayorder)
+            VALUES (:company_id, :code, :code, :name, :nname, 'Other', 0, :is_off, TRUE, 990)
             RETURNING statuskeyid
         """),
         {
             "company_id": _COMPANY_ID,
-            "branch_id": branch_id,
             "code": code,
             "name": f"{code} label",
+            "nname": f"{code} label".lower(),
             "is_off": is_off,
         },
     )).scalar_one())
@@ -673,7 +673,6 @@ class TestOffDrivers:
         days = await _period_dates(direct_db, period_id)
         await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[0], "STATUS_PAYMENT", source_type="System")
         await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[1], "SYS_MIN_TOPUP", source_type="System")
         bonus = await session_client.post(
             f"/payroll/periods/{period_id}/bonuses",
@@ -683,6 +682,18 @@ class TestOffDrivers:
         assert bonus.status_code == 201, bonus.text
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 1
 
+        # Ordinary work cannot share a day with a full-day-off Status (the database refuses it),
+        # so the day has to stop being off first; then the worked day disqualifies the driver.
+        await direct_db.execute(
+            _text("""
+                UPDATE payroll.payrollperioddriverdayentrystate SET isvoided = TRUE
+                WHERE payrollperiodid = :period_id AND driverassignmentid = :driver_assignment_id
+                  AND workdate = :work_date
+            """),
+            {"period_id": period_id, "driver_assignment_id": paytest_driver_assignment_id,
+             "work_date": days[2]},
+        )
+        await direct_db.commit()
         await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[2], "HOURS")
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 

@@ -5,7 +5,7 @@ Covers:
   - Company profile (read + partial update)
   - Branch administration (full CRUD + metrics)
   - Branch payroll setup (upsert)
-  - Payroll status keys (full CRUD)
+  - Company Status catalog (keys, aliases), Branch usage limits and Status rate columns
   - Pay items & branch configuration (read + patch)
   - Company custom pay items: catalog reads, usage and retirement (definition is CDPI)
 """
@@ -15,17 +15,13 @@ from decimal import Decimal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.payroll_setup.schemas import BoundaryChoicesResponse, SetupResponse
+from app.settings.status_names import STATUS_CATEGORIES, STATUS_NAME_MAX_LENGTH
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _BRANCH_STATUSES = {"Active", "Inactive", "Closed"}
-
-_ALLOWANCE_CATEGORIES = {
-    "Vacation", "Sick", "Bereavement", "Jury Duty", "Personal", "Other",
-}
-
 
 # ---------------------------------------------------------------------------
 # Company
@@ -118,7 +114,6 @@ class BranchAdmin(BaseModel):
     schedule_readiness_reason: str | None = None
     # Period start date the readiness reason was evaluated against; same visibility as the reason.
     schedule_readiness_date: date | None = None
-    status_keys_count: int | None = None
     total_people_count: int | None = None
     active_drivers_count: int | None = None
     pending_approvals_count: int | None = None
@@ -234,37 +229,29 @@ class OnboardingOptionsResponse(BaseModel):
     choices: BoundaryChoicesResponse | None
 
 
-# ---------------------------------------------------------------------------
-# Payroll status keys
-# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
-# Status rate columns (CP-2D2)
+# Status rate columns (Company-owned)
 # ---------------------------------------------------------------------------
 
 class StatusRateColumn(BaseModel):
-    """A named rate-column config for status payment, backed by a RateType."""
+    """A Company-owned Status rate column. It owns one scalar RateDefinition, against which
+    each Driver's Status rate values are authored as ordinary rate schedules."""
     status_rate_column_id: int
     company_id: int
-    branch_id: int
-    rate_type_id: int
-    rate_type_code: str
     column_name: str
     is_default: bool
     is_active: bool
+    rate_definition_id: int
+    # The one scalar component a Driver's schedule value is authored against.
+    rate_component_definition_id: int
     created_at_utc: datetime
+    updated_at_utc: datetime | None = None
 
 
 class StatusRateColumnCreate(BaseModel):
-    """
-    Create a custom status rate column.
-
-    The service auto-creates a new company-owned RateType backed by this column.
-    Do NOT supply rate_type_id — it is derived internally.
-    unit_name defaults to "Hour" (status payment is always hour-based).
-    """
-    column_name: str
-    unit_name: str = "Hour"
+    column_name: str = Field(max_length=STATUS_NAME_MAX_LENGTH)
     is_default: bool = False
 
     @field_validator("column_name")
@@ -274,81 +261,97 @@ class StatusRateColumnCreate(BaseModel):
             raise ValueError("column_name must not be blank")
         return v.strip()
 
-    @field_validator("unit_name")
+
+class StatusRateColumnUpdate(BaseModel):
+    """Partial update; only the fields sent change."""
+    column_name: str | None = Field(default=None, max_length=STATUS_NAME_MAX_LENGTH)
+    is_default: bool | None = None
+    is_active: bool | None = None
+
+    @field_validator("column_name")
     @classmethod
-    def unit_name_non_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("unit_name must not be blank")
-        return v.strip()
+    def name_non_empty(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("column_name must not be blank if provided")
+        return v.strip() if v is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Company Status catalog
+# ---------------------------------------------------------------------------
+
+def _check_hours(v: Decimal | None) -> Decimal | None:
+    if v is not None and not (Decimal("0") <= v <= Decimal("24")):
+        raise ValueError("hours_value must be between 0 and 24")
+    return v
+
+
+def _check_category(v: str | None) -> str | None:
+    if v is not None and v not in STATUS_CATEGORIES:
+        raise ValueError(f"category must be one of {list(STATUS_CATEGORIES)}")
+    return v
+
+
+def _check_yearly_allowance(v: bool | None) -> bool | None:
+    if v:
+        raise ValueError("Yearly allowance tracking is not available yet.")
+    return v
+
+
+def _check_aliases(v: list[str] | None) -> list[str] | None:
+    if v is None:
+        return None
+    for alias in v:
+        if not alias.strip():
+            raise ValueError("an alias must not be blank")
+        if len(alias.strip()) > STATUS_NAME_MAX_LENGTH:
+            raise ValueError(f"an alias must be at most {STATUS_NAME_MAX_LENGTH} characters")
+    return [alias.strip() for alias in v]
 
 
 class StatusKey(BaseModel):
-    """
-    A single branch payroll status key — returned by all status-key endpoints.
+    """A Company Status.
 
-    key_name      : user-facing label (e.g. "Vacation", "Sick Day").
-                    This is what the user creates and edits.
-    status_code   : internal code generated by the service (SK_XXXXXXXX).
-                    Kept for backward compat; not shown in the UI.
-    normalized_status_code : uppercase/normalized version of status_code.
-                             Used for the uniqueness constraint.
-    display_order : legacy field, kept for DB compat but not exposed in the UI.
-    status_rate_column_id : if set, this status key generates a System draft line
-                            using HoursValue × driver rate from that column.
-                            NULL = no money for this status key.
+    key_name      : the canonical primary name every display shows. It is unique among the
+                    Company's active Statuses by normalized form.
+    aliases       : input shortcuts only. A selection stores the Status, never the alias.
+    status_code   : the generated, immutable technical code (SK_XXXXXXXX). Read-only.
+    category      : the fixed Category set; groups and reports, never decides pay.
+    is_off_reason : the Status counts as a full day off.
+    hours_value   : hours a day of this Status stands for.
+    status_rate_column_id : the Status rate column that makes the Status monetary
+                    (hours_value x the Driver's rate); null means it is not paid.
+    is_in_use     : a selection or frozen evidence references it, so hours_value,
+                    is_off_reason, category and status_rate_column_id can no longer change.
     """
     status_key_id: int
     company_id: int
-    branch_id: int
     key_name: str
+    aliases: list[str] = []
     status_code: str
-    normalized_status_code: str
+    category: str
     hours_value: Decimal
     is_off_reason: bool
     deducts_from_yearly_allowance: bool
-    allowance_category: str | None = None
     is_active: bool
     display_order: int = 0
     status_rate_column_id: int | None = None
-    # Usage limits
-    limit_uses_per_period_enabled: bool = False
-    limit_uses_per_period: int | None = None
-    limit_uses_per_driver_enabled: bool = False
-    limit_uses_per_driver: int | None = None
-    limit_uses_across_drivers_enabled: bool = False
-    limit_uses_across_drivers: int | None = None
-    limit_uses_per_day_enabled: bool = False
-    limit_uses_per_day: int | None = None
+    is_in_use: bool = False
     created_at_utc: datetime
     updated_at_utc: datetime | None = None
 
 
 class StatusKeyCreate(BaseModel):
-    """
-    Payload to create a new status key for a branch.
-
-    key_name is the only required user-facing field.
-    status_code is generated server-side (SK_XXXXXXXX) and must not be sent.
-    display_order is managed internally (always 0 for new keys); omit it.
-    status_rate_column_id: optional; if set, generates a System payment line
-                           on save using HoursValue × driver rate for that column.
-    """
-    key_name: str
+    """Create a Company Status. The technical code is generated and must not be sent."""
+    key_name: str = Field(max_length=STATUS_NAME_MAX_LENGTH)
+    category: str
+    aliases: list[str] = []
     hours_value: Decimal = Decimal("0")
     is_off_reason: bool = True
     deducts_from_yearly_allowance: bool = False
-    allowance_category: str | None = None
     is_active: bool = True
+    display_order: int = 0
     status_rate_column_id: int | None = None
-    # Usage limits
-    limit_uses_per_period_enabled: bool = False
-    limit_uses_per_period: int | None = None
-    limit_uses_per_driver_enabled: bool = False
-    limit_uses_per_driver: int | None = None
-    limit_uses_across_drivers_enabled: bool = False
-    limit_uses_across_drivers: int | None = None
-    limit_uses_per_day_enabled: bool = False
-    limit_uses_per_day: int | None = None
 
     @field_validator("key_name")
     @classmethod
@@ -357,145 +360,105 @@ class StatusKeyCreate(BaseModel):
             raise ValueError("key_name must not be blank")
         return v.strip()
 
+    @field_validator("category")
+    @classmethod
+    def category_valid(cls, v: str) -> str:
+        return _check_category(v)
+
     @field_validator("hours_value")
     @classmethod
     def hours_in_range(cls, v: Decimal) -> Decimal:
-        if not (Decimal("0") <= v <= Decimal("24")):
-            raise ValueError("hours_value must be between 0 and 24")
-        return v
+        return _check_hours(v)
+
+    @field_validator("aliases")
+    @classmethod
+    def aliases_valid(cls, v: list[str]) -> list[str]:
+        return _check_aliases(v)
 
     @field_validator("deducts_from_yearly_allowance")
     @classmethod
     def yearly_allowance_not_available(cls, v: bool) -> bool:
-        if v:
-            raise ValueError(
-                "Yearly allowance tracking is not available yet."
-            )
-        return v
-
-    @field_validator("allowance_category")
-    @classmethod
-    def category_valid(cls, v: str | None) -> str | None:
-        if v is not None and v not in _ALLOWANCE_CATEGORIES:
-            raise ValueError(
-                f"allowance_category must be one of {sorted(_ALLOWANCE_CATEGORIES)}"
-            )
-        return v
-
-    @field_validator("limit_uses_per_period")
-    @classmethod
-    def period_limit_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("limit_uses_per_period must be a positive integer")
-        return v
-
-    @field_validator("limit_uses_per_driver")
-    @classmethod
-    def driver_limit_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("limit_uses_per_driver must be a positive integer")
-        return v
-
-    @field_validator("limit_uses_across_drivers")
-    @classmethod
-    def across_drivers_limit_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("limit_uses_across_drivers must be a positive integer")
-        return v
-
-    @field_validator("limit_uses_per_day")
-    @classmethod
-    def day_limit_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("limit_uses_per_day must be a positive integer")
-        return v
+        return _check_yearly_allowance(v)
 
 
 class StatusKeyUpdate(BaseModel):
-    """
-    Partial status-key update — only non-None fields are applied.
-    Sent via PATCH /settings/branches/{id}/status-keys/{key_id}.
-
-    key_name is the user-editable label.
-    status_code is immutable after creation (SK_ code never changes).
-    display_order is legacy; it can be patched for backward compat but is not
-    exposed in the UI.
-    status_rate_column_id: use -1 as sentinel to clear (set to NULL).
-    """
-    key_name: str | None = None
+    """Partial Status update. Only the fields sent change; ``aliases`` replaces the whole
+    alias set atomically, and ``status_rate_column_id: null`` makes the Status non-monetary."""
+    key_name: str | None = Field(default=None, max_length=STATUS_NAME_MAX_LENGTH)
+    category: str | None = None
+    aliases: list[str] | None = None
     hours_value: Decimal | None = None
     is_off_reason: bool | None = None
     deducts_from_yearly_allowance: bool | None = None
-    allowance_category: str | None = None
     is_active: bool | None = None
-    display_order: int | None = None   # legacy, kept for backward compat
-    status_rate_column_id: int | None = None  # -1 = clear to NULL
-    # Usage limits
-    limit_uses_per_period_enabled: bool | None = None
-    limit_uses_per_period: int | None = None
-    limit_uses_per_driver_enabled: bool | None = None
-    limit_uses_per_driver: int | None = None
-    limit_uses_across_drivers_enabled: bool | None = None
-    limit_uses_across_drivers: int | None = None
-    limit_uses_per_day_enabled: bool | None = None
-    limit_uses_per_day: int | None = None
+    display_order: int | None = None
+    status_rate_column_id: int | None = None
 
     @field_validator("key_name")
     @classmethod
     def name_non_empty(cls, v: str | None) -> str | None:
         if v is not None and not v.strip():
             raise ValueError("key_name must not be blank if provided")
-        return v.strip() if v else None
+        return v.strip() if v is not None else None
+
+    @field_validator("category")
+    @classmethod
+    def category_valid(cls, v: str | None) -> str | None:
+        return _check_category(v)
 
     @field_validator("hours_value")
     @classmethod
     def hours_in_range(cls, v: Decimal | None) -> Decimal | None:
-        if v is not None and not (Decimal("0") <= v <= Decimal("24")):
-            raise ValueError("hours_value must be between 0 and 24")
-        return v
+        return _check_hours(v)
+
+    @field_validator("aliases")
+    @classmethod
+    def aliases_valid(cls, v: list[str] | None) -> list[str] | None:
+        return _check_aliases(v)
 
     @field_validator("deducts_from_yearly_allowance")
     @classmethod
     def yearly_allowance_not_available(cls, v: bool | None) -> bool | None:
-        if v:
-            raise ValueError(
-                "Yearly allowance tracking is not available yet."
-            )
-        return v
+        return _check_yearly_allowance(v)
 
-    @field_validator("allowance_category")
-    @classmethod
-    def category_valid(cls, v: str | None) -> str | None:
-        if v is not None and v not in _ALLOWANCE_CATEGORIES:
-            raise ValueError(
-                f"allowance_category must be one of {sorted(_ALLOWANCE_CATEGORIES)}"
-            )
-        return v
 
-    @field_validator("limit_uses_per_period")
+# ---------------------------------------------------------------------------
+# Branch usage limits
+# ---------------------------------------------------------------------------
+
+class StatusKeyBranchLimits(BaseModel):
+    """The four optional hard usage limits of one Status in one Branch. A Status without a
+    row has every limit disabled."""
+    branch_id: int
+    status_key_id: int
+    key_name: str
+    limit_uses_per_period_enabled: bool = False
+    limit_uses_per_period: int | None = None
+    limit_uses_per_driver_enabled: bool = False
+    limit_uses_per_driver: int | None = None
+    limit_uses_across_drivers_enabled: bool = False
+    limit_uses_across_drivers: int | None = None
+    limit_uses_per_day_enabled: bool = False
+    limit_uses_per_day: int | None = None
+
+
+class StatusKeyBranchLimitsUpdate(BaseModel):
+    """Replace the limits of one Status in one Branch. Every limit disabled removes the row."""
+    limit_uses_per_period_enabled: bool = False
+    limit_uses_per_period: int | None = None
+    limit_uses_per_driver_enabled: bool = False
+    limit_uses_per_driver: int | None = None
+    limit_uses_across_drivers_enabled: bool = False
+    limit_uses_across_drivers: int | None = None
+    limit_uses_per_day_enabled: bool = False
+    limit_uses_per_day: int | None = None
+
+    @field_validator(
+        "limit_uses_per_period", "limit_uses_per_driver",
+        "limit_uses_across_drivers", "limit_uses_per_day",
+    )
     @classmethod
-    def period_limit_positive(cls, v: int | None) -> int | None:
+    def limit_positive(cls, v: int | None) -> int | None:
         if v is not None and v <= 0:
-            raise ValueError("limit_uses_per_period must be a positive integer")
-        return v
-
-    @field_validator("limit_uses_per_driver")
-    @classmethod
-    def driver_limit_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("limit_uses_per_driver must be a positive integer")
-        return v
-
-    @field_validator("limit_uses_across_drivers")
-    @classmethod
-    def across_drivers_limit_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("limit_uses_across_drivers must be a positive integer")
-        return v
-
-    @field_validator("limit_uses_per_day")
-    @classmethod
-    def day_limit_positive(cls, v: int | None) -> int | None:
-        if v is not None and v <= 0:
-            raise ValueError("limit_uses_per_day must be a positive integer")
+            raise ValueError("a usage limit must be a positive integer")
         return v

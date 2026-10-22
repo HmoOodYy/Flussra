@@ -153,11 +153,10 @@ async def get_period_lines(
         "company_id": company_id,
     }
 
-    # CP-2F: for Draft periods, exclude System-sourced lines and STATUS_PAYMENT —
-    # these are financial and must not be visible until the period is promoted to Open.
+    # CP-2F: for Draft periods, exclude System-sourced lines: they are financial and must not
+    # be visible until the period is promoted to Open.
     if period.status == "Draft":
         conditions.append("dl.sourcetype != 'System'")
-        conditions.append("dl.linetype IS DISTINCT FROM 'STATUS_PAYMENT'")
 
     if driver_assignment_id is not None:
         conditions.append("dl.driverassignmentid = :driver_assignment_id")

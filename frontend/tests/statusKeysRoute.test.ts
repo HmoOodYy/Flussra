@@ -48,14 +48,23 @@ const statusKeyDetailSource = readFileSync(
   new URL('../src/pages/settings/status-keys/StatusKeyDetail.tsx', import.meta.url), 'utf8');
 const statusKeysDisplaySource = readFileSync(
   new URL('../src/pages/settings/status-keys/StatusKeysDisplay.tsx', import.meta.url), 'utf8');
+const statusColumnsPanelSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/StatusRateColumnsPanel.tsx', import.meta.url), 'utf8');
+const statusLimitsPanelSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/StatusLimitsPanel.tsx', import.meta.url), 'utf8');
+const statusColumnsHookSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/useStatusRateColumns.ts', import.meta.url), 'utf8');
+const statusLimitsHookSource = readFileSync(
+  new URL('../src/pages/settings/status-keys/useBranchStatusLimits.ts', import.meta.url), 'utf8');
 const settingsApiSource = readFileSync(new URL('../src/lib/settingsApi.ts', import.meta.url), 'utf8');
 const statusKeysCssSource = readFileSync(
   new URL('../src/pages/settings/status-keys/StatusKeysPage.module.css', import.meta.url), 'utf8');
 const statusKeysFeatureSources = [statusKeysPageSource, statusKeysBranchHookSource, statusKeysCollectionHookSource,
   statusKeysEditorHookSource, statusKeysModelSource, statusKeysWorkspaceSource, statusKeysEditorDialogSource,
-  statusKeyDetailSource, statusKeysDisplaySource].join('\n');
+  statusKeyDetailSource, statusKeysDisplaySource, statusColumnsPanelSource, statusLimitsPanelSource,
+  statusColumnsHookSource, statusLimitsHookSource].join('\n');
 const statusKeysUiSources = [statusKeysPageSource, statusKeysWorkspaceSource, statusKeysEditorDialogSource,
-  statusKeyDetailSource, statusKeysDisplaySource].join('\n');
+  statusKeyDetailSource, statusKeysDisplaySource, statusColumnsPanelSource, statusLimitsPanelSource].join('\n');
 
 // ── A. App.tsx route wiring ─────────────────────────────────────────────────
 
@@ -171,29 +180,45 @@ test('Status Keys network access stays behind exact settingsApi operations', () 
     assert.ok(functionSource, `expected settingsApi.${name}`);
     return functionSource;
   };
+  // The catalog is Company-level: no Status route is addressed through a Branch except the limits.
   assert.match(statusKeysBranchHookSource, /getSettingsBranches\(\)/);
-  assert.match(apiFunction('getSettingsBranches'), /apiClient\.get<BranchAdmin\[]>\('\/settings\/branches'\)/);
-  assert.match(statusKeysCollectionHookSource, /getBranchStatusKeys\(selectedBranchId, includeInactiveKeys\)/);
-  assert.match(apiFunction('getBranchStatusKeys'), /apiClient\.get<StatusKey\[]>\(`\/settings\/branches\/\$\{branchId\}\/status-keys`, \{\s*params: \{ include_inactive: includeInactiveKeys \},\s*\}\)/);
-  assert.match(statusKeysEditorHookSource, /createBranchStatusKey\(selectedBranchId, payload\)/);
-  assert.match(apiFunction('createBranchStatusKey'), /apiClient\.post<StatusKey>\(`\/settings\/branches\/\$\{branchId\}\/status-keys`, payload\)/);
-  assert.match(statusKeysEditorHookSource, /updateBranchStatusKey\(selectedBranchId, editingKey\.status_key_id, patchPayload\)/);
-  assert.match(statusKeysCollectionHookSource, /updateBranchStatusKey\(selectedBranchId, k\.status_key_id, \{ is_active: true \}\)/);
-  assert.match(apiFunction('updateBranchStatusKey'), /apiClient\.patch<StatusKey>\(`\/settings\/branches\/\$\{branchId\}\/status-keys\/\$\{statusKeyId\}`, payload\)/);
-  assert.match(statusKeysCollectionHookSource, /deactivateBranchStatusKey\(selectedBranchId, k\.status_key_id\)/);
-  assert.match(apiFunction('deactivateBranchStatusKey'), /apiClient\.delete<StatusKey>\(`\/settings\/branches\/\$\{branchId\}\/status-keys\/\$\{statusKeyId\}`\)/);
+  assert.match(statusKeysCollectionHookSource, /getStatusKeys\(true\)/);
+  assert.match(apiFunction('getStatusKeys'), /apiClient\.get<StatusKey\[]>\('\/settings\/status-keys', \{\s*params: \{ include_inactive: includeInactive \},\s*\}\)/);
+  assert.match(statusKeysEditorHookSource, /createStatusKey\(buildCreatePayload\(keyForm\)\)/);
+  assert.match(apiFunction('createStatusKey'), /apiClient\.post<StatusKey>\('\/settings\/status-keys', payload\)/);
+  assert.match(statusKeysEditorHookSource, /updateStatusKey\(editingKey\.status_key_id, payload\)/);
+  assert.match(statusKeysCollectionHookSource, /updateStatusKey\(k\.status_key_id, \{ is_active: true \}\)/);
+  assert.match(apiFunction('updateStatusKey'), /apiClient\.patch<StatusKey>\(`\/settings\/status-keys\/\$\{statusKeyId\}`, payload\)/);
+  assert.match(statusKeysCollectionHookSource, /deactivateStatusKey\(k\.status_key_id\)/);
+  assert.match(apiFunction('deactivateStatusKey'), /apiClient\.delete<StatusKey>\(`\/settings\/status-keys\/\$\{statusKeyId\}`\)/);
+  assert.match(statusColumnsHookSource, /getStatusRateColumns\(true\)/);
+  assert.match(apiFunction('getStatusRateColumns'), /apiClient\.get<StatusRateColumn\[]>\('\/settings\/status-rate-columns'/);
+  assert.match(apiFunction('createStatusRateColumn'), /apiClient\.post<StatusRateColumn>\('\/settings\/status-rate-columns', payload\)/);
+  assert.match(apiFunction('updateStatusRateColumn'), /apiClient\.patch<StatusRateColumn>\(`\/settings\/status-rate-columns\/\$\{columnId\}`, payload\)/);
+  assert.match(statusLimitsHookSource, /getBranchStatusKeyLimits\(branchId\)/);
+  assert.match(apiFunction('getBranchStatusKeyLimits'), /\/settings\/branches\/\$\{branchId\}\/status-key-limits/);
+  assert.match(statusLimitsHookSource, /putBranchStatusKeyLimits\(branchId, statusKeyId, limitsToPayload\(form\)\)/);
+  assert.match(apiFunction('putBranchStatusKeyLimits'), /apiClient\.put<StatusKeyBranchLimits>\(\s*`\/settings\/branches\/\$\{branchId\}\/status-keys\/\$\{statusKeyId\}\/limits`, payload\)/);
 
-  assert.match(statusKeysBranchHookSource, /import \{ getSettingsBranches \} from '\.\.\/\.\.\/\.\.\/lib\/settingsApi'/);
-  assert.match(statusKeysCollectionHookSource, /import \{[\s\S]*deactivateBranchStatusKey[\s\S]*getBranchStatusKeys[\s\S]*updateBranchStatusKey[\s\S]*\} from '\.\.\/\.\.\/\.\.\/lib\/settingsApi'/);
-  assert.match(statusKeysEditorHookSource, /import \{ createBranchStatusKey, updateBranchStatusKey \} from '\.\.\/\.\.\/\.\.\/lib\/settingsApi'/);
-  const statusKeysApiOwners = ['getSettingsBranches', 'getBranchStatusKeys', 'createBranchStatusKey', 'updateBranchStatusKey', 'deactivateBranchStatusKey']
+  const owners = ['getStatusKeys', 'createStatusKey', 'updateStatusKey', 'deactivateStatusKey', 'getStatusRateColumns',
+    'createStatusRateColumn', 'updateStatusRateColumn', 'getBranchStatusKeyLimits', 'putBranchStatusKeyLimits']
     .map(apiFunction).join('\n');
   const callRe = /apiClient\.(get|post|patch|delete|put)(?:<[^>]*>)?\(\s*(`[^`]*`|'[^']*'|"[^"]*")/g;
-  const matches = [...statusKeysApiOwners.matchAll(callRe)];
-  assert.ok(matches.length > 0, 'expected Status Keys settingsApi operations');
+  const matches = [...owners.matchAll(callRe)];
+  assert.equal(matches.length, 9);
   for (const match of matches) {
-    assert.match(match[2], /^[`'"]\/settings\/branches/, `apiClient.${match[1]} path ${match[2]} is outside /settings/branches`);
+    assert.match(match[2], /^[`'"]\/settings\/(status-keys|status-rate-columns|branches\/\$\{branchId\}\/(status-key-limits|status-keys\/\$\{statusKeyId\}\/limits))/,
+      `apiClient.${match[1]} path ${match[2]} is outside the Company Status routes`);
   }
+});
+
+test('the Status page has no Branch picker for the catalog and no removed Branch-scoped route or field', () => {
+  assert.doesNotMatch(statusKeysFeatureSources, /getBranchStatusKeys|createBranchStatusKey|updateBranchStatusKey|deactivateBranchStatusKey/);
+  assert.doesNotMatch(settingsApiSource, /branches\/\$\{branchId\}\/status-keys`|status_keys_count/);
+  // The only Branch selector is the one of the usage-limits panel.
+  assert.doesNotMatch(statusKeysPageSource, /branchSelect|<select/);
+  assert.match(statusLimitsPanelSource, /aria-label="Branch"/);
+  assert.doesNotMatch(statusKeysFeatureSources, /limit_uses_per_period_enabled:\s*keyForm|deducts_from_yearly_allowance|allowance_category/);
 });
 
 // ── G. No premature tab redirect; legacy tab intact ─────────────────────────

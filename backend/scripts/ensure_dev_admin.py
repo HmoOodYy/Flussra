@@ -1,7 +1,7 @@
 """
 Local-dev idempotent seed script.
-Creates or repairs the DEMO company, Headquarters branch, admin user,
-legacy PAYROLL_ADMIN global role (for internal auth compat), COMPANY_OWNER
+Creates or repairs the DEMO company (with its default Status rate column), Headquarters
+branch, admin user, legacy PAYROLL_ADMIN global role (for internal auth compat), COMPANY_OWNER
 company role, and the role assignment linking the admin to COMPANY_OWNER.
 
 Safe to run multiple times — every step uses INSERT ... ON CONFLICT DO NOTHING
@@ -68,6 +68,13 @@ async def main() -> None:
             COMPANY_CODE, COMPANY_NAME,
         )
         print(f"[OK] Company   id={company_id}  code={COMPANY_CODE}  name={COMPANY_NAME}")
+
+        # Every Company starts with its one default Status rate column (and the rate
+        # definition it owns). Idempotent.
+        status_column_id = await conn.fetchval(
+            "SELECT payroll.fn_EnsureDefaultStatusRateColumn($1)", company_id,
+        )
+        print(f"[OK] Status rate column id={status_column_id}  (Company default)")
 
         # ── 2. Branch ─────────────────────────────────────────────────────────
         branch_id = await conn.fetchval(
