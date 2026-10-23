@@ -67,9 +67,28 @@ The reset runs only when all of these hold:
 - its `flussra.reset_allowed` is `on`;
 - `--confirm` names the database actually connected to.
 
-A missing or different value refuses the reset. The reset then drops the Flussra
-application schemas and `public.alembic_version` in one transaction. Before
-dropping anything it follows PostgreSQL's dependency graph from those schemas.
+A missing or different value refuses the reset.
+
+The destructive step runs in an exclusive window. The reset closes the database
+to new connections (`ALLOW_CONNECTIONS false`) from a short control session in
+another database on the same server, by default `postgres` (change it with
+`--control-database`), because PostgreSQL does not let a session close its own
+database. It then checks that no other session is connected. Stop the backend
+and any other client first: an open session refuses the reset, and the reset
+never terminates sessions. A second reset of the same database is refused while
+one is running. The database is reopened when the destructive step finishes or
+fails, before the upgrade and seed connect. If the reset process is killed
+inside the window, the database stays closed rather than unprotected. Once no
+reset is running, the owner or a superuser reopens it while connected to another
+database:
+
+```sql
+ALTER DATABASE payroll_v3 WITH ALLOW_CONNECTIONS true;
+```
+
+Inside the window the reset drops the Flussra application schemas and
+`public.alembic_version` in one transaction. Before dropping anything it follows
+PostgreSQL's dependency graph from those schemas.
 If the drop would also remove any object outside them, such as a view, a column,
 a domain, a constraint or an index elsewhere, it lists those objects and changes
 nothing. Extensions and objects that do not depend on Flussra are kept. It then runs
