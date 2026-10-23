@@ -31,6 +31,7 @@ from tests.builders.transfer_scenarios import (
     open_period,
     scheduled_transfer,
 )
+from tests.target_seed import seed_period_definition, seed_target_line
 from tests.test_transfer_boundary_writer_concurrency import _bonus, _bonus_count, pause_after
 
 pytestmark = pytest.mark.asyncio
@@ -114,13 +115,12 @@ async def test_daily_facts_are_judged_with_the_frozen_zone_not_the_current_one(
 ):
     """East of UTC the current-zone day overlaps the shortened window; the frozen UTC day does not."""
     s = await _scenario(client, auth_token, direct_db, zone_after="Pacific/Kiritimati")
-    await direct_db.execute(text("""
-        INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType,
-             SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :assignment_id, :day, 'HOURS', 'Scenario', 'Active')
-    """), {"branch_id": s["source_branch"], "period_id": s["period_id"],
-           "assignment_id": s["driver"]["assignment_id"], "day": s["day"]})
+    definition = await seed_period_definition(
+        direct_db, period_id=s["period_id"], branch_id=s["source_branch"])
+    await seed_target_line(
+        direct_db, period_id=s["period_id"], branch_id=s["source_branch"],
+        driver_assignment_id=s["driver"]["assignment_id"], definition=definition,
+        quantity=1, work_date=s["day"])
     await direct_db.commit()
 
     # Window now ends the previous day 12:00Z: UTC day P is uncovered; the Kiritimati day

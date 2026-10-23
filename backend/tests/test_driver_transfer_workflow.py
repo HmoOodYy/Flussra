@@ -44,6 +44,7 @@ from tests.builders.owned_scope import (
 from tests.builders.pay_rules import insert_pay_rule
 from tests.builders.workforce import create_driver_employee_record
 from tests.builders.workforce_db import current_driver_assignment_id
+from tests.target_seed import seed_period_definition, seed_target_line
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -575,7 +576,7 @@ async def test_old_history_stays_on_old_driver_assignment(
     # a generic Draft factory.
     period_id = await _create_open_period(
         session_client, auth_token, paytest_branch_id,
-        "2092-06-01", "2092-06-07", direct_db,
+        "2089-12-25", "2089-12-31", direct_db,
     )
 
     # Get company_id for the direct INSERT (needed by the draft-line FK).
@@ -587,26 +588,13 @@ async def test_old_history_stays_on_old_driver_assignment(
 
     old_assignment_id = await current_driver_assignment_id(direct_db, drv_id)
 
-    # Insert a fake draft line directly — bypasses period-status checks
-    # intentionally so we can attach history to a Draft-status period.
-    # Required NOT NULL cols: companyid, branchid, payrollperiodid,
-    #                         driverassignmentid, linetype, sourcetype, status.
-    await direct_db.execute(
-        _text("""
-            INSERT INTO payroll.payrolldraftlines
-                (payrollperiodid, companyid, branchid, driverassignmentid,
-                 linetype, workdate, status, sourcetype)
-            VALUES
-                (:pid, :cid, :bid, :aid,
-                 'HistoryTest', '2089-12-31', 'Active', 'Manual')
-        """),
-        {
-            "pid": period_id,
-            "cid": company_id,
-            "bid": paytest_branch_id,
-            "aid": old_assignment_id,
-        },
-    )
+    # Keep a valid definition-backed source fact before the transfer boundary.
+    definition = await seed_period_definition(
+        direct_db, period_id=period_id, branch_id=paytest_branch_id, company_id=company_id)
+    line_id = await seed_target_line(
+        direct_db, period_id=period_id, branch_id=paytest_branch_id,
+        driver_assignment_id=old_assignment_id, definition=definition, company_id=company_id,
+        quantity=1, work_date="2089-12-31")
 
     # Transfer and complete
     r = await _create_transfer(
@@ -626,9 +614,9 @@ async def test_old_history_stays_on_old_driver_assignment(
     lines_old = await direct_db.execute(
         _text("""
             SELECT COUNT(*) FROM payroll.payrolldraftlines
-            WHERE driverassignmentid = :aid AND linetype = 'HistoryTest'
+            WHERE driverassignmentid = :aid AND draftlineid = :line_id
         """),
-        {"aid": old_assignment_id},
+        {"aid": old_assignment_id, "line_id": line_id},
     )
     assert lines_old.scalar_one() == 1, \
         "Draft line was removed or migrated away from the old assignment — should not happen."

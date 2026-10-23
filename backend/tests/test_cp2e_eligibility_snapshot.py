@@ -31,6 +31,7 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from tests.db_state import FINALIZED_HISTORY_TRIGGERS, suspended_test_triggers
+from tests.target_seed import seed_period_definition, seed_target_line
 
 # ---------------------------------------------------------------------------
 # Constants / helpers
@@ -1487,18 +1488,10 @@ class TestStatusPaymentRefreshEligibilityAware:
             reason_code="IncludedByExistingData",
         )
         # Insert draft line on start date
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverassignmentid,
-                     workdate, linetype, quantity, calculatedamount,
-                     sourcetype, sourceid, status, addedbyuserid)
-                VALUES (:cid, :bid, :pid, :did,
-                        :dt, 'HOURS', 8, 0,
-                        'Manual', 'test-hours', 'Active', 1)
-            """),
-            {"cid": _COMPANY_ID, "bid": branch_id, "pid": pid, "did": assignment_id, "dt": start},
-        )
+        definition = await seed_period_definition(direct_db, period_id=pid, branch_id=branch_id)
+        await seed_target_line(
+            direct_db, period_id=pid, branch_id=branch_id, driver_assignment_id=assignment_id,
+            definition=definition, quantity=8, work_date=start)
         await direct_db.commit()
         try:
             has_src = await _driver_has_existing_daily_source_on_date(
@@ -1821,21 +1814,11 @@ class TestGeneratedRowExistingSourceRescue:
         assignment_id: int,
         work_date: datetime.date,
     ) -> None:
-        await db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverassignmentid,
-                     workdate, linetype, quantity, calculatedamount,
-                     sourcetype, sourceid, status, addedbyuserid)
-                VALUES (:cid, :bid, :pid, :did,
-                        :dt, 'HOURS', 8, 0,
-                        'Manual', 'test-rescue', 'Active', 1)
-            """),
-            {
-                "cid": company_id, "bid": branch_id,
-                "pid": period_id, "did": assignment_id, "dt": work_date,
-            },
-        )
+        definition = await seed_period_definition(
+            db, period_id=period_id, branch_id=branch_id, company_id=company_id)
+        await seed_target_line(
+            db, period_id=period_id, branch_id=branch_id, driver_assignment_id=assignment_id,
+            definition=definition, quantity=8, work_date=work_date, company_id=company_id)
         await db.commit()
 
     async def _insert_ppdes(

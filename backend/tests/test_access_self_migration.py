@@ -235,9 +235,9 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
                 trigger_body = cur.fetchone()[0].lower()
                 assert "sec.roles" not in trigger_body
                 assert "ubr.roleid" not in trigger_body
-            # P8a removes runtime authority, while P8b owns physical catalog deletion.
+            # P8b removes the obsolete physical global-role authority.
             cur.execute("SELECT to_regclass('sec.roles') IS NOT NULL")
-            assert cur.fetchone()[0] is True
+            assert cur.fetchone()[0] is False
             cur.execute("""
                 SELECT EXISTS (
                     SELECT 1 FROM information_schema.columns
@@ -245,7 +245,7 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
                       AND column_name='roleid'
                 )
             """)
-            assert cur.fetchone()[0] is True
+            assert cur.fetchone()[0] is False
     finally:
         conn.close()
 

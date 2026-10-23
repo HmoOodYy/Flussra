@@ -11,6 +11,7 @@ from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.builders.final_evidence import seed_finalized_evidence
+from tests.builders.pay_rules import insert_pay_rule
 from tests.db_state import (
     PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS,
     suspended_test_triggers,
@@ -366,39 +367,19 @@ async def _insert_daily_line(
     quantity: Decimal = Decimal("1"),
     source_type: str = "Manual",
 ) -> None:
-    if line_type == "HOURS":
-        # Ordinary work is a source fact against a frozen period definition.
-        definition_id = (await db.execute(_text("""
-            SELECT payrollperioddefinitionid FROM payroll.payrollperioddefinitions
-            WHERE payrollperiodid = :period_id AND definitionnamesnapshot = :name
-        """), {"period_id": period_id, "name": line_type})).scalar_one_or_none()
-        if definition_id is None:
-            definition_id = (await seed_period_definition(
-                db, period_id=period_id, branch_id=branch_id, name=line_type)
-            ).payroll_period_definition_id
-        await seed_target_line(
-            db, period_id=period_id, branch_id=branch_id, driver_assignment_id=driver_assignment_id,
-            definition=definition_id, quantity=quantity, work_date=work_date,
-            source_type=source_type)
-        await db.commit()
-        return
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES (:company_id, :branch_id, :period_id, :driver_assignment_id, :work_date, :line_type, :quantity, :source_type, 'Active', FALSE, 1)
-        """),
-        {
-            "company_id": _COMPANY_ID,
-            "branch_id": branch_id,
-            "period_id": period_id,
-            "driver_assignment_id": driver_assignment_id,
-            "work_date": work_date,
-            "line_type": line_type,
-            "quantity": quantity,
-            "source_type": source_type,
-        },
-    )
+    # Ordinary work is a source fact against a frozen period definition.
+    definition_id = (await db.execute(_text("""
+        SELECT payrollperioddefinitionid FROM payroll.payrollperioddefinitions
+        WHERE payrollperiodid = :period_id AND definitionnamesnapshot = :name
+    """), {"period_id": period_id, "name": line_type})).scalar_one_or_none()
+    if definition_id is None:
+        definition_id = (await seed_period_definition(
+            db, period_id=period_id, branch_id=branch_id, name=line_type)
+        ).payroll_period_definition_id
+    await seed_target_line(
+        db, period_id=period_id, branch_id=branch_id, driver_assignment_id=driver_assignment_id,
+        definition=definition_id, quantity=quantity, work_date=work_date,
+        source_type=source_type)
     await db.commit()
 
 
@@ -677,29 +658,43 @@ class TestOffDrivers:
         days = await _period_dates(direct_db, period_id)
         await _insert_eligibility(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id)
         await _set_off_for_days(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days)
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[1], "SYS_MIN_TOPUP", source_type="System")
-        bonus = await session_client.post(
-            f"/payroll/periods/{period_id}/bonuses",
-            json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "20.00", "reason": "CP5B test"},
-            headers=_auth(auth_token),
-        )
-        assert bonus.status_code == 201, bonus.text
-        assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 1
-
-        # Ordinary work cannot share a day with a full-day-off Status (the database refuses it),
-        # so the day has to stop being off first; then the worked day disqualifies the driver.
-        await direct_db.execute(
-            _text("""
-                UPDATE payroll.payrollperioddriverdayentrystate SET isvoided = TRUE
-                WHERE payrollperiodid = :period_id AND driverassignmentid = :driver_assignment_id
-                  AND workdate = :work_date
-            """),
-            {"period_id": period_id, "driver_assignment_id": paytest_driver_assignment_id,
-             "work_date": days[2]},
-        )
+        driver_id = (await direct_db.execute(_text(
+            "SELECT DriverID FROM core.DriverAssignments WHERE DriverAssignmentID = :id"),
+            {"id": paytest_driver_assignment_id})).scalar_one()
+        start_date, end_date = (await direct_db.execute(_text(
+            "SELECT StartDate, EndDate FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :id"),
+            {"id": period_id})).one()
+        rule_id = await insert_pay_rule(
+            direct_db, company_id=_COMPANY_ID, driver_id=driver_id, branch_id=paytest_branch_id,
+            amount="1", start=start_date, end=end_date)
         await direct_db.commit()
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[2], "HOURS")
-        assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
+        try:
+            bonus = await session_client.post(
+                f"/payroll/periods/{period_id}/bonuses",
+                json={"driver_assignment_id": paytest_driver_assignment_id, "amount": "20.00", "reason": "CP5B test"},
+                headers=_auth(auth_token),
+            )
+            assert bonus.status_code == 201, bonus.text
+            assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 1
+
+            # Ordinary work cannot share a day with a full-day-off Status (the database refuses it),
+            # so the day has to stop being off first; then the worked day disqualifies the driver.
+            await direct_db.execute(
+                _text("""
+                    UPDATE payroll.payrollperioddriverdayentrystate SET isvoided = TRUE
+                    WHERE payrollperiodid = :period_id AND driverassignmentid = :driver_assignment_id
+                      AND workdate = :work_date
+                """),
+                {"period_id": period_id, "driver_assignment_id": paytest_driver_assignment_id,
+                 "work_date": days[2]},
+            )
+            await direct_db.commit()
+            await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, days[2], "HOURS")
+            assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
+        finally:
+            await direct_db.execute(_text("DELETE FROM payroll.DriverPayRules WHERE DriverPayRuleID = :id"),
+                                    {"id": rule_id})
+            await direct_db.commit()
 
     async def test_mid_period_eligibility_and_configured_off_days_define_denominator(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,

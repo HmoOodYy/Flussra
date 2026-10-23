@@ -71,11 +71,11 @@ def _entry_key(tenant, period, driver_assignment_id, offset=0):
     return rows[0][0] if rows else None
 
 
-def _legacy_status_count(tenant, period, driver_assignment_id, offset=0):
+def _source_fact_count(tenant, period, driver_assignment_id, offset=0):
     rows = query(tenant, """
         SELECT count(*) FROM payroll.payrolldraftlines
         WHERE payrollperiodid = %s AND driverassignmentid = %s AND workdate = %s
-          AND linetype = 'DailyStatus' AND status <> 'Void'
+          AND status <> 'Void'
     """, (period["payroll_period_id"], driver_assignment_id, _day(period, offset)))
     return rows[0][0] if rows else 0
 
@@ -134,7 +134,7 @@ async def test_name_alias_and_code_resolve_to_the_same_canonical_status(
     assert row["status_label"] == "Annual Leave"
     assert row["status_key"] == _key_code(tenant, key_id)
     assert _entry_key(tenant, period, tenant.driver_a) == key_id
-    assert _legacy_status_count(tenant, period, tenant.driver_a) == 0
+    assert _source_fact_count(tenant, period, tenant.driver_a) == 0
 
 
 async def test_the_technical_code_resolves_too(p3c_client, p3c_engine, tenant):
@@ -196,7 +196,7 @@ async def test_a_blank_input_clears_the_status(p3c_client, p3c_engine, tenant):
     assert cleared.status_code == 200
     assert _grid_row(cleared.json(), tenant.driver_a)["status_key"] is None
     assert _entry_key(tenant, period, tenant.driver_a) is None
-    assert _legacy_status_count(tenant, period, tenant.driver_a) == 0
+    assert _source_fact_count(tenant, period, tenant.driver_a) == 0
 
 
 async def test_a_deactivated_status_cannot_be_newly_selected_by_any_input(

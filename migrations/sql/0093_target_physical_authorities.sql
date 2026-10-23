@@ -85,7 +85,7 @@ ALTER INDEX payroll.uix_BranchPayItemConfig_OpenDefinitionVersion
     RENAME TO uix_BranchPayDefinitionConfig_OpenDefinitionVersion;
 
 -- Ordinary source rows contain facts only. NeedsManagerReview remains a live
--- workflow/dashboard contract; it is deliberately retained and not forced false.
+-- workflow/dashboard contract; target source rows must keep its stored value false.
 ALTER TABLE payroll.PayrollDraftLines DROP CONSTRAINT ck_DraftLines_RowIdentity;
 DROP INDEX payroll.uix_PayrollDraftLines_Daily_Active_Business_Key RESTRICT;
 DROP INDEX payroll.ix_PayrollDraftLines_Period_Assignment RESTRICT;
@@ -96,7 +96,8 @@ ALTER TABLE payroll.PayrollDraftLines
     DROP COLUMN SourceID RESTRICT,
     DROP COLUMN SourceSnapshot RESTRICT,
     ALTER COLUMN PayrollPeriodDefinitionID SET NOT NULL,
-    ADD CONSTRAINT ck_DraftLines_SourceType CHECK (SourceType IN ('Manual', 'Import'));
+    ADD CONSTRAINT ck_DraftLines_SourceType CHECK (SourceType IN ('Manual', 'Import')),
+    ADD CONSTRAINT ck_DraftLines_NoStoredReview CHECK (NeedsManagerReview = FALSE);
 -- The target unique business key already protects assignment/date/definition.
 -- Keep the existing period/assignment/date lookup index and definition FK.
 

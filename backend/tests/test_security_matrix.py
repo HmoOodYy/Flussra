@@ -952,23 +952,18 @@ class TestDriverSelfGenericDenial:
         from sqlalchemy import text as _text
 
         uname = _uid()
-        await _create_user(session_client, auth_token, uname)
-
-        # Give the user PAYROLL_ADMIN permission and a DRIVER/Self assignment
-        await direct_db.execute(
-            _text("""
-                INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, companyroleid, scopetype, isactive)
-                SELECT u.userid, u.companyid, NULL, cr.companyroleid,
-                       'AllCompanyBranches', TRUE
-                FROM sec.users u
-                JOIN sec.companyroles cr
-                  ON cr.companyid = u.companyid AND cr.rolecode = 'PAYROLL_ADMIN'
-                WHERE u.username = :uname
-                ON CONFLICT DO NOTHING
-            """),
-            {"uname": uname},
+        user = await _create_user(session_client, auth_token, uname)
+        entry_role = await _create_role_with_perms(
+            session_client, auth_token, f"Entry grant {uname}",
+            ["payroll.entry", "payroll.period.create"],
         )
+        await _assign_role(session_client, auth_token, user["user_id"], entry_role)
+        assert (await direct_db.execute(_text("""
+            SELECT sec.fn_UserHasPermission(UserID, CompanyID, NULL, 'payroll.entry')
+            FROM sec.Users WHERE UserID = :uid
+        """), {"uid": user["user_id"]})).scalar_one() is True
+
+        # Add DRIVER/Self while retaining the real operational CompanyRole grant.
         await direct_db.execute(
             _text("""
                 INSERT INTO sec.userbranchroles
@@ -984,6 +979,17 @@ class TestDriverSelfGenericDenial:
             {"uname": uname},
         )
 
+        assert (await direct_db.execute(_text("""
+            SELECT COUNT(*) FROM sec.UserBranchRoles ubr
+            JOIN sec.CompanyRolePermissions p ON p.CompanyRoleID = ubr.CompanyRoleID
+            WHERE ubr.UserID = :uid AND ubr.CompanyRoleID = :rid
+              AND ubr.IsActive AND p.PermissionCode = 'payroll.entry'
+        """), {"uid": user["user_id"], "rid": entry_role})).scalar_one() == 1
+        assert (await direct_db.execute(_text("""
+            SELECT sec.fn_UserHasPermission(UserID, CompanyID, NULL, 'payroll.entry')
+            FROM sec.Users WHERE UserID = :uid
+        """), {"uid": user["user_id"]})).scalar_one() is False
+
         tok = await _login(session_client, uname)
 
         r = await session_client.get(
@@ -992,7 +998,7 @@ class TestDriverSelfGenericDenial:
             headers=_hdr(tok),
         )
         assert r.status_code == 403, (
-            f"Legacy DRIVER/Self user must be blocked from candidate creation even with payroll.entry; "
+            f"DRIVER/Self user must be blocked from candidate creation even with payroll.entry; "
             f"got {r.status_code}: {r.text}"
         )
         assert "driver" in r.json()["detail"].lower(), (

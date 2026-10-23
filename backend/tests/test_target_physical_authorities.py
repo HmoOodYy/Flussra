@@ -138,8 +138,23 @@ async def test_upgrade_preserves_target_source_branch_provenance_and_frozen_comp
                    NeedsManagerReview FROM payroll.PayrollDraftLines WHERE DraftLineID = %s
         """, (source,))
         assert cursor.fetchone() == (ppd, world["assignment"], date(2040, 1, 2), 8, "source note", False)
-        # NeedsManagerReview still supports its current workflow/dashboard contract.
-        cursor.execute("UPDATE payroll.PayrollDraftLines SET NeedsManagerReview = TRUE WHERE DraftLineID = %s", (source,))
+        # Consumers retain the column, but valid source facts cannot persist derived review state.
+        for statement in (
+            "UPDATE payroll.PayrollDraftLines SET NeedsManagerReview = TRUE WHERE DraftLineID = %s",
+            """INSERT INTO payroll.PayrollDraftLines
+                (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate,
+                 PayrollPeriodDefinitionID, Quantity, SourceType, NeedsManagerReview)
+               SELECT CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate,
+                      PayrollPeriodDefinitionID, Quantity, SourceType, TRUE
+               FROM payroll.PayrollDraftLines WHERE DraftLineID = %s""",
+        ):
+            cursor.execute("SAVEPOINT rejected_review_flag")
+            with pytest.raises(errors.CheckViolation) as rejected:
+                cursor.execute(statement, (source,))
+            assert rejected.value.diag.constraint_name == "ck_draftlines_nostoredreview"
+            cursor.execute("ROLLBACK TO SAVEPOINT rejected_review_flag")
+        cursor.execute("SELECT NeedsManagerReview FROM payroll.PayrollDraftLines WHERE DraftLineID = %s", (source,))
+        assert cursor.fetchone() == (False,)
         cursor.execute("""
             SELECT PayrollCalculationSnapshotID, PayrollCalculationSnapshotComponentID,
                    FinalAmount, SourceSnapshot FROM payroll.PayrollFinalLines WHERE FinalLineID = %s

@@ -23,6 +23,7 @@ from app.workforce.projection import (
 from tests.builders.final_evidence import insert_final_line, seed_snapshot_component
 from tests.builders.pay_rules import insert_pay_rule
 from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
+from tests.target_seed import seed_period_definition, seed_target_line
 
 
 def auth(token: str) -> dict[str, str]:
@@ -1054,12 +1055,12 @@ async def test_termination_preserves_snapshot_and_exact_date_existing_source_res
     """), {"branch_id": paytest_branch_id, "period_id": period_id,
            "assignment_id": assignment_id, "employee_id": employee["employee_id"],
            "today": today})).scalar_one()
-    await direct_db.execute(text("""
-        INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType, SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :assignment_id, :work_date, 'HOURS', 'P1cTest', 'Active')
-    """), {"branch_id": paytest_branch_id, "period_id": period_id,
-           "assignment_id": assignment_id, "work_date": next_day})
+    definition = await seed_period_definition(
+        direct_db, period_id=period_id, branch_id=paytest_branch_id)
+    await seed_target_line(
+        direct_db, period_id=period_id, branch_id=paytest_branch_id,
+        driver_assignment_id=assignment_id, definition=definition,
+        quantity=1, work_date=next_day)
     await client.post(
         f"/workforce/employees/{employee['employee_id']}/terminate",
         json={"termination_date": today.isoformat(), "reason": "Historical cutoff"},

@@ -21,6 +21,7 @@ from tests.builders.owned_scope import create_owned_branch
 from tests.builders.workforce import create_driver_employee_record
 from tests.builders.workforce_db import current_driver_assignment_id
 from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
+from tests.target_seed import seed_period_definition, seed_target_line
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -439,12 +440,11 @@ async def test_cancel_is_refused_when_destination_already_has_payroll_facts(
     period_id = await _open_period(direct_db, target_branch_id, "2098-03-02", "2098-03-08")
     try:
         # A draft line on the never-effective destination is a payroll fact.
-        await direct_db.execute(text("""
-            INSERT INTO payroll.PayrollDraftLines
-                (PayrollPeriodID, CompanyID, BranchID, DriverAssignmentID,
-                 LineType, WorkDate, Status, SourceType)
-            VALUES (:pid, 1, :bid, :aid, 'HistoryTest', '2098-03-03', 'Active', 'Manual')
-        """), {"pid": period_id, "bid": target_branch_id, "aid": t["destination_id"]})
+        definition = await seed_period_definition(direct_db, period_id=period_id, branch_id=target_branch_id)
+        await seed_target_line(
+            direct_db, period_id=period_id, branch_id=target_branch_id,
+            driver_assignment_id=t["destination_id"], definition=definition,
+            quantity=1, work_date="2098-03-03")
         await direct_db.commit()
         cancel = await session_client.post(
             f"/driver-transfers/{t['request_id']}/cancel", json={}, headers=auth(auth_token),
