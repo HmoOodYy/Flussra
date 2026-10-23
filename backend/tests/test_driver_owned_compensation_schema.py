@@ -467,11 +467,9 @@ def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, c
         "calendarcustomintervaldays", "calendarsourcebranchid",
         "calendarsourcepayrollsetupversionid",
     }
-    for retired in ("driverrateassignments", "driverratevalues"):
+    for retired in ("driverrateassignments", "driverratevalues", "driverrates", "driverratetiers"):
         cur.execute("SELECT to_regclass(%s)", (f"payroll.{retired}",))
         assert cur.fetchone()[0] is None
-    # The legacy assignment-owned DriverRates remain until their final removal.
-    assert {"driverassignmentid", "branchid"} <= columns("driverrates")
 
 
 def test_no_object_keeps_a_retired_assignment_name_or_foreign_key(cur):
@@ -529,7 +527,7 @@ def test_no_object_keeps_a_retired_assignment_name_or_foreign_key(cur):
     assert len(cur.fetchall()) == 2
 
 
-def test_the_ended_assignment_guard_stays_on_status_rates_only(cur):
+def test_driver_owned_context_guards_remain_without_legacy_assignment_guards(cur):
     def triggers(name: str) -> set[str]:
         cur.execute("""
             SELECT c.relname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
@@ -538,14 +536,10 @@ def test_the_ended_assignment_guard_stays_on_status_rates_only(cur):
         """, (name,))
         return {row[0] for row in cur.fetchall()}
 
-    assert triggers("trg_compensationassignmentwritable") == {"driverrates", "driverratetiers"}
+    assert triggers("trg_compensationassignmentwritable") == set()
     assert triggers("trg_drivercompensationcontextwritable") == {"driverrateschedules", "driverpayrules"}
-    cur.execute("""
-        SELECT pg_get_functiondef('core.trg_compensationassignmentwritable'::regproc)
-    """)
-    body = cur.fetchone()[0].lower()
-    assert "driverrateassignments" not in body and "driverratevalues" not in body
-    assert "driverpayrules" not in body and "driverrateschedules" not in body
+    cur.execute("SELECT to_regprocedure('core.trg_compensationassignmentwritable()')")
+    assert cur.fetchone()[0] is None
 
 
 # ---------------------------------------------------------------------------

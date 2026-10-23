@@ -263,7 +263,7 @@ def test_0087_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0092",)
+    assert cur.fetchone() == ("0093",)
 
     def columns(table: str, schema: str = "core") -> set[str]:
         cur.execute("""
@@ -319,7 +319,6 @@ def test_driver_reference_columns_are_classified_with_no_unvalidated_driver_fore
         "payrollbonusevents", "payrollfinallines", "payrollcalculationdrivertotals",
         "payrollcalculationsnapshotbonusevents", "payrollcalculationsnapshotstatusentries",
         "payrollcalculationsnapshotusedratedefinitions", "payrollperiodauditevidenceevents",
-        "driverrates",
     ]
     with_driver_id = {
         "payrollfinallines", "payrollcalculationdrivertotals",

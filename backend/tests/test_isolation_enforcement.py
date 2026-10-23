@@ -32,6 +32,8 @@ from tests.db_state import (
 )
 from tests.ownership import (
     CleanupRunner,
+    _assert_audit_snapshot,
+    _audit_snapshot,
     assert_no_mutable_period_state,
     delete_period_and_children,
     delete_review_items_and_children,
@@ -468,6 +470,9 @@ async def test_retire_removes_the_exact_review_state_of_an_in_review_period(dire
     control_id = await _insert_review_item(direct_db, owned_branch_id, "Other", "Pending")
     await _insert_review_decision_and_audit(direct_db, owned_branch_id, control_id)
     assert (await _review_residue(direct_db, [item_id])) == {"items": 1, "decisions": 1, "audit": 1}
+    audit_entities = [("ManagerReviewItems", [str(item_id), str(control_id)])]
+    audit_before = await _audit_snapshot(direct_db, audit_entities)
+    assert len(audit_before) == 2
     try:
         await retire_branch_periods_directly(direct_db, owned_branch_id, retain_finalized_history=True)
         await assert_no_mutable_period_state(direct_db, owned_branch_id)
@@ -475,8 +480,9 @@ async def test_retire_removes_the_exact_review_state_of_an_in_review_period(dire
             text("SELECT status FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
             {"pid": period_id},
         )).scalar_one() == "Cancelled"
-        assert await _review_residue(direct_db, [item_id]) == {"items": 0, "decisions": 0, "audit": 0}
+        assert await _review_residue(direct_db, [item_id]) == {"items": 0, "decisions": 0, "audit": 1}
         assert await _review_residue(direct_db, [control_id]) == {"items": 1, "decisions": 1, "audit": 1}
+        await _assert_audit_snapshot(direct_db, audit_entities, audit_before, "period retirement")
     finally:
         await delete_review_items_and_children(direct_db, [control_id])
         await delete_period_and_children(direct_db, period_id)
@@ -496,6 +502,9 @@ async def test_retire_clears_the_return_pointer_and_review_items_of_returned_and
     approved_id = await _insert_period(direct_db, owned_branch_id, "Approved", 6)
     approved_item = await _insert_review_item(direct_db, owned_branch_id, "PeriodApproval", "Approved", approved_id)
     await _insert_review_decision_and_audit(direct_db, owned_branch_id, approved_item)
+    audit_entities = [("ManagerReviewItems", [str(rejected_item), str(approved_item)])]
+    audit_before = await _audit_snapshot(direct_db, audit_entities)
+    assert len(audit_before) == 2
     try:
         await retire_branch_periods_directly(direct_db, owned_branch_id, retain_finalized_history=True)
         await assert_no_mutable_period_state(direct_db, owned_branch_id)
@@ -506,8 +515,9 @@ async def test_retire_clears_the_return_pointer_and_review_items_of_returned_and
         )).all()
         assert sorted(rows) == [("Cancelled", None), ("Cancelled", None)]
         assert await _review_residue(direct_db, [rejected_item, approved_item]) == {
-            "items": 0, "decisions": 0, "audit": 0,
+            "items": 0, "decisions": 0, "audit": 2,
         }
+        await _assert_audit_snapshot(direct_db, audit_entities, audit_before, "period retirement")
     finally:
         for period_id in (returned_id, approved_id):
             await delete_period_and_children(direct_db, period_id)
