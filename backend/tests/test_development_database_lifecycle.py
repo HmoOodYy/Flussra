@@ -160,9 +160,9 @@ def _other_server_url(pg_instance):
      "ENVIRONMENT=development to be set explicitly"),
     (("--confirm", TARGET), {}, "requires --admin-url"),
     (("--confirm", "flussra_dev_typo", "--admin-url", "{admin}"), {},
-     "--confirm names 'flussra_dev_typo', but DATABASE_URL configures 'flussra_dev'"),
+     "--confirm names 'flussra_dev_typo', but DATABASE_URL connects to 'flussra_dev'"),
     (("--confirm", "postgres", "--admin-url", "{admin}"), {},
-     "--confirm names 'postgres', but DATABASE_URL configures 'flussra_dev'"),
+     "--confirm names 'postgres', but DATABASE_URL connects to 'flussra_dev'"),
     (("--confirm", TARGET, "--admin-url", "{admin_on_target}"), {},
      "must connect to another database"),
     (("--confirm", TARGET, "--admin-url", "{application}"), {},
@@ -198,7 +198,7 @@ def test_a_lifecycle_connection_to_another_server_is_refused(rebuilt, pg_instanc
         result = _reset(rebuilt, tmp_path, "--admin-url", _other_server_url(pg_instance),
                         "--confirm", TARGET)
         assert result.returncode == 1
-        assert "reach different PostgreSQL servers" in result.stderr
+        assert "but DATABASE_URL reaches cluster" in result.stderr
         assert _database(rebuilt) == before
     finally:
         _run(other, f"DROP ROLE {APP_ROLE}")
@@ -219,6 +219,146 @@ def test_a_database_owned_by_another_role_is_refused(rebuilt, tmp_path):
     finally:
         _run(admin, "DROP DATABASE strangers_db")
         _run(admin, "DROP ROLE stranger")
+
+
+# ---------------------------------------------------------------------------
+# The effective target and the cluster identity
+# ---------------------------------------------------------------------------
+
+def _cluster_id(dsn) -> int:
+    return _run(dsn, "SELECT system_identifier FROM pg_catalog.pg_control_system()")[0][0]
+
+
+@pytest.fixture
+def other_cluster(pg_instance):
+    """The shared test cluster as a wrong cluster with the same role and database names."""
+    dsn = {**pg_instance.dsn(), "database": "postgres"}
+    _run(dsn, f"CREATE ROLE {APP_ROLE} LOGIN")
+    _run(dsn, f"CREATE DATABASE {TARGET} OWNER {APP_ROLE}")
+    try:
+        yield {"dsn": dsn, "admin_url": _other_server_url(pg_instance),
+               "database": lambda: _run(dsn, "SELECT oid FROM pg_database WHERE datname = %s",
+                                        (TARGET,))[0][0]}
+    finally:
+        _run(dsn, f"DROP DATABASE IF EXISTS {TARGET} WITH (FORCE)")
+        _run(dsn, f"DROP ROLE {APP_ROLE}")
+
+
+def test_the_target_is_the_database_sqlalchemy_connects_to(rebuilt, tmp_path):
+    """The reviewer's case: the URL path names one database and ?database= another."""
+    from scripts.reset_dev_database import effective_parameters
+
+    server = rebuilt
+    dsn = server["dsn"]
+    _run({**dsn, "database": "postgres"}, "CREATE DATABASE nominal_target")
+    _run({**dsn, "database": "nominal_target"}, "CREATE TABLE public.kept (id INTEGER)")
+    url = (f"postgresql+asyncpg://nominal_user@{dsn['host']}:{dsn['port']}/nominal_target"
+           f"?database={TARGET}&user={APP_ROLE}")
+    try:
+        assert effective_parameters(url)["database"] == TARGET  # what the runtime connects to
+        nominal, target = _database(server, "nominal_target"), _database(server)
+        refused = _reset(server, tmp_path, "--admin-url", server["admin_url"],
+                         "--confirm", "nominal_target", DATABASE_URL=url)
+        assert refused.returncode == 1
+        assert f"DATABASE_URL connects to '{TARGET}'" in refused.stderr
+        result = _reset(server, tmp_path, "--admin-url", server["admin_url"],
+                        "--confirm", TARGET, DATABASE_URL=url)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert _database(server, "nominal_target") == nominal
+        assert _run({**dsn, "database": "nominal_target"}, "SELECT to_regclass('public.kept')")[0][0]
+        assert _database(server)[0] != target[0]
+        _assert_canonical(server)
+    finally:
+        _run({**dsn, "database": "postgres"}, "DROP DATABASE nominal_target")
+
+
+async def test_query_routing_arguments_decide_where_the_application_side_connects(rebuilt):
+    from scripts.reset_dev_database import _application_identity, configured_target
+
+    dsn = rebuilt["dsn"]
+    url = (f"postgresql+asyncpg://nominal_user@unused.invalid:1/{TARGET}"
+           f"?user={APP_ROLE}&host={dsn['host']}:{dsn['port']}")
+    target = configured_target(url, TARGET)
+    assert (target.database, target.application_role) == (TARGET, APP_ROLE)
+    assert await _application_identity(target, "postgres") == (_cluster_id(rebuilt["target_dsn"]), True)
+
+
+def test_two_clusters_have_different_genuine_system_identifiers(rebuilt, other_cluster):
+    assert _cluster_id(rebuilt["target_dsn"]) != _cluster_id(other_cluster["dsn"])
+
+
+def test_shadowed_system_functions_cannot_make_a_wrong_cluster_pass(rebuilt, other_cluster, tmp_path):
+    """The reviewer's case: the application role shadows system helpers on its own database."""
+    server = rebuilt
+    other_id = _cluster_id(other_cluster["dsn"])
+    other_facts = _run(other_cluster["dsn"], "SELECT pg_postmaster_start_time()::text, version()")[0]
+    admin = {**server["dsn"], "database": "postgres"}
+    target_admin = server["target_dsn"]
+    fakes = (
+        f"CREATE FUNCTION public.pg_control_system(OUT system_identifier BIGINT) RETURNS BIGINT "
+        f"LANGUAGE sql AS 'SELECT {other_id}::BIGINT'",
+        f"CREATE FUNCTION public.pg_postmaster_start_time() RETURNS TEXT LANGUAGE sql "
+        f"AS $$SELECT '{other_facts[0]}'::TEXT$$",
+        "CREATE FUNCTION public.version() RETURNS TEXT LANGUAGE sql "
+        f"AS $$SELECT {psycopg2.extensions.QuotedString(other_facts[1]).getquoted().decode()}::TEXT$$",
+        "CREATE FUNCTION public.current_database() RETURNS NAME LANGUAGE sql "
+        f"AS $$SELECT '{TARGET}'::NAME$$",
+    )
+    for statement in fakes:
+        _run(server["app_dsn"], statement)
+    _run(admin, f"ALTER ROLE {APP_ROLE} SET search_path = public, pg_catalog")
+    _run(target_admin, f"ALTER DATABASE {TARGET} SET search_path = public, pg_catalog")
+    try:
+        # The hostile setup is live: an unqualified lookup returns the other cluster's identity.
+        assert _run(server["app_dsn"], "SELECT system_identifier FROM pg_control_system()") == [(other_id,)]
+        before, other_before = _database(server), other_cluster["database"]()
+        result = _reset(server, tmp_path, "--admin-url", other_cluster["admin_url"], "--confirm", TARGET)
+        assert result.returncode == 1
+        assert f"--admin-url reaches PostgreSQL cluster {other_id}" in result.stderr
+        assert f"DATABASE_URL reaches cluster {_cluster_id(target_admin)}" in result.stderr
+        assert _database(server) == before and other_cluster["database"]() == other_before
+    finally:
+        _run(admin, f"ALTER ROLE {APP_ROLE} RESET search_path")
+        _run(target_admin, f"ALTER DATABASE {TARGET} RESET search_path")
+        for name in ("pg_control_system()", "pg_postmaster_start_time()", "version()",
+                     "current_database()"):
+            _run(server["app_dsn"], f"DROP FUNCTION public.{name}")
+
+
+def test_an_absent_target_is_compared_through_the_application_control_connection(
+    rebuilt, other_cluster, tmp_path,
+):
+    server = rebuilt
+    _run({**server["dsn"], "database": "postgres"}, f"DROP DATABASE {TARGET}")
+    other_before = other_cluster["database"]()
+    wrong = _reset(server, tmp_path, "--admin-url", other_cluster["admin_url"], "--confirm", TARGET)
+    assert wrong.returncode == 1 and "but DATABASE_URL reaches cluster" in wrong.stderr
+    assert _database(server) is None and other_cluster["database"]() == other_before
+    right = _reset(server, tmp_path, "--admin-url", server["admin_url"], "--confirm", TARGET)
+    assert right.returncode == 0, right.stdout + right.stderr
+    _assert_canonical(server)
+
+
+def test_catalog_look_alikes_in_the_control_database_do_not_hide_sessions(rebuilt, tmp_path):
+    server = rebuilt
+    control = {**server["dsn"], "database": "postgres"}
+    for statement in (
+        "CREATE VIEW public.pg_stat_activity AS SELECT * FROM pg_catalog.pg_stat_activity WHERE false",
+        "CREATE FUNCTION public.pg_backend_pid() RETURNS INTEGER LANGUAGE sql AS 'SELECT 0'",
+        "ALTER DATABASE postgres SET search_path = public, pg_catalog",
+    ):
+        _run(control, statement)
+    other = psycopg2.connect(**server["app_dsn"])
+    try:
+        before = _database(server)
+        result = _reset(server, tmp_path, "--admin-url", server["admin_url"], "--confirm", TARGET)
+        assert result.returncode == 1 and "other sessions are connected" in result.stderr
+        assert _database(server) == before
+    finally:
+        other.close()
+        _run(control, "ALTER DATABASE postgres RESET search_path")
+        _run(control, "DROP VIEW public.pg_stat_activity")
+        _run(control, "DROP FUNCTION public.pg_backend_pid()")
 
 
 # ---------------------------------------------------------------------------
