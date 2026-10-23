@@ -251,21 +251,32 @@ async def test_the_seeded_company_runs_payroll_from_entry_to_the_finalized_libra
     assert any("payroll history" in problem for problem in problems), problems
 
 
-def test_the_development_reset_restores_the_canonical_demo(seeded):
-    """The reset tool itself, as a developer runs it, against this disposable database."""
+def test_the_development_reset_restores_the_canonical_demo(seeded, tmp_path):
+    """The provisioning and reset tools, as a developer runs them, against this database."""
     env = {**seeded["env"], "ENVIRONMENT": "development"}
-    script = [sys.executable, "scripts/reset_dev_database.py"]
-    refused = subprocess.run([*script, "--confirm", "another_database"], cwd=BACKEND, env=env,
-                             capture_output=True, text=True, check=False)
+    database = seeded["dsn"]["database"]
+    script = [sys.executable, os.path.join(BACKEND, "scripts", "reset_dev_database.py")]
+
+    def run(*args, command=script):
+        return subprocess.run([*command, *args], cwd=tmp_path, env=env,
+                              capture_output=True, text=True, check=False)
+
+    unprovisioned = run("--confirm", database)
+    assert unprovisioned.returncode == 1
+    assert "flussra.environment is None" in unprovisioned.stderr
+    dsn = seeded["dsn"]
+    provisioned = run("--admin-url", f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{database}",
+                      "--confirm", database,
+                      command=[sys.executable, os.path.join(BACKEND, "scripts", "provision_dev_database.py")])
+    assert provisioned.returncode == 0, provisioned.stdout + provisioned.stderr
+    refused = run("--confirm", "another_database")
     assert refused.returncode == 1 and "Refusing to reset" in refused.stderr
-    reset = subprocess.run([*script, "--confirm", seeded["dsn"]["database"]], cwd=BACKEND,
-                           env=env, capture_output=True, text=True, check=False)
+    reset = run("--confirm", database)
     assert reset.returncode == 0, reset.stdout + reset.stderr
     assert "canonical demo verified" in reset.stdout
     assert _version(seeded["dsn"]) == "0093"
     for table in PAYROLL_HISTORY_TABLES:
         assert _count(seeded["dsn"], f"SELECT count(*) FROM {table}") == 0, table
-    verified = subprocess.run([*script, "--verify-only"], cwd=BACKEND, env=env,
-                              capture_output=True, text=True, check=False)
+    verified = run("--verify-only")
     assert verified.returncode == 0, verified.stdout + verified.stderr
     assert "canonical demo is intact" in verified.stdout
