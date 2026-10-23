@@ -30,6 +30,95 @@ editable backend and `[dev]` dependencies from `backend/pyproject.toml`. The
 scripts do not create or copy `.env`; configure local environment values
 manually when needed.
 
+## Development database reset and canonical demo
+
+The development database is disposable infrastructure. A reset replaces the
+whole database: nothing created inside it survives, so keep anything you need
+elsewhere. The repository's migrations and the canonical demo seed are the only
+sources it is rebuilt from:
+
+1. `DROP DATABASE`, then `CREATE DATABASE ... TEMPLATE template0 ENCODING 'UTF8'`;
+2. grant the application role its privileges;
+3. `alembic upgrade head`, and assert the single Alembic head;
+4. run the startup schema guard;
+5. write the canonical demo (`scripts/canonical_demo.py`) and verify it read-only.
+
+Run it from the `backend` directory with a separate lifecycle connection. That
+connection goes to a control database on the same server (for example
+`postgres`) as a role that can drop and create the development database: a
+superuser, or a role with `CREATEDB` that owns the database. Supply the password
+through `PGPASSWORD` or a pgpass file, never in repository configuration:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\reset_dev_database.py --admin-url postgresql://postgres@localhost:5432/postgres --confirm payroll_v3
+```
+
+Roles and privileges:
+
+| Role | Does | Needs |
+|---|---|---|
+| Lifecycle role (`--admin-url`) | Drops and creates the development database, which it then owns | `SUPERUSER`, or `CREATEDB` plus ownership of the existing database |
+| Application role (`DATABASE_URL`) | Runs the migrations, the seed and the FastAPI backend, and owns every Flussra schema and object | `CONNECT`, `TEMPORARY` and `CREATE` on the database; `USAGE` and `CREATE` on schema `public` (granted by the reset); no `CREATEDB` |
+
+The lifecycle credential is never part of the application configuration, and the
+application credential cannot drop or create databases.
+
+Before anything is dropped, all of these must hold:
+
+- `ENVIRONMENT=development` is set explicitly in the environment or `.env` (the
+  application default does not count);
+- `--admin-url` is supplied (the reset never falls back to `DATABASE_URL`), it
+  connects to a database other than the target, and its role can create
+  databases;
+- the target is the database the application actually connects to, and
+  `--confirm` repeats that name. The reset resolves the target with SQLAlchemy's
+  asyncpg dialect, as the backend, Alembic and the seed do, so query arguments
+  such as `?database=`, `?user=` or `?host=` count. The application connection
+  must then report that database and role;
+- the lifecycle connection and the application credential reach the same
+  PostgreSQL cluster. Both report `pg_catalog.pg_control_system().system_identifier`,
+  and the two values must match; host names play no part. Network location is not
+  a trust boundary: local, Docker, WSL, remote, CI and cloud development databases
+  all work. When the target does not exist, the application side connects to the
+  control database instead, so the application role needs `CONNECT` on it (the
+  PostgreSQL default for `postgres`);
+- an existing target is owned by the lifecycle role or the application role;
+- no other session is connected to the target. Stop the backend and any other
+  client first: an open session refuses the reset, which never terminates
+  sessions and never uses `DROP DATABASE ... FORCE`.
+
+Every connection the reset opens starts with the search path
+`pg_catalog, pg_temp`, overriding database and role settings. Every system
+catalog and function it uses is named with `pg_catalog`. So objects that the
+application role, or anyone else, creates in other schemas cannot change these
+checks.
+
+`DROP DATABASE` and `CREATE DATABASE` are not one transaction. If creating or
+rebuilding fails after the drop, the reset says so, and the database is absent
+or incomplete. Fix the cause and run the reset again; it also creates the
+database when it does not exist. `--verify-only` changes nothing and checks that
+the database configured in `DATABASE_URL` is still the canonical demo.
+
+The canonical demo is one payroll-ready Company, `DEMO` / Demo Logistics in
+`USD`, with no payroll history:
+
+- Branches `HQ` (default, America/New_York) and `NORTH` (America/Chicago).
+- `admin`: Company Owner over all Branches, not linked to an Employee.
+- `payroll.manager`: custom Payroll Manager role scoped to `HQ` (payroll entry,
+  period creation, review, finalization, reports and the Finalized Payroll
+  Library, plus Driver and rate reads).
+- Morgan Lee: staff Employee without a Driver or account.
+- Jordan Rivera (`D-1001`, `HQ`): current Driver with the DRIVER/Self account
+  `jordan.rivera` and an Approved `DELIVERY` rate of 12.50 per stop.
+- Casey Brooks (`D-1002`, `NORTH`): future Driver whose assignment starts 14
+  days after the reset; the linked account `casey.brooks` stays staged (no login,
+  no role) until it is provisioned.
+- PayDefinition `DELIVERY` (PerUnit, whole stops) applicable to `HQ`, and the
+  default weekly Payroll Setup assigned to `HQ` from the Monday of the week
+  before the reset, so the first `HQ` period can be created at once.
+
+Every demo account uses the password `TestPass123!`.
+
 ## Frontend setup
 
 ```bash
@@ -55,7 +144,7 @@ root in PowerShell:
 ```
 
 The command runs the full backend pytest suite, Ruff, Python compileall, and an
-assertion that Alembic has exactly one head at `0090`. It then runs every
+assertion that Alembic has exactly one head at `0093`. It then runs every
 frontend `tests/*.test.ts` file, ESLint, and the production build. A successful
 exit means every required gate passed; the command stops and returns nonzero
 when a gate fails or required tooling is missing. Install the worktree-local

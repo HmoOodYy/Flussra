@@ -163,7 +163,7 @@ class TestCataloguePresence:
         assert perm is not None
         assert perm["module_code"] == "payroll", (
             f"payroll.entry must have module_code='payroll', got {perm['module_code']!r}. "
-            "Uppercase 'Payroll' from ensure_dev_admin.py breaks the ui_only filter."
+            "An uppercase module code breaks the ui_only filter."
         )
 
     async def test_review_decide_has_correct_module(

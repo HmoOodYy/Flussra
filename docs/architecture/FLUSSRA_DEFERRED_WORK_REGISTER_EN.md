@@ -137,21 +137,29 @@ If an issue is officially moved to a different work unit:
 
 **Durable Driver Stage 3:** CLOSED / merged (DD3, PR #59, no migration; payable rounding and proration).
 
-**Current baseline:** `main @ 79ef2ab08864f37ea9fbb556256b3e90370b28c1` (PR #59), Alembic head `0088`.
+**P4c, P5a, P5b:** CLOSED / merged (PR #62, migration `0089`; PR #63, migration `0090`; PR #64, migration `0091`).
 
-**Next work unit:** P4c — NOT STARTED. P5, P7 and P8 also remain not started.
+**P7a, P7b, P7c:** CLOSED / merged (PRs #65, #66, #67; no migrations).
+
+**P8a:** CLOSED / merged (PR #68, migration `0092`; runtime legacy deletion).
+
+**P8b:** CLOSED / merged (PR #69 at `30d538a9686fcc561dde2ace5533560e4345abfe`, migration `0093`; physical authority cutover).
+
+**P8c:** CLOSED (no migration; merge pending): development reset, canonical demo seed and final refoundation closure from baseline `30d538a9686fcc561dde2ace5533560e4345abfe`.
+
+**Current baseline:** `main @ 30d538a9686fcc561dde2ace5533560e4345abfe` (PR #69), Alembic head `0093`.
+
+**Next work unit:** the refoundation program is complete. C2 Import is the next program; it is unblocked and not started.
 
 **Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`. P3b merge baseline: `main` at the PR #46 merge, `edcf871f59d0616e194a8e752d9b6ba23f42b8a2`. P3c merge baseline: `main` at the PR #47 merge, `3f389499bbb1a0a70935360f32230f8e0aae4a7c`.
 
 **Test Hygiene:** PR #29 merged after P2c.
 
-**Migration heads:** pre-P3b `0081`; P3b `0082`; P3c `0083`; P4a advanced it to `0084`; P4b to `0085`; the Branch timezone authority to `0086`; DD1 to `0087`; DD2 to `0088`; DD3 adds no migration.
+**Migration heads:** pre-P3b `0081`; P3b `0082`; P3c `0083`; P4a advanced it to `0084`; P4b to `0085`; the Branch timezone authority to `0086`; DD1 to `0087`; DD2 to `0088`; DD3 adds no migration; P4c `0089`; P5a `0090`; P5b `0091`; P8a `0092`; P8b `0093`; P7a–P7c and P8c add no migration.
 
 **Important rule:** Anything below marked `NOT YET` remains intentional architectural/product debt until the entry itself is updated to `YES`.
 
 \---
-
-**P8b:** Physical cutover locally closed after focused verification (merge pending), from exact P8a baseline `a9caa739330d81bd421dd845438b27ebcb2631eb`; single head `0093`. P8c reset/reseed and final closure remain deferred.
 
 # 2\. Deferred Work Entries
 
@@ -263,11 +271,13 @@ Converting every consumer in one work unit would have expanded P1a/P1b into Core
 **Current State:**  
 P1c moved transfer, termination, Workforce projections, and payroll eligibility onto effective-date lifecycle semantics. P2b also centralized current DRIVER/Self ownership resolution. The issue is not fully closed: status-based reads remain in compatibility and operational views, including dashboard/current-hub and settings summaries, and legacy period-eligibility readers remain subject to the Unified Plan's P8a consumer audit. The Unified Plan identifies these as remaining readers rather than current-profile resolvers; any DRIVER-facing access boundary was addressed in P2b.
 
-**Issue Resolved?:** NOT YET
+Update 2026-10-23 (P8c reconciliation): Durable Driver Stage 1 moved `DriverStatus` to the permanent Driver and limited it to `Active`, `Inactive` and `OnLeave`, so status no longer encodes `Transferred` or `Terminated` lifecycle, and P8a removed the compatibility readers. Every remaining runtime read selects the assignment through `core.fn_EffectiveDriverAssignment` or an effective-range overlap first and uses `DriverStatus` only as an operational filter (`EndReason IS NOT NULL OR DriverStatus = 'Active'`) in payroll eligibility, dashboard and Branch summary counts, or as a displayed Driver attribute in Workforce and roster reads. No read uses it to decide which assignment is current.
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-10-02
+**Issue Resolved?:** YES
+
+**Resolved In:** Durable Driver Stage 1 and P8a; reconciled and closed by P8c.
+**Resolution Evidence:** `app/payroll/eligibility.py`, `app/dashboard/service.py`, `app/settings/branch_reads.py`, `app/core/service.py`, `app/workforce/effective.py` (effective-assignment selection before the status filter); `ck_Drivers_Status`; the P8c section of the Unified Plan.
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -525,7 +535,7 @@ P1b protects concrete payroll dates, but Period Pay has no `WorkDate`. It is not
 P1b HireDate payroll-history guard design/review.
 
 **Deferred To:**  
-**P7c — Payroll-entry target-contract cleanup**, or an earlier work unit only if a concrete blocker appears and the Lead explicitly authorizes it.
+**Future explicit product decision — no authorized work unit currently exists.** (Originally P7c — Payroll-entry target-contract cleanup; see Current State.)
 
 **Why Deferred:**  
 Inventing a rule now would add payroll product semantics that are not yet locked in the contract.
@@ -540,11 +550,13 @@ No synthetic date is inferred for Period Pay.
 
 Update 2026-10-22: P7c is a frontend-only cleanup and does not define a HireDate rule for Period Pay rows; this entry stays open for an explicit product decision.
 
+Update 2026-10-23 (P8c): the target changed from P7c to a future explicit product decision because no refoundation work unit defines this payroll semantic. P8c closed the refoundation without deciding it. The generic Period Pay writer was retired in G0.4; how HireDate protection treats payroll facts without a WorkDate remains undecided.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -567,7 +579,7 @@ P1b removed runtime read/write/filter/input/output authority. P8b migration `009
 
 **Issue Resolved?:** YES
 
-**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolved In:** P8b physical authority cutover, migration `0093` (merged via PR #69).
 **Resolution Evidence:** `0093_target_physical_authorities.sql`; `test_target_physical_authorities.py`; focused Workforce/Employee tests.
 **Last Updated:** 2026-10-23
 
@@ -592,7 +604,7 @@ P8b migration `0093` deletes `drivers.manage` and its obsolete grants/overrides.
 
 **Issue Resolved?:** YES
 
-**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolved In:** P8b physical authority cutover, migration `0093` (merged via PR #69).
 **Resolution Evidence:** `0093_target_physical_authorities.sql`; `test_permission_catalog.py`; CompanyRole authorization and physical-authority tests.
 **Last Updated:** 2026-10-23
 
@@ -631,7 +643,7 @@ Update 2026-10-23: P8a is merged via PR #68 at `a9caa739330d81bd421dd845438b27eb
 
 **Issue Resolved?:** YES
 
-**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolved In:** P8b physical authority cutover, migration `0093` (merged via PR #69).
 **Resolution Evidence:** `0093_target_physical_authorities.sql`; focused governance, branch applicability, PerUnit, OrdinalTier, schedule and immutable calculation/finalization tests; schema-authority comparison: `NO_APPLICATION_SCHEMA_DIFFERENCES`.
 **Last Updated:** 2026-10-23
 
@@ -769,7 +781,7 @@ P8b migration `0093` implements the catalog-proven physical cutover: CompanyRole
 
 **Issue Resolved?:** YES
 
-**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolved In:** P8b physical authority cutover, migration `0093` (merged via PR #69).
 **Resolution Evidence:** `0093_target_physical_authorities.sql`; `test_target_physical_authorities.py` (fresh/non-empty upgrade, unknown-dependency rollback, identity and append-only audit); schema guards; focused financial/audit tests; one Alembic head `0093`; schema-authority comparison: `NO_APPLICATION_SCHEMA_DIFFERENCES`; frontend build/lint; `git diff --check`.
 **Last Updated:** 2026-10-23
 
@@ -792,11 +804,15 @@ Current data is disposable demo/test data and must not drive architecture. Prese
 **Current State:**  
 If demo data conflicts with a correct target invariant, discard the demo data and keep the invariant. Do not embed arbitrary `DELETE`/`TRUNCATE` cleanup in schema migrations merely to preserve or repair demo rows.
 
-**Issue Resolved?:** NOT YET
+Update 2026-10-23 (P8c): `backend/scripts/reset_dev_database.py` is the one destructive development reset (authorize → drop the Flussra application schemas → `alembic upgrade head` → single-head assertion → startup schema guard → canonical seed → read-only verification), and `backend/scripts/canonical_demo.py` is the one canonical, payroll-ready target demo with no payroll history. No migration deletes or converts data; the partial `ensure_dev_admin.py` bootstrap is removed. The development database was reset from `0091` to `0093`, reseeded and verified.
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+Update 2026-10-23 (P8c review resolution): after the independent review found the in-place schema reset unsafe, the reset was changed to replace the whole disposable development database. It drops the database named in `DATABASE_URL` and creates it again from `template0` through a separately supplied lifecycle connection to a control database on the same server, then migrates, checks the schema, seeds and verifies. The lifecycle role owns the database. The application role owns every Flussra object and holds only `CONNECT`, `TEMPORARY` and `CREATE` on the database plus `USAGE` and `CREATE` on `public`, so it cannot drop or create databases. Before the DROP the reset requires all of these: an explicit development runtime; `--admin-url`; a confirmation of the database the application actually connects to, resolved by SQLAlchemy's asyncpg dialect from `DATABASE_URL` and reported back by the application connection; a control database other than the target; a lifecycle role able to create databases; the same `pg_catalog.pg_control_system().system_identifier` on the lifecycle and application connections, read under the search path `pg_catalog, pg_temp` with qualified system names, with network location not a gate; an expected owner; and no other connected session (never terminated, never `FORCE`). A failure after the DROP is reported as an absent or incomplete database, and running the reset again rebuilds it. The in-place machinery (dependency traversal, schema CASCADE, database reset settings and their provisioning tool, the exclusive connection window) is removed. `payroll_v3` keeps its verified canonical demo; its next reset needs a lifecycle credential for its server.
+
+**Issue Resolved?:** YES
+
+**Resolved In:** P8c — clean reset / canonical reseed / final closure (no migration).
+**Resolution Evidence:** `backend/scripts/reset_dev_database.py`; `backend/scripts/canonical_demo.py`; `backend/tests/test_canonical_demo_seed.py` (fresh upgrade to `0093`, seed, verification, payroll workflow through the Finalized Payroll Library, whole-database reset back to the canonical state); `backend/tests/test_development_database_lifecycle.py` (creation of an absent database, privilege model, every check before DROP including another server and a foreign owner, open-session refusal and retry, nothing old surviving recreation, failure reporting and recovery after DROP); development database `--verify-only` after the final reset; canonical full validation before the reset redesign and focused verification after it; the P8c section of the Unified Plan.
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -819,11 +835,13 @@ Generic PATCH operations must not perform Driver→non-Driver transitions or rea
 
 Update 2026-10-18: Durable Driver Stage 1 makes the Driver permanent (0..1 per Employee, created with its first DriverAssignment), so a driver who stops driving and returns later reuses the same Driver with a new DriverAssignment. The rehire/return flow itself, the Driver→non-Driver transition and their payroll-eligibility semantics remain undefined and unbuilt.
 
+Update 2026-10-23: the refoundation closed with P8c without defining this lifecycle; it remains future Workforce work.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-10-18
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -844,11 +862,13 @@ The meaning of an external driver identity depends on the import contract. Keepi
 **Current State:**  
 Neither structure exists after Stage 1. `import.ImportRows.MatchedDriverID` refers to the permanent Driver. No generic alias or external-ID system is built.
 
+Update 2026-10-23: P8c closed the refoundation and the Unified Plan §10 C2 gate is met, so C2 is the next program; it has not started and this entry remains its design input.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-10-18
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -871,11 +891,13 @@ Documentation-only rule. Evidence design (P4c) must not make separate home-Branc
 
 Update 2026-10-19: the terminology is now "temporary cross-branch work"; the meaning is unchanged. "Worked-for-Branch" remains the name of the future record. Durable Driver Stage 2 builds nothing for it: Driver-owned compensation, and the Min/Max home pay calendar, do not change because a Driver works for another Branch.
 
+Update 2026-10-23: the refoundation closed with P8c without building this feature; it remains a future product definition.
+
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-10-19
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -891,10 +913,11 @@ Update 2026-10-19: the terminology is now "temporary cross-branch work"; the mea
 |**P3a–P5b**|DWR-015|
 |**Durable Driver Stage 2** (P6a retired)|DWR-016|
 |**P7a**|DWR-005 consumer migration, DWR-017|
-|**P7c**|DWR-012, DWR-018|
+|**P7c**|DWR-018|
 |**P8a**|DWR-003, DWR-004, DWR-005 final deletion, DWR-019|
 |**P8b**|DWR-013, DWR-014, DWR-020|
-|**P8c**|DWR-021|
+|**P8c**|DWR-021; DWR-002 reconciliation|
+|**Unscheduled future payroll product decision**|DWR-012 (moved from P7c)|
 |**Unscheduled future lifecycle**|DWR-022|
 |**Unscheduled future temporary cross-branch work feature**|DWR-024|
 |**C2 Import design**|DWR-023|

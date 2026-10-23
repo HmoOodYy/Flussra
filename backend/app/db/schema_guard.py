@@ -149,9 +149,10 @@ def _get_script_head() -> str | None:
     rev_map: dict[str, str | None] = {}
     for f in _VERSIONS_DIR.glob("*.py"):
         text = f.read_text(encoding="utf-8", errors="ignore")
-        # Match both plain (`revision = "X"`) and type-annotated (`revision: str = "X"`) forms
-        rev_m = re.search(r'^revision(?:\s*:\s*\w+)?\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-        down_m = re.search(r'^down_revision(?:\s*:\s*\w+)?\s*=\s*(?:["\']([^"\']*)["\']|None)', text, re.MULTILINE)
+        # Match plain (`revision = "X"`) and any type-annotated form (`revision: str = "X"`,
+        # `down_revision: Union[str, None] = "X"`, `down_revision: str | None = "X"`).
+        rev_m = re.search(r'^revision(?:\s*:[^=\n]+)?\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+        down_m = re.search(r'^down_revision(?:\s*:[^=\n]+)?\s*=\s*(?:["\']([^"\']*)["\']|None)', text, re.MULTILINE)
         if rev_m:
             rev = rev_m.group(1)
             down = down_m.group(1) if (down_m and down_m.group(1)) else None
@@ -425,6 +426,22 @@ def _check_target_physical_authorities(cur) -> list[str]:
         row = cur.fetchone()
         if row is None or row[0] != "NO":
             errors.append(f"Target identity must be NOT NULL: {schema}.{table}.{column}")
+    # Source facts never store derived review state: consumers keep reading the column,
+    # but the database admits only a non-null FALSE (0001 NOT NULL, 0093 CHECK).
+    cur.execute("""
+        SELECT a.attnotnull, pg_get_constraintdef(c.oid)
+        FROM pg_attribute a
+        LEFT JOIN pg_constraint c
+          ON c.conrelid = a.attrelid AND c.conname = 'ck_draftlines_nostoredreview'
+         AND c.contype = 'c' AND c.convalidated
+        WHERE a.attrelid = to_regclass('payroll.payrolldraftlines')
+          AND a.attname = 'needsmanagerreview' AND NOT a.attisdropped
+    """)
+    row = cur.fetchone()
+    if (row is None or row[0] is not True or row[1] is None
+            or re.sub(r"[\s()]", "", row[1]).lower() != "checkneedsmanagerreview=false"):
+        errors.append("Missing or drifted source-fact invariant ck_DraftLines_NoStoredReview: "
+                      "payroll.PayrollDraftLines.NeedsManagerReview must be NOT NULL and FALSE.")
     cur.execute("SELECT 1 FROM sec.Permissions WHERE PermissionCode = 'drivers.manage'")
     if cur.fetchone() is not None:
         errors.append("Retired drivers.manage permission still exists.")

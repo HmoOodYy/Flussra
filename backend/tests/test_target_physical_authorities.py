@@ -12,6 +12,8 @@ from app.db.schema_guard import (
     _RETIRED_COLUMNS,
     _RETIRED_TABLES,
     _check_target_physical_authorities,
+    _get_script_head,
+    run_schema_guard,
 )
 from tests.builders.final_evidence import seed_finalized_evidence
 from tests.compensation_database_fixtures import make_pay_definition, make_rate_definition
@@ -238,6 +240,51 @@ def test_target_schema_guard_detects_missing_audit_protection(target_database, t
             assert _check_target_physical_authorities(cursor) == []
             cursor.execute(f"ALTER TRIGGER {trigger} ON audit.AuditLog RENAME TO audit_guard_probe")
             assert any("append-only trigger" in error for error in _check_target_physical_authorities(cursor))
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_the_development_schema_guard_requires_the_single_alembic_head(target_database):
+    env, dsn = target_database
+    heads = _alembic(env, "heads")
+    assert heads.returncode == 0, heads.stderr
+    assert [line.split()[0] for line in heads.stdout.splitlines() if "(head)" in line] == [
+        _get_script_head()]
+    run_schema_guard(env["DATABASE_URL"], is_dev=True)
+    conn = psycopg2.connect(**dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE public.alembic_version SET version_num = '0092'")
+            with pytest.raises(RuntimeError, match="Alembic version mismatch"):
+                run_schema_guard(env["DATABASE_URL"], is_dev=True)
+    finally:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE public.alembic_version SET version_num = %s", (_get_script_head(),))
+        conn.close()
+
+
+_REVIEW_INVARIANT = "ALTER TABLE payroll.PayrollDraftLines DROP CONSTRAINT ck_DraftLines_NoStoredReview"
+
+
+@pytest.mark.parametrize("drift", [
+    _REVIEW_INVARIANT,
+    _REVIEW_INVARIANT + ", ADD CONSTRAINT ck_DraftLines_NoStoredReview "
+                        "CHECK (NeedsManagerReview = FALSE) NOT VALID",
+    _REVIEW_INVARIANT + ", ADD CONSTRAINT ck_DraftLines_NoStoredReview "
+                        "CHECK (NeedsManagerReview IS NOT NULL)",
+    "ALTER TABLE payroll.PayrollDraftLines ALTER COLUMN NeedsManagerReview DROP NOT NULL",
+], ids=["dropped", "not-validated", "weakened", "nullable"])
+def test_target_schema_guard_detects_a_missing_or_weakened_stored_review_invariant(target_database, drift):
+    _, dsn = target_database
+    conn = psycopg2.connect(**dsn)
+    try:
+        with conn.cursor() as cursor:
+            assert _check_target_physical_authorities(cursor) == []
+            cursor.execute(drift)
+            assert any("ck_DraftLines_NoStoredReview" in error
+                       for error in _check_target_physical_authorities(cursor))
     finally:
         conn.rollback()
         conn.close()
