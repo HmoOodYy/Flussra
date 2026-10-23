@@ -12,6 +12,8 @@ from app.db.schema_guard import (
     _RETIRED_COLUMNS,
     _RETIRED_TABLES,
     _check_target_physical_authorities,
+    _get_script_head,
+    run_schema_guard,
 )
 from tests.builders.final_evidence import seed_finalized_evidence
 from tests.compensation_database_fixtures import make_pay_definition, make_rate_definition
@@ -240,6 +242,26 @@ def test_target_schema_guard_detects_missing_audit_protection(target_database, t
             assert any("append-only trigger" in error for error in _check_target_physical_authorities(cursor))
     finally:
         conn.rollback()
+        conn.close()
+
+
+def test_the_development_schema_guard_requires_the_single_alembic_head(target_database):
+    env, dsn = target_database
+    heads = _alembic(env, "heads")
+    assert heads.returncode == 0, heads.stderr
+    assert [line.split()[0] for line in heads.stdout.splitlines() if "(head)" in line] == [
+        _get_script_head()]
+    run_schema_guard(env["DATABASE_URL"], is_dev=True)
+    conn = psycopg2.connect(**dsn)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE public.alembic_version SET version_num = '0092'")
+            with pytest.raises(RuntimeError, match="Alembic version mismatch"):
+                run_schema_guard(env["DATABASE_URL"], is_dev=True)
+    finally:
+        with conn.cursor() as cursor:
+            cursor.execute("UPDATE public.alembic_version SET version_num = %s", (_get_script_head(),))
         conn.close()
 
 

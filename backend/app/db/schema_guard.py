@@ -149,9 +149,10 @@ def _get_script_head() -> str | None:
     rev_map: dict[str, str | None] = {}
     for f in _VERSIONS_DIR.glob("*.py"):
         text = f.read_text(encoding="utf-8", errors="ignore")
-        # Match both plain (`revision = "X"`) and type-annotated (`revision: str = "X"`) forms
-        rev_m = re.search(r'^revision(?:\s*:\s*\w+)?\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-        down_m = re.search(r'^down_revision(?:\s*:\s*\w+)?\s*=\s*(?:["\']([^"\']*)["\']|None)', text, re.MULTILINE)
+        # Match plain (`revision = "X"`) and any type-annotated form (`revision: str = "X"`,
+        # `down_revision: Union[str, None] = "X"`, `down_revision: str | None = "X"`).
+        rev_m = re.search(r'^revision(?:\s*:[^=\n]+)?\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+        down_m = re.search(r'^down_revision(?:\s*:[^=\n]+)?\s*=\s*(?:["\']([^"\']*)["\']|None)', text, re.MULTILINE)
         if rev_m:
             rev = rev_m.group(1)
             down = down_m.group(1) if (down_m and down_m.group(1)) else None
