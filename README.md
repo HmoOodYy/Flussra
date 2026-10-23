@@ -70,16 +70,28 @@ Before anything is dropped, all of these must hold:
 - `--admin-url` is supplied (the reset never falls back to `DATABASE_URL`), it
   connects to a database other than the target, and its role can create
   databases;
-- the target is the database named in `DATABASE_URL`, and `--confirm` repeats
-  that name;
-- the lifecycle connection and the application credential reach the same running
-  PostgreSQL server. The reset compares the server's start time and version, not
-  host names. Network location is not a trust boundary: local, Docker, WSL,
-  remote, CI and cloud development databases all work;
+- the target is the database the application actually connects to, and
+  `--confirm` repeats that name. The reset resolves the target with SQLAlchemy's
+  asyncpg dialect, as the backend, Alembic and the seed do, so query arguments
+  such as `?database=`, `?user=` or `?host=` count. The application connection
+  must then report that database and role;
+- the lifecycle connection and the application credential reach the same
+  PostgreSQL cluster. Both report `pg_catalog.pg_control_system().system_identifier`,
+  and the two values must match; host names play no part. Network location is not
+  a trust boundary: local, Docker, WSL, remote, CI and cloud development databases
+  all work. When the target does not exist, the application side connects to the
+  control database instead, so the application role needs `CONNECT` on it (the
+  PostgreSQL default for `postgres`);
 - an existing target is owned by the lifecycle role or the application role;
 - no other session is connected to the target. Stop the backend and any other
   client first: an open session refuses the reset, which never terminates
   sessions and never uses `DROP DATABASE ... FORCE`.
+
+Every connection the reset opens starts with the search path
+`pg_catalog, pg_temp`, overriding database and role settings. Every system
+catalog and function it uses is named with `pg_catalog`. So objects that the
+application role, or anyone else, creates in other schemas cannot change these
+checks.
 
 `DROP DATABASE` and `CREATE DATABASE` are not one transaction. If creating or
 rebuilding fails after the drop, the reset says so, and the database is absent
