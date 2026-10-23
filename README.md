@@ -32,15 +32,47 @@ manually when needed.
 
 ## Development database reset and canonical demo
 
-Development data is disposable and is never converted. To reset the database
-configured in `backend/.env` (requires `ENVIRONMENT=development`), repeat its
-name from the `backend` directory:
+Development data is disposable and is never converted. A database can be reset
+only after it has been explicitly provisioned as a resettable Flussra development
+database. The trust decision is the database's own identity, never its network
+location: a remote, Docker, WSL or cloud development database can be provisioned,
+and a local database that is not provisioned cannot be reset.
+
+Provision once, as a PostgreSQL administrator (a superuser, or a role granted
+`SET` on the `flussra.*` parameters), from the `backend` directory:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\provision_dev_database.py --admin-url postgresql://postgres@localhost:5432/payroll_v3 --confirm payroll_v3
+```
+
+This stores two database-level settings in the PostgreSQL catalog:
+`flussra.environment = development` (what the database is) and
+`flussra.reset_allowed = on` (destructive reset is allowed). They survive every
+reset. The application role cannot store them for its own database, and the
+reset command never grants them. A database already marked as another
+environment is refused. To withdraw the capability, an administrator runs
+`ALTER DATABASE payroll_v3 SET flussra.reset_allowed = off`.
+
+Then reset the database configured in `backend/.env` by repeating its name:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\reset_dev_database.py --confirm payroll_v3
 ```
 
-The reset drops every schema and extension the database role owns, runs
+The reset runs only when all of these hold:
+
+- `ENVIRONMENT=development` is set explicitly in the environment or `.env` (the
+  application default does not count);
+- the connected database's `flussra.environment` is `development`;
+- its `flussra.reset_allowed` is `on`;
+- `--confirm` names the database actually connected to.
+
+A missing or different value refuses the reset. The reset then drops the Flussra
+application schemas and `public.alembic_version` in one transaction. Before
+dropping anything it follows PostgreSQL's dependency graph from those schemas.
+If the drop would also remove any object outside them, such as a view, a column,
+a domain, a constraint or an index elsewhere, it lists those objects and changes
+nothing. Extensions and objects that do not depend on Flussra are kept. It then runs
 `alembic upgrade head`, asserts the single Alembic head, runs the startup schema
 guard, writes the canonical demo (`scripts/canonical_demo.py`) and verifies it.
 It keeps the database itself, so a database owner without `CREATEDB` can run it.
