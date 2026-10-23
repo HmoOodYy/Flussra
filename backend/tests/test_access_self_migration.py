@@ -204,7 +204,7 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT version_num FROM public.alembic_version")
-            assert cur.fetchone()[0] == "0092"
+            assert cur.fetchone()[0] == "0093"
             cur.execute("""
                 SELECT pg_get_constraintdef(oid)
                 FROM pg_constraint
@@ -439,7 +439,7 @@ def test_0092_ignores_roleid_only_grants_and_keeps_catalog_for_p8b(access_migrat
     finally:
         conn.close()
 
-    _upgrade(config, "head")
+    _upgrade(config, "0092")
     conn = _db(dsn)
     try:
         with conn.cursor() as cur:

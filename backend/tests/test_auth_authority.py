@@ -47,8 +47,8 @@ def _create_user_with_assignments(cur, username: str, assignments: list[tuple[st
     active sec.UserBranchRoles row per (branch_code, company_rolecode) pair.
     Exact DRIVER assignments are Self with no branch; other roles use
     AllCompanyBranches when branch_code=None and SpecificBranch otherwise.
-    Uses the CompanyRoleID (new) path only — RoleID left NULL, same pattern as
-    the existing override_perm_user fixture in test_auth_regression.py.
+    Uses the CompanyRoleID path only, as in the existing override_perm_user fixture
+    in test_auth_regression.py.
     """
     from app.auth.security import hash_password
     pw = hash_password("TestPass123!")
@@ -64,37 +64,40 @@ def _create_user_with_assignments(cur, username: str, assignments: list[tuple[st
         if rolecode == "DRIVER":
             cur.execute("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-                SELECT u.userid, u.companyid, NULL, NULL,
+                    (userid, companyid, branchid, companyroleId, scopetype, isactive)
+                SELECT u.userid, u.companyid, NULL,
                        cr.companyroleid, 'Self', TRUE
                 FROM sec.users u
                 JOIN core.companies c ON c.companyid = u.companyid
                 JOIN sec.companyroles cr ON cr.companyid = c.companyid AND cr.rolecode = 'DRIVER'
                 WHERE u.username = %s
+                ON CONFLICT DO NOTHING
             """, (username,))
             continue
         if branch_code is None:
             cur.execute("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-                SELECT u.userid, u.companyid, NULL, NULL,
+                    (userid, companyid, branchid, companyroleId, scopetype, isactive)
+                SELECT u.userid, u.companyid, NULL,
                        cr.companyroleid, 'AllCompanyBranches', TRUE
                 FROM sec.users u
                 JOIN core.companies c  ON c.companyid = u.companyid
                 JOIN sec.companyroles cr ON cr.companyid = c.companyid AND cr.rolecode = %s
                 WHERE u.username = %s
+                ON CONFLICT DO NOTHING
             """, (rolecode, username))
         else:
             cur.execute("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-                SELECT u.userid, u.companyid, b.branchid, NULL,
+                    (userid, companyid, branchid, companyroleId, scopetype, isactive)
+                SELECT u.userid, u.companyid, b.branchid,
                        cr.companyroleid, 'SpecificBranch', TRUE
                 FROM sec.users u
                 JOIN core.companies c  ON c.companyid = u.companyid
                 JOIN core.branches b   ON b.companyid = c.companyid AND b.branchcode = %s
                 JOIN sec.companyroles cr ON cr.companyid = c.companyid AND cr.rolecode = %s
                 WHERE u.username = %s
+                ON CONFLICT DO NOTHING
             """, (branch_code, rolecode, username))
 
 

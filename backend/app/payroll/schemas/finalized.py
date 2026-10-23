@@ -275,7 +275,6 @@ class FinalizedAuditEvent(BaseModel):
     driver_assignment_id: int | None = None
     driver_id: int | None = None
     work_date: date | None = None
-    pay_item_id: int | None = None
     before_state: dict[str, Any] | None = None
     after_state: dict[str, Any] | None = None
     actor_user_id: int

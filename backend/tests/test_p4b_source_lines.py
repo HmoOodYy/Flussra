@@ -65,10 +65,16 @@ async def test_a_line_is_identified_by_its_period_definition_and_stores_no_money
     assert line["rate_amount"] is None and line["calculated_amount"] is None
     async with p3c_engine.connect() as conn:
         stored = (await conn.execute(text(
-            "SELECT linetype, rateamount, calculatedamount, needsmanagerreview "
+            "SELECT payrollperioddefinitionid, quantity, needsmanagerreview "
             "FROM payroll.payrolldraftlines WHERE draftlineid = :i"),
             {"i": line["draft_line_id"]})).one()
-    assert tuple(stored) == (None, None, None, False)
+        retired = (await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'payroll' AND table_name = 'payrolldraftlines'
+              AND column_name IN ('linetype', 'rateamount', 'calculatedamount')
+        """))).scalars().all()
+    assert tuple(stored) == (ppd, Decimal("5.0000"), False)
+    assert retired == []
 
 
 async def test_money_and_review_flags_are_not_accepted_as_input(p3c_client, p3c_engine, tenant):
@@ -191,14 +197,15 @@ async def test_source_mutations_write_audit_and_audit_failure_rolls_the_line_bac
             WHERE entityid = :e AND actioncode IN ('DRAFT_LINE_ADDED', 'DRAFT_LINE_VOIDED')
             GROUP BY actioncode"""), {"e": str(line_id)})).all())
         evidence = (await conn.execute(text("""
-            SELECT actioncode, afterstatejson ->> 'payroll_period_definition_id', payitemid
+            SELECT actioncode, afterstatejson ->> 'payroll_period_definition_id',
+                   afterstatejson ? 'pay_item_id' OR afterstatejson ? 'payitemid'
             FROM payroll.payrollperiodauditevidenceevents
             WHERE sourceentitytype = 'PayrollDraftLines' AND sourceentityid = :e
             ORDER BY payrollperiodauditevidenceeventid"""), {"e": str(line_id)})).all()
     assert audited == {"DRAFT_LINE_ADDED": 1, "DRAFT_LINE_VOIDED": 1}
-    # The evidence carries the target identity and never a fabricated PayItem.
+    # The evidence carries the target identity and does not expose a legacy PayItem field.
     assert [(r[0], r[1], r[2]) for r in evidence] == [
-        ("SOURCE_CREATED", str(ppd), None), ("SOURCE_VOIDED", str(ppd), None)]
+        ("SOURCE_CREATED", str(ppd), False), ("SOURCE_VOIDED", str(ppd), False)]
 
     async def failing_audit(*_args, **_kwargs):
         raise RuntimeError("simulated audit failure")

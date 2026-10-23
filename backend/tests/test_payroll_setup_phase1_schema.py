@@ -438,8 +438,8 @@ def test_payroll_setup_permissions_are_seeded_without_operational_implication(cu
     )
     cursor.execute(
         "INSERT INTO sec.UserBranchRoles "
-        "(UserID, CompanyID, RoleID, CompanyRoleID, ScopeType) "
-        "VALUES (%s, %s, NULL, %s, 'AllCompanyBranches')",
+        "(UserID, CompanyID, CompanyRoleID, ScopeType) "
+        "VALUES (%s, %s, %s, 'AllCompanyBranches')",
         (user_id, company_id, role_id),
     )
     cursor.execute(

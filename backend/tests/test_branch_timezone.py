@@ -179,8 +179,8 @@ async def test_captured_workdate_zone_survives_branch_zone_edit_for_live_eligibi
     suffix = uuid4().hex[:10]
     employee_id = (await db_conn.execute(text("""
         INSERT INTO core.employees
-            (companyid, branchid, fullname, employeetype, employmentstatus, hiredate)
-        VALUES (:cid, :bid, :name, 'Driver', 'Active', :hire_date)
+            (companyid, branchid, fullname, employmentstatus, hiredate)
+        VALUES (:cid, :bid, :name, 'Active', :hire_date)
         RETURNING employeeid
     """), {"cid": company_id, "bid": branch_id,
           "name": f"Frozen zone {suffix}", "hire_date": work_date})).scalar_one()
@@ -270,8 +270,8 @@ async def test_midday_transfer_overlap_allows_each_branch_local_workdate(
           "name": f"Los Angeles overlap {suffix}"})).scalar_one()
     employee_id = (await db_conn.execute(text("""
         INSERT INTO core.employees
-            (companyid, branchid, fullname, employeetype, employmentstatus, hiredate)
-        VALUES (:cid, :bid, :name, 'Driver', 'Active', DATE '2020-01-01')
+            (companyid, branchid, fullname, employmentstatus, hiredate)
+        VALUES (:cid, :bid, :name, 'Active', DATE '2020-01-01')
         RETURNING employeeid
     """), {"cid": company_id, "bid": source_branch_id,
           "name": f"Midday transfer {suffix}"})).scalar_one()

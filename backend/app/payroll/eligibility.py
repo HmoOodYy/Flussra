@@ -585,7 +585,11 @@ async def assignment_payroll_fact_exists(
     driver_assignment_id: int,
     db: AsyncConnection,
 ) -> bool:
-    """Whether any payroll fact or evidence references the assignment."""
+    """Whether any payroll fact or evidence references the assignment.
+
+    Driver-owned schedules are not assignment facts: a transfer/cancel does not
+    move or copy compensation, nor make it evidence of work in a home tenure.
+    """
     result = await db.execute(text("""
         SELECT
             EXISTS (SELECT 1 FROM payroll.PayrollDraftLines
@@ -599,8 +603,6 @@ async def assignment_payroll_fact_exists(
          OR EXISTS (SELECT 1 FROM payroll.PayrollCalculationDriverTotals
                     WHERE CompanyID = :company_id AND DriverAssignmentID = :aid)
          OR EXISTS (SELECT 1 FROM payroll.PayrollPeriodAuditEvidenceEvents
-                    WHERE CompanyID = :company_id AND DriverAssignmentID = :aid)
-         OR EXISTS (SELECT 1 FROM payroll.DriverRates
                     WHERE CompanyID = :company_id AND DriverAssignmentID = :aid)
     """), {"company_id": company_id, "aid": driver_assignment_id})
     return bool(result.scalar_one())

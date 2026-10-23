@@ -71,7 +71,7 @@ async def test_direct_creation_does_not_activate_any_branch(p3c_client, tenant, 
         assert state["is_configured"] is False
         assert state["is_active"] is False
         assert state["current_config"] is None
-    cur.execute("SELECT count(*) FROM payroll.branchpayitemconfig WHERE paydefinitionid = %s",
+    cur.execute("SELECT count(*) FROM payroll.branchpaydefinitionconfig WHERE paydefinitionid = %s",
                 (definition["pay_definition_id"],))
     assert cur.fetchone()[0] == 0
 
@@ -117,10 +117,10 @@ async def test_request_approval_activates_only_the_requesting_branch(p3c_client,
     assert a[definition_id]["is_active"] is True
     assert b[definition_id]["is_configured"] is False
     cur.execute("""
-        SELECT paydefinitionid, payitemid FROM payroll.branchpayitemconfig
+        SELECT paydefinitionid FROM payroll.branchpaydefinitionconfig
         WHERE paydefinitionid = %s
     """, (definition_id,))
-    assert cur.fetchall() == [(definition_id, None)]
+    assert cur.fetchall() == [(definition_id,)]
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +261,7 @@ async def test_retirement_preserves_history_and_blocks_new_activation(p3c_client
               "effective_from": "2026-01-01"})
     assert blocked.status_code == 422
     assert blocked.json()["detail"]["code"] == "PAY_DEFINITION_NOT_ACTIVE"
-    cur.execute("SELECT count(*) FROM payroll.branchpayitemconfig WHERE paydefinitionid = %s",
+    cur.execute("SELECT count(*) FROM payroll.branchpaydefinitionconfig WHERE paydefinitionid = %s",
                 (definition["pay_definition_id"],))
     assert cur.fetchone()[0] >= 1
     listed = (await p3c_client.get("/compensation/pay-definitions", headers=tenant.admin)).json()
@@ -348,30 +348,30 @@ async def test_driver_self_accounts_are_denied_branch_configuration(
 # Database invariants
 # ---------------------------------------------------------------------------
 
-async def test_config_rows_require_a_definition_and_cannot_carry_a_legacy_identity(
+async def test_config_rows_require_a_definition_and_have_no_legacy_identity_column(
     p3c_client, tenant, cur,
 ):
     definition = await create_definition(p3c_client, tenant)
     insert = """
-        INSERT INTO payroll.branchpayitemconfig
+        INSERT INTO payroll.branchpaydefinitionconfig
             (companyid, branchid, {extra}isactive, effectivefrom)
         VALUES (%s, %s, {values}TRUE, '2026-01-01')
     """
     with pytest.raises(errors.NotNullViolation):  # PayDefinitionID is required
         cur.execute(insert.format(extra="", values=""), (tenant.company_id, tenant.branch_a))
-    cur.execute("SELECT payitemid FROM payroll.payitems ORDER BY payitemid LIMIT 1")
-    legacy_item = cur.fetchone()[0]
-    with pytest.raises(errors.CheckViolation):  # PayItemID can never be populated
-        cur.execute(
-            insert.format(extra="paydefinitionid, payitemid, ", values="%s, %s, "),
-            (tenant.company_id, tenant.branch_a, definition["pay_definition_id"], legacy_item))
+    cur.execute("""
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'payroll' AND table_name = 'branchpaydefinitionconfig'
+          AND column_name = 'payitemid'
+    """)
+    assert cur.fetchone() is None
 
 
 async def test_config_ownership_and_version_integrity(p3c_client, tenant, p3b_dsn, cur):
     definition = await create_definition(p3c_client, tenant)
     other = build_tenant(p3b_dsn)
     insert = """
-        INSERT INTO payroll.branchpayitemconfig
+        INSERT INTO payroll.branchpaydefinitionconfig
             (companyid, branchid, paydefinitionid, isactive, effectivefrom, effectiveto)
         VALUES (%s, %s, %s, TRUE, %s, %s)
     """
@@ -403,7 +403,7 @@ async def test_concurrent_first_configuration_leaves_one_open_version(p3c_client
     assert [r.status_code for r in results] == [200, 200, 200]
     cur.execute("""
         SELECT count(*), count(*) FILTER (WHERE effectiveto IS NULL)
-        FROM payroll.branchpayitemconfig WHERE paydefinitionid = %s AND branchid = %s
+        FROM payroll.branchpaydefinitionconfig WHERE paydefinitionid = %s AND branchid = %s
     """, (definition["pay_definition_id"], tenant.branch_a))
     assert cur.fetchone() == (1, 1)
 
@@ -418,7 +418,7 @@ async def test_concurrent_versioning_is_deterministic_and_never_overlaps(p3c_cli
                    effective_from=_later(20)))
     assert [r.status_code for r in results] == [200, 200]
     cur.execute("""
-        SELECT effectivefrom, effectiveto FROM payroll.branchpayitemconfig
+        SELECT effectivefrom, effectiveto FROM payroll.branchpaydefinitionconfig
         WHERE paydefinitionid = %s AND branchid = %s ORDER BY effectivefrom
     """, (definition["pay_definition_id"], tenant.branch_a))
     versions = cur.fetchall()
@@ -441,7 +441,7 @@ async def test_retirement_racing_activation_never_activates_a_retired_definition
     cur.execute("""
         SELECT pd.status, bool_or(c.isactive)
         FROM payroll.paydefinitions pd
-        LEFT JOIN payroll.branchpayitemconfig c ON c.paydefinitionid = pd.paydefinitionid
+        LEFT JOIN payroll.branchpaydefinitionconfig c ON c.paydefinitionid = pd.paydefinitionid
         WHERE pd.paydefinitionid = %s GROUP BY pd.status
     """, (definition["pay_definition_id"],))
     status, active = cur.fetchone()

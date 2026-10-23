@@ -623,7 +623,7 @@ async def driver_pay_rates(
                     WHERE  c.ratedefinitionid = rd.ratedefinitionid AND rd.shape = 'Scalar'
                       AND  c.sequenceno = 1) AS rate_component_definition_id,
                    CASE WHEN CAST(:bid AS integer) IS NULL THEN NULL ELSE EXISTS (
-                       SELECT 1 FROM payroll.branchpayitemconfig bpic
+                       SELECT 1 FROM payroll.branchpaydefinitionconfig bpic
                        WHERE  bpic.companyid = :cid AND bpic.branchid = CAST(:bid AS integer)
                          AND  bpic.paydefinitionid = pd.paydefinitionid
                          AND  bpic.isactive

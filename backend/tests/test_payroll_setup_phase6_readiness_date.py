@@ -60,11 +60,6 @@ async def phase6_ready_db(pg_instance):
             cursor.execute("UPDATE core.Companies SET OwnerUserID = %s WHERE CompanyID = %s",
                            (user_id, company_id))
             cursor.execute("""
-                INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-                VALUES (%s, 'Phase 6 Admin', 100, FALSE) RETURNING RoleID
-            """, ("P6R_" + uuid4().hex[:10],))
-            role_id = cursor.fetchone()[0]
-            cursor.execute("""
                 INSERT INTO sec.CompanyRoles
                     (CompanyID, RoleCode, RoleName, RoleLevel, IsDefault,
                      IsProtected, IsCustom, IsActive)
@@ -79,10 +74,10 @@ async def phase6_ready_db(pg_instance):
             """, (company_role_id,))
             cursor.execute("""
                 INSERT INTO sec.UserBranchRoles
-                    (UserID, CompanyID, BranchID, RoleID, CompanyRoleID,
+                    (UserID, CompanyID, BranchID, CompanyRoleID,
                      ScopeType, IsActive)
-                VALUES (%s, %s, NULL, %s, %s, 'AllCompanyBranches', TRUE)
-            """, (user_id, company_id, role_id, company_role_id))
+                VALUES (%s, %s, NULL, %s, 'AllCompanyBranches', TRUE)
+            """, (user_id, company_id, company_role_id))
             cursor.execute("""
                 INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
                 VALUES (%s, 'P6BRANCH', 'Phase 6 Branch', 'Active', FALSE, 'UTC')
@@ -151,10 +146,6 @@ async def _actor(db, *, permissions: tuple[str, ...], scope: str,
         VALUES (:cid, :name, 'Phase 6 readiness date actor', TRUE, TRUE)
         RETURNING UserID
     """), {"cid": company_id, "name": "p6ready_" + suffix})).scalar_one()
-    role_id = (await db.execute(text("""
-        INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-        VALUES (:code, 'Phase 6 readiness date actor', 20, FALSE) RETURNING RoleID
-    """), {"code": "P6ONR_" + suffix})).scalar_one()
     if driver:
         company_role_id = (await db.execute(text("""
             SELECT CompanyRoleID FROM sec.CompanyRoles
@@ -194,12 +185,12 @@ async def _actor(db, *, permissions: tuple[str, ...], scope: str,
             """), {"rid": company_role_id, "permission": permission})
     await db.execute(text("""
         INSERT INTO sec.UserBranchRoles
-            (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
-        VALUES (:uid, :cid, :bid, :rid, :crid, :scope, TRUE)
+            (UserID, CompanyID, BranchID, CompanyRoleID, ScopeType, IsActive)
+        VALUES (:uid, :cid, :bid, :crid, :scope, TRUE)
     """), {
         "uid": user_id, "cid": company_id,
         "bid": branch_id if scope == "SpecificBranch" else None,
-        "rid": role_id, "crid": company_role_id, "scope": scope,
+        "crid": company_role_id, "scope": scope,
     })
     return create_access_token(int(user_id), int(company_id))
 
@@ -224,10 +215,6 @@ async def _mixed_driver_actor(db, *, permissions: tuple[str, ...]) -> str:
         RETURNING UserID
     """), {"cid": company_id, "name": "p6mixed_" + suffix})).scalar_one()
 
-    admin_role_id = (await db.execute(text("""
-        INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-        VALUES (:code, 'Phase 6 mixed actor admin role', 20, FALSE) RETURNING RoleID
-    """), {"code": "P6MXA_" + suffix})).scalar_one()
     admin_company_role_id = (await db.execute(text("""
         INSERT INTO sec.CompanyRoles
             (CompanyID, RoleCode, RoleName, RoleLevel, IsDefault,
@@ -243,9 +230,9 @@ async def _mixed_driver_actor(db, *, permissions: tuple[str, ...]) -> str:
         """), {"rid": admin_company_role_id, "permission": permission})
     await db.execute(text("""
         INSERT INTO sec.UserBranchRoles
-            (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
-        VALUES (:uid, :cid, NULL, :rid, :crid, 'AllCompanyBranches', TRUE)
-    """), {"uid": user_id, "cid": company_id, "rid": admin_role_id, "crid": admin_company_role_id})
+            (UserID, CompanyID, BranchID, CompanyRoleID, ScopeType, IsActive)
+        VALUES (:uid, :cid, NULL, :crid, 'AllCompanyBranches', TRUE)
+    """), {"uid": user_id, "cid": company_id, "crid": admin_company_role_id})
 
     driver_company_role_id = (await db.execute(text("""
         SELECT CompanyRoleID FROM sec.CompanyRoles
@@ -259,17 +246,13 @@ async def _mixed_driver_actor(db, *, permissions: tuple[str, ...]) -> str:
             VALUES (:cid, 'DRIVER', 'Phase 6 Driver', 10, FALSE, TRUE, FALSE, TRUE)
             RETURNING CompanyRoleID
         """), {"cid": company_id})).scalar_one()
-    driver_role_id = (await db.execute(text("""
-        INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-        VALUES (:code, 'Phase 6 mixed actor driver role', 10, FALSE) RETURNING RoleID
-    """), {"code": "P6MXD_" + suffix})).scalar_one()
     await db.execute(text("""
         INSERT INTO sec.UserBranchRoles
-            (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
-        VALUES (:uid, :cid, NULL, :rid, :crid, 'Self', TRUE)
+            (UserID, CompanyID, BranchID, CompanyRoleID, ScopeType, IsActive)
+        VALUES (:uid, :cid, NULL, :crid, 'Self', TRUE)
     """), {
         "uid": user_id, "cid": company_id,
-        "rid": driver_role_id, "crid": driver_company_role_id,
+        "crid": driver_company_role_id,
     })
 
     return create_access_token(int(user_id), int(company_id))

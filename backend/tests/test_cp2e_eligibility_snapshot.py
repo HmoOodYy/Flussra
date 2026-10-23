@@ -1265,9 +1265,8 @@ async def cp2e_candidate_db(test_database_url):
                 })).scalar_one())
                 employee_id = int((await conn.execute(_text("""
                     INSERT INTO core.employees
-                        (companyid, branchid, fullname, employeetype,
-                         employmentstatus, createdbyuserid)
-                    VALUES (:cid, :bid, :name, 'Driver', 'Active', :uid)
+                        (companyid, branchid, fullname, employmentstatus, createdbyuserid)
+                    VALUES (:cid, :bid, :name, 'Active', :uid)
                     RETURNING employeeid
                 """), {
                     "cid": company_id,

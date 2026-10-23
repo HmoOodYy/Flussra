@@ -583,8 +583,8 @@ class TestDashboardSetupWarnings:
         result = await direct_db.execute(
             text("""
                 INSERT INTO core.employees
-                    (companyid, branchid, fullname, employeetype, employmentstatus)
-                VALUES (:cid, :bid, 'M17 No Rate Driver', 'Driver', 'Active')
+                    (companyid, branchid, fullname, employmentstatus)
+                VALUES (:cid, :bid, 'M17 No Rate Driver', 'Active')
                 RETURNING employeeid
             """),
             {"cid": company_id, "bid": paytest_branch_id},
@@ -662,8 +662,8 @@ class TestDashboardSetupWarnings:
                   AND d.driverstatus = 'Active'
                   AND e.employmentstatus = 'Active'
                   AND NOT EXISTS (
-                      SELECT 1 FROM payroll.driverrates dr
-                      WHERE dr.driverassignmentid = a.driverassignmentid AND dr.status = 'Approved'
+                      SELECT 1 FROM payroll.driverrateschedules dr
+                      WHERE dr.driverid = a.driverid AND dr.status = 'Approved'
                   )
             """),
             {"bid": hq_branch_id},

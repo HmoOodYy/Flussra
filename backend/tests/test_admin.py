@@ -714,7 +714,7 @@ class TestListPermissions:
         # payroll.entry (modulecode='payroll') is visible.
         # review.decide (modulecode='review') is visible — 'review' was added
         # to the ui_only filter so the Roles UI can assign it to custom roles.
-        # True legacy-only codes (setup.manage, drivers.manage, payroll.approve_rate)
+        # True legacy-only codes (setup.manage, payroll.approve_rate)
         # remain available only via ui_only=false.
         resp_ui = await client.get("/admin/permissions", headers=auth(auth_token))
         assert resp_ui.status_code == 200

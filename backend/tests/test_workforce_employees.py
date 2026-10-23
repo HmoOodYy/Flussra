@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from tests.builders.final_evidence import discard_chain, insert_final_line, seed_snapshot_component
 from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
+from tests.target_seed import seed_period_definition
 
 
 def auth(token: str) -> dict[str, str]:
@@ -506,14 +507,16 @@ async def test_hire_date_guard_uses_nonvoid_daily_draft_lines_across_assignment_
         driver_id=employee["driver"]["driver_id"],
         effective_from_at="2020-01-01T00:00:00Z", transferred_from_assignment_id=source_id,
     )
+    definition = await seed_period_definition(
+        direct_db, period_id=created_period_id, branch_id=hq_branch_id)
     await direct_db.execute(text("""
         INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType,
-             Quantity, SourceType, Status)
+            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate,
+             PayrollPeriodDefinitionID, Quantity, SourceType, Status)
         VALUES (1, :branch_id, :period_id, :assignment_id, DATE '2018-06-01',
-                :line_type, 1, 'Manual', 'Active')
+                :ppd_id, 1, 'Manual', 'Active')
     """), {"branch_id": hq_branch_id, "period_id": created_period_id,
-           "assignment_id": source_id, "line_type": f"P1B-{suffix()}"})
+           "assignment_id": source_id, "ppd_id": definition.payroll_period_definition_id})
 
     response = await client.patch(
         f"/workforce/employees/{employee['employee_id']}",
@@ -533,14 +536,16 @@ async def test_hire_date_guard_ignores_void_draft_line(
         driver={"driver_number": f"P1B-{suffix()}", "effective_from_at": "2000-01-01T00:00:00Z"},
     )
     assignment_id = employee["current_or_pending_assignment"]["driver_assignment_id"]
+    definition = await seed_period_definition(
+        direct_db, period_id=created_period_id, branch_id=hq_branch_id)
     await direct_db.execute(text("""
         INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType,
-             Quantity, SourceType, Status)
+            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate,
+             PayrollPeriodDefinitionID, Quantity, SourceType, Status)
         VALUES (1, :branch_id, :period_id, :assignment_id, DATE '2018-06-01',
-                :line_type, 1, 'Manual', 'Void')
+                :ppd_id, 1, 'Manual', 'Void')
     """), {"branch_id": hq_branch_id, "period_id": created_period_id,
-           "assignment_id": assignment_id, "line_type": f"P1B-{suffix()}"})
+           "assignment_id": assignment_id, "ppd_id": definition.payroll_period_definition_id})
     response = await client.patch(
         f"/workforce/employees/{employee['employee_id']}",
         json={"hire_date": "2018-06-02"}, headers=auth(auth_token),

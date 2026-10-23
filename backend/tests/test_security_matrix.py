@@ -864,19 +864,17 @@ class TestSecurityMatrix:
 
 
 # ---------------------------------------------------------------------------
-# Phase 1.3 — P0 #1: legacy DRIVER/Self rows (companyroleId IS NULL) are blocked
+# Phase 1.3 — Driver Self CompanyRole assignments are blocked from payroll subjects
 # ---------------------------------------------------------------------------
 
 class TestDriverSelfGenericDenial:
     """
-    Verify that require_non_driver_subject catches legacy sec.userbranchroles rows
-    where companyroleId IS NULL and scopetype = 'Self'.
+    Verify that require_non_driver_subject blocks CompanyRole-backed DRIVER/Self rows.
 
-    These rows cannot be created via the API (the API always sets a companyroleId),
-    so they are injected directly via the direct_db fixture.
+    The rows are injected directly so this test isolates the payroll subject boundary.
     """
 
-    async def test_driver_self_null_companyrole_blocked_from_period_list(
+    async def test_driver_self_companyrole_blocked_from_period_list(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
@@ -885,26 +883,20 @@ class TestDriverSelfGenericDenial:
         direct_db,
     ):
         """
-        A user with a legacy DRIVER/Self row (companyroleId IS NULL, scopetype='Self')
-        must be blocked from all payroll operational endpoints with 403.
-
-        Note: Self scope MUST have a branchid (DB constraint).
-        The "legacy" aspect is that companyroleId IS NULL — not branchid IS NULL.
+        A user with a DRIVER/Self CompanyRole assignment must be blocked from payroll
+        operational endpoints with 403.
         """
         from sqlalchemy import text as _text
 
         uname = _uid()
         await _create_user(session_client, auth_token, uname)
 
-        # Inject a legacy DRIVER/Self row: companyroleId IS NULL, scopetype='Self'
-        # branchid must be set (DB constraint); the legacy aspect is NULL companyroleId.
-        # roleid is set to the global PAYROLL_ADMIN role so the user can log in —
-        # the real legacy case is roleid set (old global role) + companyroleId NOT YET backfilled.
+        # Inject the target DRIVER/Self assignment directly.
         await direct_db.execute(
             _text("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleid, scopetype, isactive)
-                SELECT u.userid, u.companyid, NULL, NULL, cr.companyroleid,
+                    (userid, companyid, branchid, companyroleid, scopetype, isactive)
+                SELECT u.userid, u.companyid, NULL, cr.companyroleid,
                        'Self', TRUE
                 FROM sec.users u
                 JOIN sec.companyroles cr
@@ -924,7 +916,7 @@ class TestDriverSelfGenericDenial:
             headers=_hdr(tok),
         )
         assert r1.status_code == 403, (
-            f"Legacy DRIVER/Self user (companyroleId=NULL) must be blocked from period list; "
+            f"DRIVER/Self user must be blocked from period list; "
             f"got {r1.status_code}: {r1.text}"
         )
         assert "driver" in r1.json()["detail"].lower(), (
@@ -937,7 +929,7 @@ class TestDriverSelfGenericDenial:
             headers=_hdr(tok),
         )
         assert r2.status_code == 403, (
-            f"Legacy DRIVER/Self user must be blocked from period detail; got {r2.status_code}"
+            f"DRIVER/Self user must be blocked from period detail; got {r2.status_code}"
         )
 
         # Review list must also be 403
@@ -954,23 +946,25 @@ class TestDriverSelfGenericDenial:
         direct_db,
     ):
         """
-        A legacy DRIVER/Self user cannot create a payroll period even if they somehow
-        have payroll.entry assigned (driver hard-block runs before permission check).
+        A DRIVER/Self user cannot create a payroll period even with payroll.entry
+        assigned (driver hard-block runs before permission check).
         """
         from sqlalchemy import text as _text
 
         uname = _uid()
         await _create_user(session_client, auth_token, uname)
 
-        # Give the user a PAYROLL_ADMIN role (payroll.entry) AND a legacy DRIVER/Self row
+        # Give the user PAYROLL_ADMIN permission and a DRIVER/Self assignment
         await direct_db.execute(
             _text("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleid, scopetype, isactive)
-                SELECT u.userid, u.companyid, NULL, r.roleid, NULL,
+                    (userid, companyid, branchid, companyroleid, scopetype, isactive)
+                SELECT u.userid, u.companyid, NULL, cr.companyroleid,
                        'AllCompanyBranches', TRUE
-                FROM sec.users u, sec.roles r
-                WHERE u.username = :uname AND r.rolecode = 'PAYROLL_ADMIN'
+                FROM sec.users u
+                JOIN sec.companyroles cr
+                  ON cr.companyid = u.companyid AND cr.rolecode = 'PAYROLL_ADMIN'
+                WHERE u.username = :uname
                 ON CONFLICT DO NOTHING
             """),
             {"uname": uname},
@@ -978,8 +972,8 @@ class TestDriverSelfGenericDenial:
         await direct_db.execute(
             _text("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleid, scopetype, isactive)
-                SELECT u.userid, u.companyid, NULL, NULL, cr.companyroleid,
+                    (userid, companyid, branchid, companyroleid, scopetype, isactive)
+                SELECT u.userid, u.companyid, NULL, cr.companyroleid,
                        'Self', TRUE
                 FROM sec.users u
                 JOIN sec.companyroles cr

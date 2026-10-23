@@ -100,8 +100,7 @@ async def test_status_pay_is_never_written_to_draft_lines(p3c_client, p3c_engine
 
     assert query(tenant, """
         SELECT count(*) FROM payroll.payrolldraftlines
-        WHERE payrollperiodid = %s AND (sourcetype = 'System' OR sourceid LIKE 'STATUS_PAYMENT%%'
-                                        OR linetype IN ('STATUS_PAY', 'STATUS_PAYMENT'))
+        WHERE payrollperiodid = %s AND payrollperioddefinitionid IS NOT NULL
     """, (period["payroll_period_id"],)) == [(0,)]
 
 
@@ -283,11 +282,12 @@ async def test_a_status_with_a_rate_column_pays_from_canonical_entry_state(
     await _select(p3c_client, tenant, period, 0, "Vacation")
     period_id = period["payroll_period_id"]
     assert query(tenant, """
-        SELECT count(*) FROM payroll.payrolldraftlines
-        WHERE payrollperiodid = %s AND linetype = 'DailyStatus' AND status <> 'Void'
+        SELECT count(*) FROM payroll.payrolldraftlines WHERE payrollperiodid = %s
     """, (period_id,)) == [(0,)]
 
     before = await _preview(p3c_client, tenant, period)
+    assert [line["source_type"] for driver in before["drivers"]
+            for line in driver["lines"]] == ["StatusEntryState"]
     frozen_before = await capture(p3c_engine, tenant, period)
 
     rewritten = await _preview(p3c_client, tenant, period)
@@ -326,8 +326,7 @@ async def test_status_pay_is_not_a_payitem_and_cannot_be_written_as_an_ordinary_
         WHERE table_schema = 'payroll' AND table_name = 'payrollstatuskeys'
           AND column_name ILIKE '%%payitem%%'
     """) == []
-    assert query(tenant, "SELECT count(*) FROM payroll.payitems WHERE payitemcode IN "
-                         "('STATUS_PAY', 'STATUS_PAYMENT')") == [(0,)]
+    assert query(tenant, "SELECT to_regclass('payroll.payitems')") == [(None,)]
     period = await _period(p3c_client, p3c_engine, tenant)
     # An ordinary source line is a quantity against a period definition: a line type, a rate
     # or an amount is not an input at all.

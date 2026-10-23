@@ -59,7 +59,7 @@ async def capture_period_audit_evidence(
     source_entity_type: str, source_entity_id: int | str, user_id: int,
     required_permission_code: str, db: AsyncConnection, before_state: dict[str, Any] | None = None,
     after_state: dict[str, Any] | None = None, driver_assignment_id: int | None = None,
-    work_date: Any | None = None, pay_item_id: int | None = None, reason: str | None = None,
+    work_date: Any | None = None, reason: str | None = None,
     correlation_id: str | None = None, source_revision: int | None = None,
     review_item_id: int | None = None,
 ) -> int:
@@ -76,7 +76,7 @@ async def capture_period_audit_evidence(
         INSERT INTO payroll.payrollperiodauditevidenceevents
             (companyid, branchid, payrollperiodid, evidencedomain, actioncode,
              sourceentitytype, sourceentityid, reviewitemid, driverassignmentid, driverid,
-             workdate, payitemid,
+             workdate,
              beforestatejson, afterstatejson, actoruserid, actordisplaynamesnapshot,
              responsibilitycontextsnapshot, reasonsnapshot, correlationid, sourcerevision)
         VALUES
@@ -84,7 +84,7 @@ async def capture_period_audit_evidence(
              :entity_type, :entity_id, :review_item_id, :driver_assignment_id,
              (SELECT a.driverid FROM core.driverassignments a
                WHERE a.driverassignmentid = :driver_assignment_id AND a.companyid = :company_id),
-             :work_date, :pay_item_id,
+             :work_date,
              CAST(:before_state AS jsonb), CAST(:after_state AS jsonb), :user_id, :display_name,
              CAST(:role_context AS jsonb), :reason, CAST(:correlation_id AS uuid), :source_revision)
         RETURNING payrollperiodauditevidenceeventid
@@ -93,7 +93,7 @@ async def capture_period_audit_evidence(
         "domain": domain, "action_code": action_code, "entity_type": source_entity_type,
         "entity_id": str(source_entity_id), "review_item_id": review_item_id,
         "driver_assignment_id": driver_assignment_id, "work_date": work_date,
-        "pay_item_id": pay_item_id, "before_state": _json(before_state),
+        "before_state": _json(before_state),
         "after_state": _json(after_state), "user_id": user_id, "display_name": display_name,
         "role_context": role_context, "reason": reason, "correlation_id": correlation_id,
         "source_revision": source_revision,

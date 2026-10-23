@@ -1,12 +1,12 @@
 # Flussra Compensation Architecture Modernization — Master Implementation Plan
 
-**Status:** APPROVED TARGET ARCHITECTURE — P5b backend OrdinalTier authority, P7a, P7b, and P7c (PR #67, baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`) are closed; P8a runtime legacy deletion is implemented from that baseline with migration `0092`; P8b physical catalog cleanup remains open
+**Status:** APPROVED TARGET ARCHITECTURE — P5b backend OrdinalTier authority, P7a, P7b, and P7c (PR #67, baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`) are closed; P8a is closed/merged via PR #68; P8b physical catalog cleanup is locally closed after focused verification with migration `0093` (merge pending); P8c remains deferred
 **Document role:** Authoritative Compensation target architecture and implementation dependency plan
 **Repository:** `HmoOodYy/Flussra`
-**Current baseline:** P8a starts from `main @ 0fd86c76ee28c724270514728cdab7dcf1bba599` (P7c closed via PR #67); Alembic head `0091`. P8a adds migration `0092`. P5b closed via PR #64 at `d7030ab9a1c9d1dd6198b08b91735ec5db3b34da`; earlier baselines are retained below as implementation history.
-**Execution state:** P2c, Phase 2, P3a (PR #30), G0 (PRs #34–#45), P3b (PR #46), P3c (PR #47), P4a (PR #48), P4b (PR #49), the Branch timezone refoundation (PR #56), Durable Driver Stages 1–3 (PRs #57–#59), P4c (PR #62), P5a (PR #63), P5b (PR #64, head `0091`) and P7a (PR #65, no migration) are closed. P7b — final Compensation / Settings UI — is closed via PR #66 at `a827a2d942594b339f9fd13441d7a1a835670bce` and adds no migration. P7c is closed via PR #67 at `0fd86c76ee28c724270514728cdab7dcf1bba599`. P8a removes operational compatibility/runtime authorities; P8b physical catalog cleanup and P8c reset/reseed remain future work.
+**Current baseline:** P8b starts from exact `main @ a9caa739330d81bd421dd845438b27ebcb2631eb` (P8a closed via PR #68), head `0092`, and adds migration `0093`. P5b closed via PR #64 at `d7030ab9a1c9d1dd6198b08b91735ec5db3b34da`; earlier baselines are retained below as implementation history.
+**Execution state:** P2c, Phase 2, P3a (PR #30), G0 (PRs #34–#45), P3b (PR #46), P3c (PR #47), P4a (PR #48), P4b (PR #49), the Branch timezone refoundation (PR #56), Durable Driver Stages 1–3 (PRs #57–#59), P4c (PR #62), P5a (PR #63), P5b (PR #64, head `0091`) and P7a (PR #65, no migration) are closed. P7b — final Compensation / Settings UI — is closed via PR #66 at `a827a2d942594b339f9fd13441d7a1a835670bce` and adds no migration. P7c is closed via PR #67 at `0fd86c76ee28c724270514728cdab7dcf1bba599`. P8a removed operational compatibility/runtime authorities. P8b removes their physical catalogs at `0093`; P8c reset/reseed remains deferred.
 
-> This document records the approved target architecture. P5b's backend OrdinalTier work, P7a, P7b and P7c are closed. P8a runtime legacy deletion is implemented with migration `0092`; P8b physical catalog cleanup and P8c reset/reseed remain future/deferred.
+> This document records the approved target architecture. P5b's backend OrdinalTier work, P7a, P7b and P7c are closed. P8a runtime deletion is closed/merged via PR #68. P8b is locally closed with the target physical schema at `0093` (see the Unified Plan P8b inventory); P8c remains deferred.
 
 > **P5b OrdinalTier amendment (2026-10-22):** OrdinalTier is operational as a first-production method through the generic architecture of this plan (the P5b section of `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` records the implemented contract). The definition owns the topology and generic PayDefinition governance creates it (a request stores its proposed tiers; creation leaves the structure unlocked and an unused, Pending-free definition may replace its method and topology through the governance structure change until the first Approved schedule or first period reference sets the one canonical structure lock); a Driver's `DriverRateSchedule` supplies one complete value set; the method-owned calculation pays each ordinal unit with the value of the tier covering it (`3 + 4 + 5 + 5 = 17`, ordinals restarting per source line); evidence freezes the topology, the values and the per-tier explanation in calculation contract `payroll-calculation-v4`. Statements below that call OrdinalTier not yet operational, or place its runtime in the old P7 position, are superseded; the final tier authoring screens remain a later UX unit.
 
@@ -19,7 +19,7 @@
 
 ## 0. Resume Protocol — Read This First When Work Restarts
 
-P4b is the current implementation unit. Before each later work unit starts, the implementation lead performs a read-only drift review:
+P8b is locally closed at migration `0093`; P8c remains deferred. Before a later work unit starts, the implementation lead performs a read-only drift review:
 
 1. Fetch current `main` and record the new SHA.
 2. Compare changes since the current approved baseline recorded above.
@@ -369,10 +369,10 @@ CalculationMethod
 status
 origin/provenance
 generic governance and approval provenance
-branch applicability through the current Branch configuration authority (currently `BranchPayItemConfig`)
+branch applicability through `payroll.BranchPayDefinitionConfig`
 ```
 
-The physical table may continue to be named `PayItems` during implementation, but its target meaning must be PayDefinition.
+The live physical definition authority is `payroll.PayDefinitions`. Migration `0093` retires the predecessor PayItems/RateTypes/DriverRates family and CDPI-specific storage after proving the generic governance/provenance replacement; historical phase descriptions below retain the names used at the time.
 
 ## CalculationMethod
 

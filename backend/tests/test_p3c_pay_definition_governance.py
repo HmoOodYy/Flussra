@@ -29,12 +29,10 @@ LEGACY_TABLES = (
 )
 
 
-def _legacy_counts(cur) -> dict[str, int]:
-    counts = {}
+def _assert_legacy_authorities_absent(cur) -> None:
     for table in LEGACY_TABLES:
-        cur.execute(f"SELECT count(*) FROM payroll.{table}")
-        counts[table] = cur.fetchone()[0]
-    return counts
+        cur.execute("SELECT to_regclass(%s)", (f"payroll.{table}",))
+        assert cur.fetchone() == (None,), table
 
 
 async def _draft(client, tenant, branch_id=None, headers=None, **fields):
@@ -99,19 +97,19 @@ async def test_direct_create_builds_one_scalar_structure_and_provenance(p3c_clie
 
 
 async def test_creation_adds_no_legacy_routing_identities(p3c_client, tenant, cur):
-    before = _legacy_counts(cur)
-    cur.execute("SELECT count(*) FROM payroll.branchpayitemconfig")
+    _assert_legacy_authorities_absent(cur)
+    cur.execute("SELECT count(*) FROM payroll.branchpaydefinitionconfig")
     config_rows = cur.fetchone()[0]
     await create_definition(p3c_client, tenant)
     submitted = await _submitted(p3c_client, tenant)
     approved = await _decide(p3c_client, tenant, submitted, "Approve")
     assert approved.status_code == 200, approved.text
-    assert _legacy_counts(cur) == before
+    _assert_legacy_authorities_absent(cur)
     cur.execute("""
-        SELECT count(*), count(payitemid)
-        FROM payroll.branchpayitemconfig
+        SELECT count(*)
+        FROM payroll.branchpaydefinitionconfig
     """)
-    assert cur.fetchone() == (config_rows + 1, 0)
+    assert cur.fetchone()[0] == config_rows + 1
 
 
 async def test_company_is_valid_with_zero_pay_definitions(p3c_client, tenant):

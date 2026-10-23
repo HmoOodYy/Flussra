@@ -49,7 +49,7 @@ async def seed_period_definition(
         VALUES (:rd, 'Scalar', 1) RETURNING ratecomponentdefinitionid
     """), {"rd": rate_definition_id})).scalar_one()
     config_id = (await db.execute(text("""
-        INSERT INTO payroll.branchpayitemconfig
+        INSERT INTO payroll.branchpaydefinitionconfig
             (companyid, branchid, paydefinitionid, isactive, effectivefrom)
         VALUES (:cid, :bid, :pd, :active, DATE '2000-01-01') RETURNING configid
     """), {"cid": company_id, "bid": branch_id, "pd": pay_definition_id,

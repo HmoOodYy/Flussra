@@ -122,8 +122,8 @@ def _company(cursor, *, branches: int = 2) -> tuple[int, list[int]]:
 
 def _employee(cursor, company_id: int, branch_id: int) -> int:
     cursor.execute("""
-        INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-        VALUES (%s, %s, 'Durable Driver Test', 'Driver', 'Active') RETURNING employeeid
+        INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+        VALUES (%s, %s, 'Durable Driver Test', 'Active') RETURNING employeeid
     """, (company_id, branch_id))
     return cursor.fetchone()[0]
 
@@ -194,8 +194,8 @@ def test_0087_refuses_existing_driver_transfer_or_payroll_rows_atomically(
             """, (company_id, branch_id))
         else:
             cursor.execute("""
-                INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-                VALUES (%s, %s, 'DD87 Driver', 'Driver', 'Active') RETURNING employeeid
+                INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+                VALUES (%s, %s, 'DD87 Driver', 'Active') RETURNING employeeid
             """, (company_id, branch_id))
             employee_id = cursor.fetchone()[0]
             cursor.execute("""
@@ -243,8 +243,8 @@ def test_0087_applies_over_clean_rosters_without_drivers(pre_0087_database):
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         company_id, branch_id = _seed_0086_company(cursor, "DD87CLEAN")
         cursor.execute("""
-            INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-            VALUES (%s, %s, 'Office Staff', 'OfficeStaff', 'Active')
+            INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+            VALUES (%s, %s, 'Office Staff', 'Active')
         """, (company_id, branch_id))
     assert _alembic(env, "upgrade", "0087").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:

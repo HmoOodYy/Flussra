@@ -96,8 +96,7 @@ async def test_finalization_writes_one_final_line_per_official_component(
     """, bound)
     final_lines = rows(tenant, """
         SELECT payrollcalculationsnapshotid, payrollcalculationsnapshotcomponentid, linetype,
-               linescope, sourcetype, sourceid, finalamount, workdate, draftlineid, bonuseventid,
-               payitemid, ratetypeid, driverrateid, ratebehavior
+               linescope, sourcetype, sourceid, finalamount
         FROM payroll.payrollfinallines WHERE payrollperiodid = %s
         ORDER BY payrollcalculationsnapshotcomponentid
     """, period["payroll_period_id"])
@@ -106,7 +105,15 @@ async def test_finalization_writes_one_final_line_per_official_component(
         assert line[0] == bound
         assert line[2] == COMPONENT_LINE_TYPES[component[1]]
         assert (line[3], line[4], line[5]) == ("Period", "SnapshotComponent", str(component[0]))
-        assert all(value is None for value in line[7:])     # no legacy per-source provenance
+    retired_columns = rows(tenant, """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'payroll' AND table_name = 'payrollfinallines'
+          AND column_name IN ('quantity', 'rateamount', 'resolvedrateamount', 'workdate',
+                              'draftlineid', 'bonuseventid', 'payitemid', 'ratetypeid',
+                              'driverrateid', 'ratebehavior', 'notes')
+        ORDER BY column_name
+    """)
+    assert retired_columns == []
     assert sorted(c[1] for c in components) == ["BONUS", "MINIMUM_ADJUSTMENT", "ORDINARY"]
     assert sum(line[6] for line in final_lines) == D("42.00")
 

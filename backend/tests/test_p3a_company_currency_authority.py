@@ -19,9 +19,9 @@ from app.settings import company
 from app.settings import security as settings_security
 from app.settings.schemas import CompanyUpdate
 from tests.currency_test_helpers import (
-    INSERT_DRIVER_RATE,
     create_branch_and_driver,
-    first_rate_type_id,
+    create_rate_requirement,
+    insert_approved_schedule,
 )
 
 
@@ -86,11 +86,11 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
             assert profile.currency_code == "JPY" and profile.currency_minor_unit_digits == 0
 
             branch_id, driver_assignment_id = await create_branch_and_driver(db, company_id, code[-12:])
-            rate_type_id = await first_rate_type_id(db)
-            driver_rate_id = (await db.execute(INSERT_DRIVER_RATE, {
-                "cid": company_id, "bid": branch_id, "did": driver_assignment_id,
-                "rid": rate_type_id, "amount": "1.2345",
-            })).scalar_one()
+            requirement = await create_rate_requirement(db, company_id)
+            schedule_id = await insert_approved_schedule(db, {
+                "cid": company_id, "did": driver_assignment_id,
+                **requirement, "amount": "1.2345",
+            })
             assert await company_has_durable_monetary_state(company_id, db)
             profile = await company.get_company_profile(company_id, 1, db)
             assert profile.currency_change_locked
@@ -99,7 +99,11 @@ async def test_company_currency_configuration_and_permanent_lock(test_engine, mo
             assert changed.value.detail["code"] == "COMPANY_CURRENCY_CHANGE_BLOCKED"
             # Cleanup of an active row must not be used to unlock the Company. A
             # lifecycle change (to Voided) retains the durable row.
-            await db.execute(text("UPDATE payroll.driverrates SET status = 'Voided' WHERE driverrateid = :id"), {"id": driver_rate_id})
+            await db.execute(text("""
+                UPDATE payroll.DriverRateSchedules SET Status = 'Voided',
+                    VoidedByUserID = 1, VoidedAtUtc = NOW(), VoidReason = 'no longer active'
+                WHERE DriverRateScheduleID = :id
+            """), {"id": schedule_id})
             assert await company_has_durable_monetary_state(company_id, db)
             with pytest.raises(DBAPIError) as direct:
                 await db.execute(text("UPDATE core.companies SET currencycode = 'USD' WHERE companyid = :cid"), {"cid": company_id})

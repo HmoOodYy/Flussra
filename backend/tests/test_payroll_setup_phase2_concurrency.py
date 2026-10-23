@@ -69,11 +69,6 @@ async def isolated_policy_database(pg_instance):
                 (user_id, company_id),
             )
             cursor.execute("""
-                INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-                VALUES (%s, 'Concurrency Admin', 100, FALSE) RETURNING RoleID
-            """, ("P2C_" + uuid4().hex[:10],))
-            role_id = cursor.fetchone()[0]
-            cursor.execute("""
                 INSERT INTO sec.CompanyRoles
                     (CompanyID, RoleCode, RoleName, RoleLevel, IsDefault,
                      IsProtected, IsCustom, IsActive)
@@ -96,10 +91,10 @@ async def isolated_policy_database(pg_instance):
                 branch_ids.append(cursor.fetchone()[0])
             cursor.execute("""
                 INSERT INTO sec.UserBranchRoles
-                    (UserID, CompanyID, BranchID, RoleID, CompanyRoleID,
+                    (UserID, CompanyID, BranchID, CompanyRoleID,
                      ScopeType, IsActive)
-                VALUES (%s, %s, NULL, %s, %s, 'AllCompanyBranches', TRUE)
-            """, (user_id, company_id, role_id, company_role_id))
+                VALUES (%s, %s, NULL, %s, 'AllCompanyBranches', TRUE)
+            """, (user_id, company_id, company_role_id))
     finally:
         isolated.close()
 

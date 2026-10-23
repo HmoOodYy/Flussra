@@ -68,58 +68,28 @@ _REQUIRED_TRIGGERS = {
 # Each entry: (object_type, schema, name, phase_label)
 # ---------------------------------------------------------------------------
 
-# Phase 1 / Migration 0033 — Duplicate daily draft line protection
+# Current source identity and immutable component projection.
 _PT_INDEXES = [
-    # (schema, index_name, phase_label)
-    ("payroll", "uix_payrolldraftlines_daily_active_business_key", "Phase 1 (0033, rebuilt 0078)"),
-    # Phase 5 / Migration 0037 — DriverRate void guard lookup index
-    ("payroll", "ix_payrollfinallines_driverrateid", "Phase 5 (0037)"),
-    # Phase 4C / Migration 0036 — RateTypes.CompanyID filter index
-    ("payroll", "ix_ratetypes_companyid", "Phase 4C (0036)"),
+    ("payroll", "ux_draftlines_targetbusinesskey", "Target source identity (0085)"),
+    ("payroll", "ix_payrollfinallines_snapshot", "Component projection (0089)"),
+    ("payroll", "uix_branchpaydefinitionconfig_opendefinitionversion", "Branch applicability (0093)"),
 ]
-
-# Phase 3B / Migration 0034 — Final line source snapshot scalar columns
 _PT_COLUMNS = [
-    # (schema, table, column, phase_label)
-    ("payroll", "payrollfinallines", "payitemid",          "Phase 3B (0034)"),
-    ("payroll", "payrollfinallines", "ratetypeid",         "Phase 3B (0034)"),
-    ("payroll", "payrollfinallines", "driverrateid",       "Phase 3B (0034)"),
-    ("payroll", "payrollfinallines", "resolvedrateamount", "Phase 3B (0034)"),
-    ("payroll", "payrollfinallines", "ratebehavior",       "Phase 3B (0034)"),
-    # Phase 4C / Migration 0036 — RateTypes ownership column
-    ("payroll", "ratetypes",         "companyid",          "Phase 4C (0036)"),
-    # Phase 9 / Migration 0039 — SourceSnapshot JSONB
-    ("payroll", "payrollfinallines", "sourcesnapshot",     "Phase 9 (0039)"),
+    ("payroll", "payrollfinallines", "sourcesnapshot", "Phase 9 (0039)"),
+    ("payroll", "payrollfinallines", "payrollcalculationsnapshotcomponentid", "Component projection (0089)"),
+    ("payroll", "payrolldraftlines", "payrollperioddefinitionid", "Target source identity (0085)"),
+    ("payroll", "payrolldraftlines", "needsmanagerreview", "Source workflow"),
+    ("payroll", "branchpaydefinitionconfig", "paydefinitionid", "Branch applicability (0093)"),
 ]
-
-# Phase 3C / Migration 0035 — Locked ledger immutability
-# Phase 4C / Migration 0036 — PayItemRateTypeMap ownership guard
-# Phase 5  / Migration 0037 — DriverRate void guard
-# Phase 6  / Migration 0038 — Final line INSERT guard
-# Phase 9  / Migration 0039 — Used DriverRate mutation guard
-# Phase 11 / Migration 0040 — DriverRateTier + Block field mutation guards
 _PT_FUNCTIONS = [
-    # (schema, function_name, phase_label)
-    ("payroll", "fn_guard_final_line_immutable",            "Phase 3C (0035)"),
-    ("payroll", "fn_guard_period_status_revert",            "Phase 3C (0035)"),
-    ("payroll", "fn_guard_payitemratetypemap_ownership",    "Phase 4C (0036)"),
-    ("payroll", "fn_guard_driverrate_void",                 "Phase 5 (0037)"),
-    ("payroll", "fn_guard_final_line_insert",               "Phase 6 (0038)"),
-    ("payroll", "fn_guard_driverrate_used_mutation",        "Phase 9 (0039)"),
-    # Phase 11 / Migration 0040 — DriverRateTier mutation guard
-    ("payroll", "fn_guard_driverratetier_used_mutation",   "Phase 11 (0040)"),
+    ("payroll", "fn_guard_final_line_immutable", "Phase 3C (0035)"),
+    ("payroll", "fn_guard_period_status_revert", "Phase 3C (0035)"),
+    ("payroll", "fn_guard_final_line_insert", "Phase 6 (0038)"),
 ]
-
 _PT_TRIGGERS = [
-    # (trigger_name, table_schema, table_name, phase_label)
-    ("trg_final_line_immutable",                   "payroll", "payrollfinallines",  "Phase 3C (0035)"),
-    ("trg_period_status_revert",                   "payroll", "payrollperiods",     "Phase 3C (0035)"),
-    ("trg_guard_payitemratetypemap_ownership",      "payroll", "payitemratetypemap", "Phase 4C (0036)"),
-    ("trg_guard_driverrate_void",                  "payroll", "driverrates",        "Phase 5 (0037)"),
-    ("trg_guard_final_line_insert",                "payroll", "payrollfinallines",  "Phase 6 (0038)"),
-    ("trg_guard_driverrate_used_mutation",         "payroll", "driverrates",        "Phase 9 (0039)"),
-    # Phase 11 / Migration 0040 — DriverRateTier mutation guard
-    ("trg_guard_driverratetier_used_mutation",     "payroll", "driverratetiers",    "Phase 11 (0040)"),
+    ("trg_final_line_immutable", "payroll", "payrollfinallines", "Phase 3C (0035)"),
+    ("trg_period_status_revert", "payroll", "payrollperiods", "Phase 3C (0035)"),
+    ("trg_guard_final_line_insert", "payroll", "payrollfinallines", "Phase 6 (0038)"),
 ]
 
 # P3a (0076) Company-wide monetary denomination authority.
@@ -324,7 +294,6 @@ _EVIDENCE_IMMUTABLE_TRIGGERS = (
      "payrollcalculationsnapshotusedratedefinitions"),
 )
 _EVIDENCE_FUNCTIONS = (
-    "payroll.fn_driverrateusedinfinalizedpayroll(bigint)",
     "payroll.fn_iscanonicaldateset(date[])",
 )
 
@@ -412,6 +381,76 @@ def _check_company_status_catalog(cur) -> list[str]:
         cur.execute("SELECT to_regprocedure(%s)", (signature,))
         if cur.fetchone()[0] is None:
             errors.append(f"Missing Company Status catalog function {signature}.")
+    return errors
+
+
+# Physical authority after 0093: removed predecessors cannot silently reappear.
+_RETIRED_TABLES = (
+    "sec.roles", "sec.rolepermissions", "payroll.branchpayitemconfig",
+    "payroll.payitems", "payroll.ratetypes", "payroll.payitemratetypemap",
+    "payroll.payitemrateslots", "payroll.payitemlinetypemap",
+    "payroll.driverrates", "payroll.driverratetiers",
+    "payroll.cdpidefinitions", "payroll.cdpirequests", "payroll.cdpirequestevents",
+)
+_RETIRED_COLUMNS = (
+    ("sec", "userbranchroles", "roleid"),
+    ("core", "employees", "employeetype"),
+    ("payroll", "branchpaydefinitionconfig", "payitemid"),
+    ("payroll", "payrollperiodauditevidenceevents", "payitemid"),
+) + tuple(("payroll", "payrolldraftlines", column) for column in (
+    "rateamount", "calculatedamount", "linetype", "sourceid", "sourcesnapshot",
+)) + tuple(("payroll", "payrollfinallines", column) for column in (
+    "payitemid", "ratetypeid", "driverrateid", "resolvedrateamount", "ratebehavior",
+    "draftlineid", "bonuseventid", "workdate", "quantity", "rateamount", "notes",
+))
+
+
+def _check_target_physical_authorities(cur) -> list[str]:
+    errors: list[str] = []
+    for qualified in _RETIRED_TABLES:
+        cur.execute("SELECT to_regclass(%s)", (qualified,))
+        if cur.fetchone()[0] is not None:
+            errors.append(f"Retired physical authority still exists: {qualified}")
+    for schema, table, column in _RETIRED_COLUMNS:
+        if _column_exists(cur, schema, table, column):
+            errors.append(f"Retired physical column still exists: {schema}.{table}.{column}")
+    for schema, table, column in (
+        ("sec", "userbranchroles", "companyroleid"),
+        ("payroll", "payrolldraftlines", "payrollperioddefinitionid"),
+    ):
+        cur.execute("""
+            SELECT is_nullable FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s AND column_name = %s
+        """, (schema, table, column))
+        row = cur.fetchone()
+        if row is None or row[0] != "NO":
+            errors.append(f"Target identity must be NOT NULL: {schema}.{table}.{column}")
+    cur.execute("SELECT 1 FROM sec.Permissions WHERE PermissionCode = 'drivers.manage'")
+    if cur.fetchone() is not None:
+        errors.append("Retired drivers.manage permission still exists.")
+    for name, kind in (
+        ("fk_ppd_branchconfig_scope", "f"),
+        ("excl_branchpaydefinitionconfig_definitionversionoverlap", "x"),
+    ):
+        table = "payrollperioddefinitions" if kind == "f" else "branchpaydefinitionconfig"
+        cur.execute("""
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid = to_regclass(%s) AND conname = %s
+              AND contype = %s AND convalidated
+        """, (f"payroll.{table}", name, kind))
+        if cur.fetchone() is None:
+            errors.append(f"Missing target branch applicability constraint {name}.")
+    # Verify both event coverage and function binding. A replica-only, disabled,
+    # wrong-event or wrong-function trigger does not protect application history.
+    for name, event_type in (("trg_auditlog_immutable", 27), ("trg_auditlog_notruncate", 34)):
+        cur.execute("""
+            SELECT 1 FROM pg_trigger
+            WHERE tgrelid = to_regclass('audit.auditlog') AND tgname = %s
+              AND tgtype = %s AND tgenabled IN ('O', 'A')
+              AND tgfoid = to_regprocedure('audit.fn_guard_audit_log_immutable()')
+        """, (name, event_type))
+        if cur.fetchone() is None:
+            errors.append(f"Missing or drifted AuditLog append-only trigger {name}.")
     return errors
 
 
@@ -756,33 +795,6 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     ):
         if not _trigger_exists_and_enabled(cur, trigger_name, "core", trigger_table):
             temporal_errors.append(f"Missing or disabled Driver identity trigger core.{trigger_name}.")
-    cur.execute(
-        "SELECT to_regprocedure(%s)", ("core.trg_compensationassignmentwritable()",)
-    )
-    if cur.fetchone()[0] is None:
-        temporal_errors.append(
-            "Missing ended-assignment compensation guard function "
-            "core.trg_CompensationAssignmentWritable()."
-        )
-    # Status rates stay assignment-owned and keep the ended-assignment guard; ordinary
-    # rate schedules and pay rules are Driver-owned and use the context trigger below.
-    for comp_table in ("driverrates", "driverratetiers"):
-        if not _trigger_exists_and_enabled(
-            cur, "trg_compensationassignmentwritable", "payroll", comp_table
-        ):
-            temporal_errors.append(
-                "Missing or disabled ended-assignment compensation trigger "
-                f"trg_CompensationAssignmentWritable on payroll.{comp_table}."
-            )
-    for moved_table in ("driverrateschedules", "driverrateschedulevalues", "driverpayrules"):
-        if _trigger_exists_and_enabled(
-            cur, "trg_compensationassignmentwritable", "payroll", moved_table
-        ):
-            temporal_errors.append(
-                "Retired ended-assignment compensation trigger "
-                f"trg_CompensationAssignmentWritable still exists on payroll.{moved_table}."
-            )
-
     # Driver-owned compensation (migration 0088).
     for retired_table in ("driverrateassignments", "driverratevalues"):
         cur.execute("SELECT to_regclass(%s)", (f"payroll.{retired_table}",))
@@ -835,6 +847,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
 
     temporal_errors.extend(_check_calculation_evidence(cur))
     temporal_errors.extend(_check_company_status_catalog(cur))
+    temporal_errors.extend(_check_target_physical_authorities(cur))
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)

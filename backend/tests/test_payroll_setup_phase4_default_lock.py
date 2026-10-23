@@ -64,11 +64,6 @@ async def phase4_policy_db(pg_instance):
                 (user_id, company_id),
             )
             cursor.execute("""
-                INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-                VALUES (%s, 'Phase 4 Admin', 100, FALSE) RETURNING RoleID
-            """, ("P4R_" + uuid4().hex[:10],))
-            role_id = cursor.fetchone()[0]
-            cursor.execute("""
                 INSERT INTO sec.CompanyRoles
                     (CompanyID, RoleCode, RoleName, RoleLevel, IsDefault,
                      IsProtected, IsCustom, IsActive)
@@ -83,10 +78,10 @@ async def phase4_policy_db(pg_instance):
             """, (company_role_id,))
             cursor.execute("""
                 INSERT INTO sec.UserBranchRoles
-                    (UserID, CompanyID, BranchID, RoleID, CompanyRoleID,
+                    (UserID, CompanyID, BranchID, CompanyRoleID,
                      ScopeType, IsActive)
-                VALUES (%s, %s, NULL, %s, %s, 'AllCompanyBranches', TRUE)
-            """, (user_id, company_id, role_id, company_role_id))
+                VALUES (%s, %s, NULL, %s, 'AllCompanyBranches', TRUE)
+            """, (user_id, company_id, company_role_id))
             cursor.execute("""
                 INSERT INTO core.Branches (CompanyID, BranchCode, BranchName, Status, IsDefault, timezoneid)
                 VALUES (%s, 'P4BRANCH', 'Phase 4 Branch', 'Active', FALSE, 'UTC')
@@ -219,10 +214,6 @@ async def _create_actor(db, *, permissions: tuple[str, ...], scope: str, driver=
             VALUES (:cid, :username, 'Phase 4 Permission Actor', TRUE, TRUE)
             RETURNING UserID
         """), {"cid": db.company_id, "username": "p4u_" + suffix})).scalar_one()
-        role_id = (await conn.execute(text("""
-            INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-            VALUES (:code, 'Phase 4 Permission Actor', 20, FALSE) RETURNING RoleID
-        """), {"code": "P4R_" + suffix})).scalar_one()
         company_role_id = (await conn.execute(text("""
             INSERT INTO sec.CompanyRoles
                 (CompanyID, RoleCode, RoleName, RoleLevel, IsDefault,
@@ -237,12 +228,12 @@ async def _create_actor(db, *, permissions: tuple[str, ...], scope: str, driver=
             """), {"rid": company_role_id, "permission": permission})
         await conn.execute(text("""
             INSERT INTO sec.UserBranchRoles
-                (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
-            VALUES (:uid, :cid, :bid, :role_id, :company_role_id, :scope, TRUE)
+                (UserID, CompanyID, BranchID, CompanyRoleID, ScopeType, IsActive)
+            VALUES (:uid, :cid, :bid, :company_role_id, :scope, TRUE)
         """), {
             "uid": user_id, "cid": db.company_id,
             "bid": db.branch_id if assignment_scope == "SpecificBranch" else None,
-            "role_id": role_id, "company_role_id": company_role_id, "scope": assignment_scope,
+            "company_role_id": company_role_id, "scope": assignment_scope,
         })
     return int(user_id)
 

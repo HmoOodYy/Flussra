@@ -37,6 +37,7 @@ from app.payroll.calculation.per_unit import (
     calculate_per_unit,
 )
 from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
+from tests.ownership import _audit_snapshot, _assert_audit_snapshot
 
 # ---------------------------------------------------------------------------
 # 1. Pure-core tests (no database)
@@ -304,9 +305,8 @@ async def _delete_period_and_children(db, period_id: int) -> None:
     entity_name="PayrollDraftLines", action_code="DRAFT_LINE_ADDED",
     line_id=<DraftLineID>)` immediately after insert -- this cleanup
     captures the exact DraftLineIDs for this period BEFORE the lines
-    themselves are deleted, deletes their matching audit rows by exact
-    EntityID, then asserts zero residue for both the rows and their audit
-    rows.
+    themselves are deleted, and verifies the exact append-only audit events
+    remain unchanged while the owned domain rows are removed.
     """
     has_p6d_evidence = (await db.execute(
         _text("""
@@ -336,15 +336,9 @@ async def _delete_period_and_children(db, period_id: int) -> None:
             {"pid": period_id},
         )).mappings().all()
     ]
-    await db.execute(
-        _text("DELETE FROM audit.auditlog WHERE entityname = 'PayrollPeriods' AND entityid = :eid"),
-        {"eid": str(period_id)},
-    )
-    if draft_line_ids:
-        await db.execute(
-            _text("DELETE FROM audit.auditlog WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:ids)"),
-            {"ids": [str(i) for i in draft_line_ids]},
-        )
+    audit_entities = [("PayrollPeriods", [str(period_id)]),
+                      ("PayrollDraftLines", [str(i) for i in draft_line_ids] or [""])]
+    audit_before = await _audit_snapshot(db, audit_entities)
     await db.execute(
         _text("DELETE FROM payroll.payrollfinallines WHERE payrollperiodid = :pid"), {"pid": period_id},
     )
@@ -370,8 +364,8 @@ async def _delete_period_and_children(db, period_id: int) -> None:
     )).mappings().first()
     assert (
         residue["periods"] == 0 and residue["draftlines"] == 0 and residue["finallines"] == 0
-        and residue["period_audit"] == 0 and residue["draftline_audit"] == 0
     ), f"Residue check failed for period {period_id}: {dict(residue)}"
+    await _assert_audit_snapshot(db, audit_entities, audit_before, f"CP4A period {period_id} cleanup")
 
 
 async def _delete_driver_and_residue(db, driver_assignment_id: int, employee_id: int | None) -> None:
@@ -383,27 +377,23 @@ async def _delete_driver_and_residue(db, driver_assignment_id: int, employee_id:
     never got as far as creating a rate/period still cleans safely, since
     each DELETE is a no-op when nothing matches.
 
-    FK order: DraftLines/FinalLines/DriverRates (reference DriverAssignmentID) before
+    FK order: DraftLines/FinalLines (reference DriverAssignmentID) before
     core.Drivers, then core.Drivers (references EmployeeID) before
     core.Employees (`fk_Drivers_Employee`, migrations/sql/0001_initial_schema.sql).
     """
+    driver_id = (await db.execute(
+        _text("SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :id"),
+        {"id": driver_assignment_id},
+    )).scalar_one_or_none()
+    audit_entities = [("Drivers", [str(driver_id)] if driver_id is not None else [""]),
+                      ("Employees", [str(employee_id)] if employee_id is not None else [""])]
+    audit_before = await _audit_snapshot(db, audit_entities)
     await db.execute(
         _text("DELETE FROM payroll.payrollfinallines WHERE driverassignmentid = :id"), {"id": driver_assignment_id},
     )
     await db.execute(
         _text("DELETE FROM payroll.payrolldraftlines WHERE driverassignmentid = :id"), {"id": driver_assignment_id},
     )
-    await db.execute(
-        _text("DELETE FROM payroll.driverrates WHERE driverassignmentid = :id"), {"id": driver_assignment_id},
-    )
-    await db.execute(
-        _text("DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid"),
-        {"eid": str(driver_assignment_id)},
-    )
-    driver_id = (await db.execute(
-        _text("SELECT driverid FROM core.driverassignments WHERE driverassignmentid = :id"),
-        {"id": driver_assignment_id},
-    )).scalar_one_or_none()
     async with suspended_test_triggers(db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
         await db.execute(
             _text("DELETE FROM core.driverassignments WHERE driverassignmentid = :id"),
@@ -413,12 +403,10 @@ async def _delete_driver_and_residue(db, driver_assignment_id: int, employee_id:
         await db.execute(_text("DELETE FROM core.drivers WHERE driverid = :id"), {"id": driver_id})
     if employee_id is not None:
         await db.execute(
-            _text("DELETE FROM audit.auditlog WHERE entityname = 'Employees' AND entityid = :eid"),
-            {"eid": str(employee_id)},
-        )
-        await db.execute(
             _text("DELETE FROM core.employees WHERE employeeid = :id"), {"id": employee_id},
         )
+    await _assert_audit_snapshot(db, audit_entities, audit_before,
+                                 f"CP4A driver assignment {driver_assignment_id} cleanup")
 
 
 @contextlib.asynccontextmanager
@@ -489,10 +477,8 @@ async def _owned_driver(session_client, auth_token, branch_id, direct_db, *, nam
                 },
             )).mappings().first()
             assert residue["drivers"] == 0, f"Driver {driver_assignment_id} was not removed"
-            assert residue["driver_audit"] == 0, f"Driver {driver_assignment_id} audit residue was not removed"
             if employee_id is not None:
                 assert residue["employees"] == 0, f"Employee {employee_id} was not removed"
-                assert residue["employee_audit"] == 0, f"Employee {employee_id} audit residue was not removed"
 
 
 _PERIOD_CODE_MAX_LEN = 80  # payroll.PayrollPeriods.PeriodCode is VARCHAR(80)

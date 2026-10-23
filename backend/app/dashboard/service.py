@@ -241,7 +241,7 @@ async def get_dashboard_summary(
     # ── 9. Pending rates ──────────────────────────────────────────────────────
     pending_rates: int | None = None
     if has_rates:
-        # Join through drivers to apply branch scope.
+        # Pending schedule visibility follows the Driver's current/pending home tenures.
         bf_dr, bp_dr = _make_branch_filter(rates_all, rates_bids, "asg.branchid")
         pending_rates = await _query_pending_rates(db, company_id, bf_dr, bp_dr)
 
@@ -607,15 +607,29 @@ async def _query_pending_rates(
     branch_filter: str,
     branch_params: dict,
 ) -> int:
-    """Count DriverRates in PendingApproval status, scoped by branch via assignment join."""
+    """Count readable Pending Driver-owned schedules once each.
+
+    As in compensation.driver_context.ReadScope, company-wide readers see all
+    Pending schedules; Branch readers see them only for a Driver with a non-empty
+    current or pending tenure in their rates scope. Ended tenures confer no Pending
+    visibility. EXISTS avoids counting a schedule twice during a scheduled transfer.
+    """
+    scope_filter = f"""
+        AND EXISTS (
+            SELECT 1 FROM core.driverassignments asg
+            WHERE asg.companyid = s.companyid AND asg.driverid = s.driverid
+              AND (asg.effectivetoat IS NULL OR asg.effectivetoat > asg.effectivefromat)
+              AND (asg.effectivetoat IS NULL OR asg.effectivetoat > (SELECT instant FROM decision))
+              AND {branch_filter}
+        )
+    """ if branch_filter else ""
     result = await db.execute(
         text(f"""
+            WITH decision AS (SELECT clock_timestamp() AS instant)
             SELECT COUNT(*) AS cnt
-            FROM   payroll.driverrates dr
-            JOIN   core.driverassignments asg ON asg.driverassignmentid = dr.driverassignmentid
-            WHERE  dr.companyid = :company_id
-              AND  dr.status    = 'PendingApproval'
-              {_and(branch_filter)}
+            FROM payroll.driverrateschedules s
+            WHERE s.companyid = :company_id AND s.status = 'Pending'
+              {scope_filter}
         """),
         {"company_id": company_id, **branch_params},
     )

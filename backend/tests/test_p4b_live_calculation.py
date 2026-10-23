@@ -180,40 +180,10 @@ async def test_input_type_comes_from_the_frozen_definition(p3c_client, p3c_engin
 
 
 # ---------------------------------------------------------------------------
-# Stored DraftLine money is never authority
+# DraftLine stores source facts; calculation results remain live projections
 # ---------------------------------------------------------------------------
 
-def _tamper_money(tenant, period_id: int) -> None:
-    """Corrupt the legacy monetary columns directly.
-
-    The row-identity CHECK forbids stored money on a target row, so it is dropped for
-    the duration of the tamper and restored (as the same definition) afterwards.
-    """
-    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
-    conn.autocommit = True
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT pg_get_constraintdef(oid) FROM pg_constraint
-                WHERE conname = 'ck_draftlines_rowidentity'
-            """)
-            definition = cur.fetchone()[0]
-            cur.execute("ALTER TABLE payroll.payrolldraftlines "
-                        "DROP CONSTRAINT ck_DraftLines_RowIdentity")
-            try:
-                cur.execute("""
-                    UPDATE payroll.payrolldraftlines
-                    SET rateamount = 9999, calculatedamount = 3, needsmanagerreview = TRUE
-                    WHERE payrollperiodid = %s
-                """, (period_id,))
-            finally:
-                cur.execute(f"ALTER TABLE payroll.payrolldraftlines "
-                            f"ADD CONSTRAINT ck_DraftLines_RowIdentity {definition} NOT VALID")
-    finally:
-        conn.close()
-
-
-async def test_stored_draft_line_money_cannot_change_any_live_result(
+async def test_draft_line_has_no_stored_money_and_live_results_use_target_authorities(
     p3c_client, p3c_engine, tenant,
 ):
     await rated_definition(p3c_client, tenant, rate="25")
@@ -222,14 +192,15 @@ async def test_stored_draft_line_money_cannot_change_any_live_result(
     assert (await _save(p3c_client, tenant, period, {str(ppd): "8"})).status_code == 200
     period_id = period["payroll_period_id"]
 
-    _tamper_money(tenant, period_id)
     conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT rateamount, calculatedamount, needsmanagerreview "
-                        "FROM payroll.payrolldraftlines WHERE payrollperiodid = %s",
-                        (period_id,))
-            assert cur.fetchall() == [(Decimal("9999"), Decimal("3"), True)]
+            cur.execute("""
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = 'payroll' AND table_name = 'payrolldraftlines'
+                  AND column_name IN ('rateamount', 'calculatedamount', 'linetype', 'sourcesnapshot')
+            """)
+            assert cur.fetchall() == []
     finally:
         conn.close()
 
@@ -243,8 +214,7 @@ async def test_stored_draft_line_money_cannot_change_any_live_result(
     lines = (await p3c_client.get(
         f"/payroll/periods/{period_id}/lines", headers=tenant.admin)).json()
     assert [Decimal(line["calculated_amount"]) for line in lines] == [Decimal("200")]
-    # The stored columns (RateAmount 9999, CalculatedAmount 3, NeedsManagerReview TRUE)
-    # are never surfaced for a target ordinary row: no scalar rate, live money, live flag.
+    # Results come from the current target definition and rate authorities.
     assert [line["rate_amount"] for line in lines] == [None]
     assert [line["needs_manager_review"] for line in lines] == [False]
     assert [line["calculation_status"] for line in lines] == ["Calculated"]
@@ -263,17 +233,6 @@ async def test_stored_draft_line_money_cannot_change_any_live_result(
     hub = (await p3c_client.get("/payroll/current", headers=tenant.admin)).json()
     slots = [b["slots"]["open"] for b in hub["branches"] if b["branch_id"] == tenant.branch_a]
     assert Decimal(slots[0]["financial_summary"]["total_expected_pay"]) == Decimal("200")
-
-    # Nothing in the target flow ever wrote money into the row.
-    conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT rateamount, calculatedamount FROM payroll.payrolldraftlines "
-                        "WHERE payrollperiodid = %s", (period_id,))
-            assert cur.fetchall() == [(Decimal("9999"), Decimal("3"))]  # only the tamper
-    finally:
-        conn.close()
-
 
 # ---------------------------------------------------------------------------
 # Line amounts keep calculation precision; the official amount is rounded once

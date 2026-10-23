@@ -503,10 +503,6 @@ async def _make_actor(db_conn, *, permissions: tuple[str, ...], scope: str,
         VALUES (:cid, :name, 'Boundary choices actor', TRUE, TRUE)
         RETURNING UserID
     """), {"cid": company_id, "name": "bcactor_" + suffix})).scalar_one()
-    role_id = (await db_conn.execute(text("""
-        INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel, IsSystemRole)
-        VALUES (:code, 'Boundary choices actor', 20, FALSE) RETURNING RoleID
-    """), {"code": "BCR_" + suffix})).scalar_one()
     company_role_id = (await db_conn.execute(text("""
         INSERT INTO sec.CompanyRoles
             (CompanyID, RoleCode, RoleName, RoleLevel, IsDefault,
@@ -521,12 +517,12 @@ async def _make_actor(db_conn, *, permissions: tuple[str, ...], scope: str,
         """), {"rid": company_role_id, "permission": permission})
     await db_conn.execute(text("""
         INSERT INTO sec.UserBranchRoles
-            (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
-        VALUES (:uid, :cid, :bid, :rid, :crid, :scope, TRUE)
+            (UserID, CompanyID, BranchID, CompanyRoleID, ScopeType, IsActive)
+        VALUES (:uid, :cid, :bid, :crid, :scope, TRUE)
     """), {
         "uid": user_id, "cid": company_id,
         "bid": branch_id if scope == "SpecificBranch" else None,
-        "rid": role_id, "crid": company_role_id, "scope": scope,
+        "crid": company_role_id, "scope": scope,
     })
     return create_access_token(int(user_id), int(company_id))
 

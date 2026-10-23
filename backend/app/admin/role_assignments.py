@@ -76,7 +76,7 @@ async def assign_company_role(
     - Validates role belongs to this company.
     - Validates scope / branch alignment.
     - Revokes any existing active company-role assignment for the user.
-    - Inserts a new userbranchroles row with companyroleId set, roleid NULL.
+    - Inserts a new userbranchroles row with CompanyRoleID set.
     """
     await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
 
@@ -149,16 +149,16 @@ async def assign_company_role(
         {"uid": target_user_id, "cid": company_id},
     )
 
-    # Insert new assignment (new path: roleid = NULL, companyroleId = role)
+    # Insert the CompanyRole assignment.
     try:
         async with db.begin_nested():
             ins = await db.execute(
             text("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleId, scopetype,
+                    (userid, companyid, branchid, companyroleId, scopetype,
                      isactive, grantedbyuserid, notes)
                 VALUES
-                    (:uid, :cid, :bid, NULL, :crid, :scope,
+                    (:uid, :cid, :bid, :crid, :scope,
                      TRUE, :grantor, :notes)
                 RETURNING userbranchroleid
             """),

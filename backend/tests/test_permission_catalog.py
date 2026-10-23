@@ -8,7 +8,7 @@ Covers:
   • payroll.entry        — Enter Payroll Data           (modulecode='payroll')
   • payroll.period.create — Open/Create Payroll Period  (modulecode='payroll')
   • review.decide        — Approve/Reject Review Items  (modulecode='review')
-  • Legacy codes not removed: setup.manage, settings.manage, drivers.manage,
+  • Legacy codes not removed: setup.manage, settings.manage,
     payroll.approve_rate
 
 Also verifies:
@@ -255,9 +255,9 @@ class TestLegacyPermissionsNotRemoved:
         legacy = [
             "setup.manage",
             "settings.manage",
-            "drivers.manage",
             "payroll.approve_rate",
         ]
+        assert "drivers.manage" not in codes
         for code in legacy:
             assert code in codes, (
                 f"Legacy permission {code!r} must not be removed — "

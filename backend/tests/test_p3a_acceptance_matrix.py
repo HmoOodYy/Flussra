@@ -16,23 +16,21 @@ from app.settings import security as settings_security
 from app.settings.schemas import CompanyUpdate
 from tests.builders.final_evidence import insert_final_line, seed_snapshot_component
 from tests.builders.pay_rules import insert_pay_rule
+from tests.currency_test_helpers import create_rate_requirement, insert_approved_schedule
+from tests.db_state import replica_replication_role
+from tests.target_seed import seed_period_definition, seed_target_line
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("state_kind", "state", "cleanup_sql"), [
-    ("driver_rate", "PendingApproval", "UPDATE payroll.driverrates SET status='Voided' WHERE driverrateid=:id"),
-    ("driver_rate", "Approved", "UPDATE payroll.driverrates SET status='Voided' WHERE driverrateid=:id"),
-    ("driver_rate", "Superseded", "UPDATE payroll.driverrates SET status='Voided' WHERE driverrateid=:id"),
-    ("driver_rate", "Voided", None),
-    ("driver_rate_tier", "PendingApproval", "UPDATE payroll.driverrates SET status='Voided' WHERE driverrateid=:id"),
+    ("schedule", "Approved", "UPDATE payroll.DriverRateSchedules SET Status='Voided', VoidedByUserID=:uid, VoidedAtUtc=NOW(), VoidReason='retired' WHERE DriverRateScheduleID=:id"),
+    ("schedule", "Superseded", "UPDATE payroll.DriverRateSchedules SET Status='Voided', VoidedByUserID=:uid, VoidedAtUtc=NOW(), VoidReason='retired' WHERE DriverRateScheduleID=:id"),
+    ("schedule", "Voided", None),
     ("bonus", "Active", "UPDATE payroll.payrollbonusevents SET status='Voided', voidedatutc=NOW(), voidedbyuserid=:uid, voidreason='cleanup' WHERE payrollbonuseventid=:id"),
     ("bonus", "Voided", None),
     ("pay_rule", "Active", "UPDATE payroll.driverpayrules SET status='Voided' WHERE driverpayruleid=:id"),
     ("pay_rule", "Ended", "UPDATE payroll.driverpayrules SET status='Voided' WHERE driverpayruleid=:id"),
     ("pay_rule", "Voided", None),
-    ("draft_rate", "Active", "UPDATE payroll.payrolldraftlines SET status='Void' WHERE draftlineid=:id"),
-    ("draft_calculated", "Active", "UPDATE payroll.payrolldraftlines SET status='Void' WHERE draftlineid=:id"),
-    ("draft_voided", "Void", None),
     ("snapshot", "Frozen", None),
     ("final_line", "Frozen", None),
 ])
@@ -59,8 +57,8 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 VALUES (:cid, :code, 'P3a acceptance', 'Active', TRUE, 'UTC') RETURNING branchid
             """), {"cid": company_id, "code": f"P3AB_{marker}"})).scalar_one())
             employee_id = int((await db.execute(text("""
-                INSERT INTO core.employees(companyid, branchid, fullname, employeetype, employmentstatus, createdbyuserid)
-                VALUES (:cid, :bid, 'P3a acceptance', 'Driver', 'Active', 1) RETURNING employeeid
+                INSERT INTO core.employees(companyid, branchid, fullname, employmentstatus, createdbyuserid)
+                VALUES (:cid, :bid, 'P3a acceptance', 'Active', 1) RETURNING employeeid
             """), {"cid": company_id, "bid": branch_id})).scalar_one())
             driver_assignment_id = int((await db.execute(text("""
                 WITH d AS (
@@ -77,27 +75,27 @@ async def test_each_durable_monetary_state_locks_company_currency(
                 VALUES (:cid, :bid, 'Open', :code, 'P3a acceptance', 'Week', DATE '2099-01-01', DATE '2099-01-07')
                 RETURNING payrollperiodid
             """), {"cid": company_id, "bid": branch_id, "code": f"P3AP_{marker}"})).scalar_one())
-            rate_type_id = int((await db.execute(text("SELECT ratetypeid FROM payroll.ratetypes ORDER BY ratetypeid LIMIT 1"))).scalar_one())
             await company.update_company_profile(
                 company_id, 1, CompanyUpdate(company_name="P3a acceptance", currency_code="USD"), db,
             )
 
             params = {"cid": company_id, "bid": branch_id, "did": driver_assignment_id,
                       "eid": employee_id, "pid": period_id,
-                      "rid": rate_type_id, "uid": 1, "state": state,
+                      "uid": 1, "state": state,
                       "hash": "a" * 64, "code": f"P3A_{marker}"}
-            if state_kind in {"driver_rate", "driver_rate_tier"}:
-                row_id = int((await db.execute(text("""
-                    INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status,
-                         createdbyuserid, approvedbyuserid, approvedatutc)
-                    VALUES (:cid,:bid,:did,:rid,10,DATE '2099-01-01',:state,1,1,NOW())
-                    RETURNING driverrateid
-                """), params)).scalar_one())
-                if state_kind == "driver_rate_tier":
+            if state_kind == "schedule":
+                requirement = await create_rate_requirement(db, company_id)
+                row_id = await insert_approved_schedule(db, {**params, **requirement, "amount": "10"})
+                if state == "Superseded":
                     await db.execute(text("""
-                        INSERT INTO payroll.driverratetiers(driverrateid, tiersequence, fromunit, tounit, tieramount)
-                        VALUES (:id, 1, 0, 10, 5)
+                        UPDATE payroll.DriverRateSchedules SET Status = 'Superseded',
+                            EffectiveTo = DATE '2099-01-07' WHERE DriverRateScheduleID = :id
+                    """), {"id": row_id})
+                elif state == "Voided":
+                    await db.execute(text("""
+                        UPDATE payroll.DriverRateSchedules SET Status = 'Voided',
+                            VoidedByUserID = 1, VoidedAtUtc = NOW(), VoidReason = 'retired'
+                        WHERE DriverRateScheduleID = :id
                     """), {"id": row_id})
             elif state_kind == "bonus":
                 row_id = int((await db.execute(text("""
@@ -119,16 +117,6 @@ async def test_each_durable_monetary_state_locks_company_currency(
                     db, company_id=company_id, driver_id=pay_rule_driver_id, branch_id=branch_id,
                     amount=10, start="2099-01-01",
                     end="2099-01-07" if state == "Ended" else None, status=state)
-            elif state_kind in {"draft_rate", "draft_calculated", "draft_voided"}:
-                amount = "rateamount" if state_kind == "draft_rate" else "calculatedamount"
-                status = "Void" if state_kind == "draft_voided" else "Active"
-                row_id = int((await db.execute(text(f"""
-                    INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype,
-                         {amount}, sourcetype, sourceid, status)
-                    VALUES (:cid,:bid,:pid,:did,DATE '2099-01-01','OTHER',10,'P3a',:code,:status)
-                    RETURNING draftlineid
-                """), {**params, "status": status})).scalar_one())
             elif state_kind == "snapshot":
                 row_id = (await seed_snapshot_component(
                     db, period_id=params["pid"], driver_assignment_id=params["did"])).snapshot_id
@@ -163,12 +151,15 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
         tx = await db.begin()
         try:
             marker = uuid4().hex[:16]
-            cid = int((await db.execute(text("INSERT INTO core.companies(companycode,companyname) VALUES (:c,'P3a invalid') RETURNING companyid"), {"c": f"P3AI_{marker}"})).scalar_one())
+            cid = int((await db.execute(text("INSERT INTO core.companies(companycode,companyname,currencycode) VALUES (:c,'P3a invalid','USD') RETURNING companyid"), {"c": f"P3AI_{marker}"})).scalar_one())
             bid = int((await db.execute(text("INSERT INTO core.branches(companyid,branchcode,branchname,status,isdefault, timezoneid) VALUES (:c,:b,'P3a invalid','Active',TRUE, 'UTC') RETURNING branchid"), {"c": cid, "b": f"P3AIB_{marker}"})).scalar_one())
-            eid = int((await db.execute(text("INSERT INTO core.employees(companyid,branchid,fullname,employeetype,employmentstatus,createdbyuserid) VALUES (:c,:b,'P3a invalid','Driver','Active',1) RETURNING employeeid"), {"c": cid, "b": bid})).scalar_one())
+            eid = int((await db.execute(text("INSERT INTO core.employees(companyid, branchid, fullname, employmentstatus, createdbyuserid) VALUES (:c, :b, 'P3a invalid', 'Active', 1) RETURNING employeeid"), {"c": cid, "b": bid})).scalar_one())
             did = int((await db.execute(text("WITH x AS (INSERT INTO core.drivers(companyid,employeeid,drivernumber,driverstatus) VALUES (:c,:e,:d,'Active') RETURNING driverid) INSERT INTO core.driverassignments(companyid,branchid,employeeid,driverid,effectivefromat) SELECT :c,:b,:e,x.driverid,NOW() - INTERVAL '1 day' FROM x RETURNING driverassignmentid"), {"c": cid, "b": bid, "e": eid, "d": f"P3AID_{marker}"})).scalar_one())
-            period_id = int((await db.execute(text("INSERT INTO payroll.payrollperiods(companyid,branchid,status,periodcode,periodname,periodtype,startdate,enddate) VALUES (:c,:b,'Open',:p,'P3a invalid','Week',DATE '2099-01-01',DATE '2099-01-07') RETURNING payrollperiodid"), {"c": cid, "b": bid, "p": f"P3AIP_{marker}"})).scalar_one())
-            await db.execute(text("INSERT INTO payroll.payrolldraftlines(companyid,branchid,payrollperiodid,driverassignmentid,workdate,linetype,rateamount,sourcetype,sourceid) VALUES (:c,:b,:p,:d,DATE '2099-01-01','OTHER',10,'P3a',:s)"), {"c":cid,"b":bid,"p":period_id,"d":did,"s":marker})
+            requirement = await create_rate_requirement(db, cid)
+            await insert_approved_schedule(db, {"cid": cid, "did": did, **requirement, "amount": "10"})
+            # Simulate corrupt persisted authority after a valid approval; normal writes reject this state.
+            async with replica_replication_role(db):
+                await db.execute(text("UPDATE core.Companies SET CurrencyCode = NULL WHERE CompanyID = :cid"), {"cid": cid})
             with pytest.raises(HTTPException) as profile_error:
                 await company.get_company_profile(cid, 1, db)
             assert profile_error.value.detail["code"] == "COMPANY_CURRENCY_INVARIANT_VIOLATION"
@@ -177,6 +168,36 @@ async def test_unconfigured_company_with_durable_state_fails_closed(test_engine,
             assert read_error.value.detail["code"] == "COMPANY_CURRENCY_INVARIANT_VIOLATION"
         finally:
             await tx.rollback()
+
+
+@pytest.mark.asyncio
+async def test_ordinary_source_facts_do_not_lock_company_currency(test_engine):
+    from tests.currency_test_helpers import create_branch_and_driver
+
+    async with test_engine.connect() as db:
+        transaction = await db.begin()
+        try:
+            code = "SOURCE_" + uuid4().hex[:12]
+            cid = int((await db.execute(text("""
+                INSERT INTO core.Companies (CompanyCode, CompanyName, CurrencyCode)
+                VALUES (:code, :code, 'USD') RETURNING CompanyID
+            """), {"code": code})).scalar_one())
+            bid, assignment = await create_branch_and_driver(db, cid, code)
+            period = int((await db.execute(text("""
+                INSERT INTO payroll.PayrollPeriods
+                    (CompanyID, BranchID, Status, PeriodCode, PeriodName, PeriodType, StartDate, EndDate)
+                VALUES (:cid, :bid, 'Open', :code, :code, 'Week', '2099-01-01', '2099-01-07')
+                RETURNING PayrollPeriodID
+            """), {"cid": cid, "bid": bid, "code": code})).scalar_one())
+            definition = await seed_period_definition(db, company_id=cid, branch_id=bid, period_id=period)
+            await seed_target_line(db, company_id=cid, period_id=period, branch_id=bid,
+                                   driver_assignment_id=assignment, definition=definition,
+                                   quantity="8", work_date="2099-01-01")
+            await db.execute(text("UPDATE core.Companies SET CurrencyCode = 'EUR' WHERE CompanyID = :cid"), {"cid": cid})
+            currency = await get_company_currency(cid, db)
+            assert currency.code == "EUR"
+        finally:
+            await transaction.rollback()
 
 
 class _FakeResult:

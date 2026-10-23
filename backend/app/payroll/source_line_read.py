@@ -54,8 +54,6 @@ _LINE_SELECT = """
         ppd.unitsnapshot,
         ppd.calculationmethodsnapshot,
         dl.quantity,
-        dl.rateamount,
-        dl.calculatedamount,
         dl.sourcetype,
         dl.status,
         dl.needsmanagerreview,
@@ -73,8 +71,8 @@ _LINE_SELECT = """
 
 def _line_row_to_summary(r: Any) -> DraftLineSummary:
     # An ordinary target row (PayrollPeriodDefinitionID set) stores no authoritative money
-    # and no review flag: the stored RateAmount/CalculatedAmount/NeedsManagerReview columns
-    # are never surfaced for it. Live enrichment supplies the derived values, and no scalar
+    # and no review flag: the stored NeedsManagerReview column
+    # is never surfaced for it. Live enrichment supplies the derived values, and no scalar
     # rate field exists for the target contract (a schedule may have several components).
     return DraftLineSummary(
         draft_line_id=r["draftlineid"],

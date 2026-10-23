@@ -129,8 +129,8 @@ def make_branch(cur, company_id: int, *, is_default: bool = False) -> int:
 def make_driver_pair(cur, company_id: int, branch_id: int) -> tuple[int, int]:
     """A permanent Driver with one open home assignment: (DriverID, DriverAssignmentID)."""
     cur.execute("""
-        INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-        VALUES (%s, %s, 'P3b Driver', 'Driver', 'Active') RETURNING employeeid
+        INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+        VALUES (%s, %s, 'P3b Driver', 'Active') RETURNING employeeid
     """, (company_id, branch_id))
     employee_id = cur.fetchone()[0]
     cur.execute("""

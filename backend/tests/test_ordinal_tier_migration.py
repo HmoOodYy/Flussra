@@ -82,7 +82,7 @@ def test_0091_upgrades_a_database_without_calculation_evidence(pre_0091_database
         _seed_world(cursor)          # periods, drivers and the like are untouched
     result = _alembic(env, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert _version(dsn) == "0092"
+    assert _version(dsn) == "0093"
 
 
 def test_0091_is_irreversible(head_database):
@@ -94,7 +94,7 @@ def test_0091_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_the_ordinal_tier_evidence_shape(head_database):
     _, dsn = head_database
-    assert _version(dsn) == "0092"
+    assert _version(dsn) == "0093"
     assert "ordinaltiers" in _columns(dsn, "paydefinitionrequests")
     assert "rateshapesnapshot" in _columns(dsn, "payrollcalculationsnapshotusedratedefinitions")
     assert {"payrollcalculationsnapshotusedratedefinitionid", "payrollcalculationsnapshotid",

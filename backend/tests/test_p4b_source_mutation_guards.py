@@ -169,10 +169,12 @@ async def test_a_prepared_period_takes_source_but_never_stores_or_shows_money(
     line = created.json()
     assert line["rate_amount"] is None and line["calculated_amount"] is None
     assert line["needs_manager_review"] is False
-    stored = query(tenant, "SELECT rateamount, calculatedamount, needsmanagerreview "
-                           "FROM payroll.payrolldraftlines WHERE payrollperiodid = %s",
-                   (period_id,))
-    assert stored == [(None, None, False)]
+    stored_money_columns = query(tenant, """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'payroll' AND table_name = 'payrolldraftlines'
+          AND column_name IN ('rateamount', 'calculatedamount', 'linetype', 'sourcesnapshot')
+    """)
+    assert stored_money_columns == []
     listed = (await p3c_client.get(_lines(draft), headers=tenant.admin)).json()
     assert [(row["rate_amount"], row["calculated_amount"]) for row in listed] == [(None, None)]
     update = await p3c_client.patch(

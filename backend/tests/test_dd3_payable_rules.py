@@ -513,9 +513,8 @@ def _split_driver(tenant, cut: datetime) -> tuple[int, int, int]:
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO core.employees (companyid, branchid, fullname, employeetype,
-                                            employmentstatus)
-                VALUES (%s, %s, 'Split driver', 'Driver', 'Active') RETURNING employeeid
+                INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+                VALUES (%s, %s, 'Split driver', 'Active') RETURNING employeeid
             """, (tenant.company_id, tenant.branch_a))
             employee_id = cur.fetchone()[0]
             cur.execute("""
