@@ -25,11 +25,11 @@ from sqlalchemy.exc import IntegrityError
 
 from tests.builders.final_evidence import discard_chain, insert_final_line, seed_snapshot_component
 from tests.builders.pay_rules import insert_pay_rule, publish_version
-from tests.target_seed import seed_period_definition
 from tests.db_state import (
     DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
     suspended_test_triggers,
 )
+from tests.target_seed import seed_period_definition
 
 # ---------------------------------------------------------------------------
 # Helpers

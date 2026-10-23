@@ -162,7 +162,6 @@ async def test_a_prepared_period_takes_source_but_never_stores_or_shows_money(
     p3c_client, p3c_engine, tenant,
 ):
     draft, ppd = await _draft_period(p3c_client, p3c_engine, tenant)
-    period_id = draft["payroll_period_id"]
     created = await p3c_client.post(
         _lines(draft), json=_body(tenant, ppd, draft["start_date"], "8"), headers=tenant.admin)
     assert created.status_code == 201, created.text

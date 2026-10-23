@@ -1,24 +1,31 @@
 """Dashboard pending-rate counts follow readable Driver tenure scope."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-import pytest
 import psycopg2
+import pytest
 from sqlalchemy import text
 
+from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
 from tests.compensation_api_fixtures import (
     _role,
     _user,
     build_tenant,
     create_pending,
-    p3c_application,
-    p3c_database_engine,
-    p3c_http_client,
 )
-from tests.compensation_database_fixtures import p3b_database, unique
+from tests.compensation_api_fixtures import (
+    p3c_application as p3c_application,
+)
+from tests.compensation_api_fixtures import (
+    p3c_database_engine as p3c_database_engine,
+)
+from tests.compensation_api_fixtures import (
+    p3c_http_client as p3c_http_client,
+)
+from tests.compensation_database_fixtures import p3b_database as p3b_database
+from tests.compensation_database_fixtures import unique
 from tests.payroll_runtime_fixtures import status_column_of
-from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
 
 pytestmark = pytest.mark.asyncio
 
@@ -82,7 +89,7 @@ async def test_pending_schedule_dashboard_scope_tracks_current_pending_and_ended
 
     async with p3c_engine.begin() as db:
         await end_driver_assignment(
-            db, tenant.driver_a, ended_at=datetime.now(timezone.utc) - timedelta(days=1))
+            db, tenant.driver_a, ended_at=datetime.now(UTC) - timedelta(days=1))
     # Once Branch A's tenure is ended, it no longer exposes Driver A's pending schedule.
     assert await _pending_rates(p3c_client, tenant, tenant.branch_user) == 0
     assert await _pending_rates(p3c_client, tenant, branch_b_user) == 2

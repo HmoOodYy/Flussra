@@ -351,7 +351,7 @@ async def test_driver_self_accounts_are_denied_branch_configuration(
 async def test_config_rows_require_a_definition_and_have_no_legacy_identity_column(
     p3c_client, tenant, cur,
 ):
-    definition = await create_definition(p3c_client, tenant)
+    await create_definition(p3c_client, tenant)
     insert = """
         INSERT INTO payroll.branchpaydefinitionconfig
             (companyid, branchid, {extra}isactive, effectivefrom)

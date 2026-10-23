@@ -9,7 +9,6 @@ to Locked without a fabricated earning, a live calculation or any FinalLine.
 """
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 
 import pytest

@@ -37,7 +37,7 @@ from app.payroll.calculation.per_unit import (
     calculate_per_unit,
 )
 from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
-from tests.ownership import _audit_snapshot, _assert_audit_snapshot
+from tests.ownership import _assert_audit_snapshot, _audit_snapshot
 
 # ---------------------------------------------------------------------------
 # 1. Pure-core tests (no database)

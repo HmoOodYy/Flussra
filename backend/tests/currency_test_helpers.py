@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from sqlalchemy import text
 
+
 async def create_branch_and_driver(db, company_id: int, marker: str) -> tuple[int, int]:
     """Create a branch and an active driver for an existing company."""
     branch_id = int((await db.execute(text("""
