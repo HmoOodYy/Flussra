@@ -205,7 +205,7 @@ async def test_payrollrunbonuses_table_gone(db_conn: AsyncConnection) -> None:
 
 
 @pytest.mark.asyncio
-async def test_payrollfinallines_has_bonuseventid(db_conn: AsyncConnection) -> None:
+async def test_payrollfinallines_does_not_store_bonuseventid(db_conn: AsyncConnection) -> None:
     row = (await db_conn.execute(
         _text("""
             SELECT column_name
@@ -215,7 +215,7 @@ async def test_payrollfinallines_has_bonuseventid(db_conn: AsyncConnection) -> N
               AND  column_name  = 'bonuseventid'
         """)
     )).mappings().first()
-    assert row is not None, "payroll.payrollfinallines.BonusEventID column missing"
+    assert row is None, "FinalLines must project bonus identity through immutable source evidence"
 
 
 @pytest.mark.asyncio

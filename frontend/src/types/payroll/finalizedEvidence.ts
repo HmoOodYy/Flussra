@@ -21,7 +21,6 @@ export interface FinalizedAuditEvent {
   driver_assignment_id: number | null;
   driver_id: number | null;
   work_date: string | null;
-  pay_item_id: number | null;
   before_state: Record<string, unknown> | null;
   after_state: Record<string, unknown> | null;
   actor_user_id: number;

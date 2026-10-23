@@ -11,11 +11,10 @@ from sqlalchemy.exc import DBAPIError
 from app.company_currency import lock_and_get_company_currency_for_monetary_write
 from app.db.transaction_retry import run_retryable_transaction
 from tests.currency_test_helpers import (
-    INSERT_DRIVER_RATE,
     create_branch_and_driver,
-    first_rate_type_id,
+    create_rate_requirement,
+    insert_approved_schedule,
 )
-from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
 
 
 async def _company_and_driver(engine):
@@ -26,23 +25,13 @@ async def _company_and_driver(engine):
             VALUES (:code, 'P3a race', 'USD') RETURNING companyid
         """), {"code": code})).scalar_one()
         branch_id, driver_assignment_id = await create_branch_and_driver(db, company_id, code[-12:])
-        rate_type_id = await first_rate_type_id(db)
+        requirement = await create_rate_requirement(db, company_id)
     return {"cid": company_id, "bid": branch_id, "did": driver_assignment_id,
-            "rid": rate_type_id, "amount": "1.2345"}
+            **requirement, "amount": "1.2345"}
 
 
-async def _cleanup(engine, params):
-    cid = params["cid"]
-    async with engine.begin() as db:
-        # A monetary row permanently locks the Company currency; remove the
-        # whole disposable test company (rates, driver, employee, branch).
-        await db.execute(text("DELETE FROM payroll.driverrates WHERE companyid=:cid"), {"cid": cid})
-        async with suspended_test_triggers(db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
-            await db.execute(text("DELETE FROM core.driverassignments WHERE companyid=:cid"), {"cid": cid})
-        await db.execute(text("DELETE FROM core.drivers WHERE companyid=:cid"), {"cid": cid})
-        await db.execute(text("DELETE FROM core.employees WHERE companyid=:cid"), {"cid": cid})
-        await db.execute(text("DELETE FROM core.branches WHERE companyid=:cid"), {"cid": cid})
-        await db.execute(text("DELETE FROM core.companies WHERE companyid=:cid"), {"cid": cid})
+# Every test owns a unique Company. Approved schedule history is retained until
+# the disposable cluster is dropped, as in the target compensation fixtures.
 
 
 @pytest.mark.asyncio
@@ -69,7 +58,7 @@ async def test_change_first_retries_a_real_repeatable_read_transaction(test_engi
             snapshot_taken.set()
             await asyncio.wait_for(change_committed.wait(), 5)
         currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
-        await db.execute(INSERT_DRIVER_RATE, rate_params)
+        await insert_approved_schedule(db, rate_params)
         return currency.code
 
     async def no_delay(_seconds):
@@ -87,9 +76,9 @@ async def test_change_first_retries_a_real_repeatable_read_transaction(test_engi
         assert observations == ["USD", "EUR"]
         async with test_engine.connect() as db:
             row = (await db.execute(text("""
-                SELECT c.currencycode, COUNT(dr.driverrateid) AS rate_count
+                SELECT c.currencycode, COUNT(dr.driverratescheduleid) AS rate_count
                 FROM core.companies c
-                LEFT JOIN payroll.driverrates dr ON dr.companyid = c.companyid
+                LEFT JOIN payroll.driverrateschedules dr ON dr.companyid = c.companyid
                 WHERE c.companyid=:cid GROUP BY c.currencycode
             """), {"cid": company_id})).mappings().one()
             assert row["currencycode"] == "EUR" and row["rate_count"] == 1
@@ -100,7 +89,6 @@ async def test_change_first_retries_a_real_repeatable_read_transaction(test_engi
                 await task
             except asyncio.CancelledError:
                 pass
-        await _cleanup(test_engine, rate_params)
 
 @pytest.mark.asyncio
 async def test_writer_first_locks_currency_before_monetary_commit(test_engine):
@@ -113,7 +101,7 @@ async def test_writer_first_locks_currency_before_monetary_commit(test_engine):
             await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
             currency = await lock_and_get_company_currency_for_monetary_write(company_id, db)
             assert currency.code == "USD"
-            await db.execute(INSERT_DRIVER_RATE, rate_params)
+            await insert_approved_schedule(db, rate_params)
             writer_locked.set()
             await asyncio.wait_for(change_started.wait(), 5)
 
@@ -123,13 +111,10 @@ async def test_writer_first_locks_currency_before_monetary_commit(test_engine):
         async with test_engine.begin() as db:
             await db.execute(text("UPDATE core.companies SET currencycode='EUR' WHERE companyid=:cid"), {"cid": company_id})
 
-    try:
-        results = await asyncio.wait_for(asyncio.gather(writer(), change(), return_exceptions=True), 10)
-        assert results[0] is None
-        assert isinstance(results[1], DBAPIError)
-        assert "COMPANY_CURRENCY_CHANGE_BLOCKED" in str(results[1])
-        async with test_engine.connect() as db:
-            code = (await db.execute(text("SELECT currencycode FROM core.companies WHERE companyid=:cid"), {"cid": company_id})).scalar_one()
-            assert code == "USD"
-    finally:
-        await _cleanup(test_engine, rate_params)
+    results = await asyncio.wait_for(asyncio.gather(writer(), change(), return_exceptions=True), 10)
+    assert results[0] is None
+    assert isinstance(results[1], DBAPIError)
+    assert "COMPANY_CURRENCY_CHANGE_BLOCKED" in str(results[1])
+    async with test_engine.connect() as db:
+        code = (await db.execute(text("SELECT currencycode FROM core.companies WHERE companyid=:cid"), {"cid": company_id})).scalar_one()
+        assert code == "USD"

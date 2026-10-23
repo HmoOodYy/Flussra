@@ -32,8 +32,8 @@ async def _workforce_rows(db, timezone: str = "UTC") -> tuple[int, int, int]:
            "timezone": timezone})).scalar_one()
     employee_id = (await db.execute(text("""
         INSERT INTO core.employees
-            (companyid, branchid, employeekey, fullname, employeetype, employmentstatus)
-        VALUES (:cid, :bid, :key, 'P1a Test', 'Driver', 'Active')
+            (companyid, branchid, employeekey, fullname, employmentstatus)
+        VALUES (:cid, :bid, :key, 'P1a Test', 'Active')
         RETURNING employeeid
     """), {"cid": company_id, "bid": branch_id, "key": f"E-{suffix}"})).scalar_one()
     return company_id, branch_id, employee_id

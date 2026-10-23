@@ -139,8 +139,8 @@ async def _seed_bonus_graph(engine) -> dict:
             RETURNING userid
         """), {"cid": cid, "uname": f"g03_{marker}"})).scalar_one())
         eid = int((await db.execute(text("""
-            INSERT INTO core.employees(companyid, branchid, fullname, employeetype)
-            VALUES (:cid, :bid, 'G0.3 driver', 'Driver') RETURNING employeeid
+            INSERT INTO core.employees(companyid, branchid, fullname)
+            VALUES (:cid, :bid, 'G0.3 driver') RETURNING employeeid
         """), {"cid": cid, "bid": bid})).scalar_one())
         did = int((await db.execute(text("""
             WITH d AS (

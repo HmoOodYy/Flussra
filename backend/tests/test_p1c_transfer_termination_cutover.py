@@ -23,6 +23,7 @@ from app.workforce.projection import (
 from tests.builders.final_evidence import insert_final_line, seed_snapshot_component
 from tests.builders.pay_rules import insert_pay_rule
 from tests.builders.workforce_db import end_driver_assignment, insert_driver_assignment
+from tests.target_seed import seed_period_definition, seed_target_line
 
 
 def auth(token: str) -> dict[str, str]:
@@ -106,7 +107,6 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
     auth_token: str,
     paytest_branch_id: int,
     hq_branch_id: int,
-    paytest_rate_type_id: int,
     direct_db,
 ):
     today = await branch_today(direct_db, paytest_branch_id)
@@ -144,19 +144,6 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
     """), {"branch_id": paytest_branch_id, "period_id": period_id,
            "assignment_id": source_id, "employee_id": employee_id,
            "today": today, "last_day": effective_date - timedelta(days=1)})).scalar_one()
-    rate = await direct_db.execute(text("""
-        INSERT INTO payroll.DriverRates
-            (CompanyID, BranchID, DriverAssignmentID, RateTypeID, Amount, EffectiveFrom, Status)
-        VALUES (1, :branch_id, :assignment_id, :rate_type_id, 42, :today, 'PendingApproval')
-        RETURNING DriverRateID
-    """), {
-        "branch_id": paytest_branch_id,
-        "assignment_id": source_id,
-        "rate_type_id": paytest_rate_type_id,
-        "today": today,
-    })
-    source_rate_id = rate.scalar_one()
-
     pay_definition_id = (await direct_db.execute(text("""
         INSERT INTO payroll.PayDefinitions
             (CompanyID, DefinitionCode, DefinitionName, InputType, CalculationMethod)
@@ -311,20 +298,14 @@ async def test_future_transfer_is_effective_at_instant_and_projection_waits_unti
         "SELECT BranchID FROM core.Employees WHERE EmployeeID = :id"
     ), {"id": employee_id})).scalar_one() == hq_branch_id
 
-    rates = (await direct_db.execute(text("""
-        SELECT DriverAssignmentID, DriverRateID FROM payroll.DriverRates
-        WHERE DriverAssignmentID IN (:source_id, :destination_id)
-    """), {"source_id": source_id, "destination_id": destination_id})).mappings().all()
-    assert [(row["driverassignmentid"], row["driverrateid"]) for row in rates] == [(source_id, source_rate_id)]
     # The Driver's schedule belongs to the Driver, so the transfer neither copies nor moves it:
     # one row before, one row after, unchanged, and the destination assignment owns nothing.
     target_compensation = (await direct_db.execute(text("""
         SELECT
-          (SELECT count(*) FROM payroll.DriverRates WHERE DriverAssignmentID = :aid) AS legacy_rates,
           (SELECT count(*) FROM payroll.PayrollDraftLines WHERE DriverAssignmentID = :aid) AS draft_lines,
           (SELECT count(*) FROM payroll.PayrollBonusEvents WHERE DriverAssignmentID = :aid) AS bonus_events
     """), {"aid": destination_id})).mappings().one()
-    assert tuple(target_compensation.values()) == (0, 0, 0)
+    assert tuple(target_compensation.values()) == (0, 0)
     driver_schedules = (await direct_db.execute(text("""
         SELECT s.DriverRateScheduleID, s.Status, v.Amount
         FROM payroll.DriverRateSchedules s
@@ -1074,12 +1055,12 @@ async def test_termination_preserves_snapshot_and_exact_date_existing_source_res
     """), {"branch_id": paytest_branch_id, "period_id": period_id,
            "assignment_id": assignment_id, "employee_id": employee["employee_id"],
            "today": today})).scalar_one()
-    await direct_db.execute(text("""
-        INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType, SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :assignment_id, :work_date, 'HOURS', 'P1cTest', 'Active')
-    """), {"branch_id": paytest_branch_id, "period_id": period_id,
-           "assignment_id": assignment_id, "work_date": next_day})
+    definition = await seed_period_definition(
+        direct_db, period_id=period_id, branch_id=paytest_branch_id)
+    await seed_target_line(
+        direct_db, period_id=period_id, branch_id=paytest_branch_id,
+        driver_assignment_id=assignment_id, definition=definition,
+        quantity=1, work_date=next_day)
     await client.post(
         f"/workforce/employees/{employee['employee_id']}/terminate",
         json={"termination_date": today.isoformat(), "reason": "Historical cutoff"},

@@ -92,7 +92,7 @@ class DashboardResponse(BaseModel):
     pending_transfers: int | None
 
     # ── Rates Health section ──────────────────────────────────────────────────
-    # pending_rates: PendingApproval DriverRates count.
+    # pending_rates: Pending DriverRateSchedule count within compensation read scope.
     # None when user lacks payrates.view/edit / payroll.approve_rate.
     pending_rates: int | None
 

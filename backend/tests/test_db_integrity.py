@@ -29,6 +29,7 @@ from tests.db_state import (
     DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
     suspended_test_triggers,
 )
+from tests.target_seed import seed_period_definition
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,12 +42,6 @@ async def _get_company_id(direct_db, branch_id: int) -> int:
     )
     return row.scalar_one()
 
-
-async def _get_any_rate_type_id(direct_db) -> int:
-    row = await direct_db.execute(
-        _text("SELECT ratetypeid FROM payroll.ratetypes LIMIT 1"),
-    )
-    return row.scalar_one()
 
 
 def _is_fk_violation(exc: IntegrityError) -> bool:
@@ -126,9 +121,9 @@ class TestParentRootBranchIntegrity:
         emp = await direct_db.execute(
             _text("""
                 INSERT INTO core.employees
-                    (companyid, branchid, fullname, employeetype, employmentstatus)
+                    (companyid, branchid, fullname, employmentstatus)
                 VALUES
-                    (:cid, :bid, 'Temp IntTest Employee', 'Driver', 'Active')
+                    (:cid, :bid, 'Temp IntTest Employee', 'Active')
                 RETURNING employeeid
             """),
             {"cid": company_a_id, "bid": hq_branch_id},
@@ -215,9 +210,9 @@ class TestParentRootBranchIntegrity:
         emp = await direct_db.execute(
             _text("""
                 INSERT INTO core.employees
-                    (companyid, branchid, fullname, employeetype, employmentstatus)
+                    (companyid, branchid, fullname, employmentstatus)
                 VALUES
-                    (:cid, :bid, 'Regression Employee', 'Driver', 'Active')
+                    (:cid, :bid, 'Regression Employee', 'Active')
                 RETURNING employeeid
             """),
             {"cid": company_a_id, "bid": hq_branch_id},
@@ -262,28 +257,17 @@ class TestParentRootBranchIntegrity:
         self,
         direct_db,
         hq_branch_id: int,
+        created_period_id: int,
     ):
         """Regression: a PayrollPeriod where (BranchID, CompanyID) matches Branches is accepted."""
         company_a_id = await _get_company_id(direct_db, hq_branch_id)
-
-        per = await direct_db.execute(
+        row = (await direct_db.execute(
             _text("""
-                INSERT INTO payroll.payrollperiods
-                    (companyid, branchid, periodcode, periodname,
-                     periodtype, startdate, enddate, status)
-                VALUES
-                    (:cid, :bid, 'REGR-001', 'Regression Period',
-                     'Week', '2099-06-01', '2099-06-07', 'Draft')
-                RETURNING payrollperiodid
-            """),
-            {"cid": company_a_id, "bid": hq_branch_id},
-        )
-        per_id = per.scalar_one()
-        assert per_id is not None
-        await direct_db.execute(
-            _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :id"),
-            {"id": per_id},
-        )
+                SELECT companyid, branchid FROM payroll.payrollperiods
+                WHERE payrollperiodid = :pid
+            """), {"pid": created_period_id},
+        )).mappings().one()
+        assert row == {"companyid": company_a_id, "branchid": hq_branch_id}
 
 
 # ---------------------------------------------------------------------------
@@ -304,21 +288,24 @@ class TestDraftLinePeriodIntegrity:
     ):
         """Insert a DraftLine whose BranchID disagrees with its Period's BranchID."""
         company_id = await _get_company_id(direct_db, hq_branch_id)
+        definition = await seed_period_definition(
+            direct_db, period_id=created_period_id, branch_id=hq_branch_id, company_id=company_id)
         with pytest.raises(IntegrityError) as exc_info:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverassignmentid,
-                         workdate, linetype, quantity, sourcetype)
+                         payrollperioddefinitionid, workdate, quantity, sourcetype)
                     VALUES
-                        (:cid, :bad_branch, :period_id, :assignment_id,
-                         DATE '2090-01-01', 'REGULAR', 1, 'Test')
+                        (:cid, :bad_branch, :period_id, :assignment_id, :ppd_id,
+                         DATE '2090-01-01', 1, 'Manual')
                 """),
                 {
                     "cid": company_id,
                     "bad_branch": paytest_branch_id,
                     "period_id": created_period_id,
                     "assignment_id": created_driver_assignment_id,
+                    "ppd_id": definition.payroll_period_definition_id,
                 },
             )
         assert _is_fk_violation(exc_info.value), (
@@ -333,21 +320,25 @@ class TestDraftLinePeriodIntegrity:
         created_period_id: int,
     ):
         """Insert a DraftLine whose CompanyID disagrees with its Period's CompanyID."""
+        company_id = await _get_company_id(direct_db, hq_branch_id)
+        definition = await seed_period_definition(
+            direct_db, period_id=created_period_id, branch_id=hq_branch_id, company_id=company_id)
         with pytest.raises(IntegrityError) as exc_info:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverassignmentid,
-                         workdate, linetype, quantity, sourcetype)
+                         payrollperioddefinitionid, workdate, quantity, sourcetype)
                     VALUES
-                        (:bad_cid, :branch_id, :period_id, :assignment_id,
-                         DATE '2090-01-01', 'REGULAR', 1, 'Test')
+                        (:bad_cid, :branch_id, :period_id, :assignment_id, :ppd_id,
+                         DATE '2090-01-01', 1, 'Manual')
                 """),
                 {
                     "bad_cid": 99999,
                     "branch_id": hq_branch_id,
                     "period_id": created_period_id,
                     "assignment_id": created_driver_assignment_id,
+                    "ppd_id": definition.payroll_period_definition_id,
                 },
             )
         assert _is_fk_violation(exc_info.value), (
@@ -372,21 +363,24 @@ class TestDraftLineDriverIntegrity:
     ):
         """Insert a DraftLine whose BranchID disagrees with its Driver's BranchID."""
         company_id = await _get_company_id(direct_db, hq_branch_id)
+        definition = await seed_period_definition(
+            direct_db, period_id=created_period_id, branch_id=hq_branch_id, company_id=company_id)
         with pytest.raises(IntegrityError) as exc_info:
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
                         (companyid, branchid, payrollperiodid, driverassignmentid,
-                         workdate, linetype, quantity, sourcetype)
+                         payrollperioddefinitionid, workdate, quantity, sourcetype)
                     VALUES
-                        (:cid, :hq_branch, :period_id, :assignment_id,
-                         DATE '2090-01-01', 'REGULAR', 1, 'Test')
+                        (:cid, :hq_branch, :period_id, :assignment_id, :ppd_id,
+                         DATE '2090-01-01', 1, 'Manual')
                 """),
                 {
                     "cid": company_id,
                     "hq_branch": hq_branch_id,
                     "period_id": created_period_id,
                     "assignment_id": paytest_driver_assignment_id,
+                    "ppd_id": definition.payroll_period_definition_id,
                 },
             )
         assert _is_fk_violation(exc_info.value), (
@@ -402,14 +396,16 @@ class TestDraftLineDriverIntegrity:
     ):
         """Regression: a consistent DraftLine (all same branch) must be accepted."""
         company_id = await _get_company_id(direct_db, hq_branch_id)
+        definition = await seed_period_definition(
+            direct_db, period_id=created_period_id, branch_id=hq_branch_id, company_id=company_id)
         result = await direct_db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverassignmentid,
-                     workdate, linetype, quantity, sourcetype)
+                     payrollperioddefinitionid, workdate, quantity, sourcetype)
                 VALUES
-                    (:cid, :bid, :period_id, :assignment_id,
-                     DATE '2090-01-01', 'REGULAR', 1, 'IntegrityTest')
+                    (:cid, :bid, :period_id, :assignment_id, :ppd_id,
+                     DATE '2090-01-01', 1, 'Manual')
                 RETURNING draftlineid
             """),
             {
@@ -417,6 +413,7 @@ class TestDraftLineDriverIntegrity:
                 "bid": hq_branch_id,
                 "period_id": created_period_id,
                 "assignment_id": created_driver_assignment_id,
+                "ppd_id": definition.payroll_period_definition_id,
             },
         )
         inserted_id = result.scalar_one()
@@ -515,76 +512,6 @@ class TestFinalLineDriverIntegrity:
             await direct_db.execute(
                 _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
                 {"pid": other_period_id})
-        assert _is_fk_violation(exc_info.value), (
-            f"Expected FK violation (23503), got: {exc_info.value}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# Migration 0025 — DriverRates: composite FK
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-class TestDriverRateIntegrity:
-    """DriverRate.BranchID must match its Driver's BranchID."""
-
-    async def test_driver_rate_wrong_branch_for_driver_rejected(
-        self,
-        direct_db,
-        hq_branch_id: int,
-        paytest_driver_assignment_id: int,
-    ):
-        """Insert a DriverRate for a PAYTEST driver but claim HQ branch.
-        Uses Status='PendingApproval' (exempt from excl_DriverRates_no_date_overlap)
-        so only the composite FK can reject it."""
-        company_id = await _get_company_id(direct_db, hq_branch_id)
-        rate_type_id = await _get_any_rate_type_id(direct_db)
-        with pytest.raises(IntegrityError) as exc_info:
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverassignmentid, ratetypeid,
-                         amount, effectivefrom, status)
-                    VALUES
-                        (:cid, :hq_branch, :assignment_id, :rt_id,
-                         25.00, '2030-01-01', 'PendingApproval')
-                """),
-                {
-                    "cid": company_id,
-                    "hq_branch": hq_branch_id,
-                    "assignment_id": paytest_driver_assignment_id,
-                    "rt_id": rate_type_id,
-                },
-            )
-        assert _is_fk_violation(exc_info.value), (
-            f"Expected FK violation (23503), got: {exc_info.value}"
-        )
-
-    async def test_driver_rate_wrong_company_for_driver_rejected(
-        self,
-        direct_db,
-        hq_branch_id: int,
-        created_driver_assignment_id: int,
-    ):
-        """Insert a DriverRate with a non-existent company."""
-        rate_type_id = await _get_any_rate_type_id(direct_db)
-        with pytest.raises(IntegrityError) as exc_info:
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.driverrates
-                        (companyid, branchid, driverassignmentid, ratetypeid,
-                         amount, effectivefrom, status)
-                    VALUES
-                        (:bad_cid, :branch_id, :assignment_id, :rt_id,
-                         25.00, '2030-01-01', 'PendingApproval')
-                """),
-                {
-                    "bad_cid": 99999,
-                    "branch_id": hq_branch_id,
-                    "assignment_id": created_driver_assignment_id,
-                    "rt_id": rate_type_id,
-                },
-            )
         assert _is_fk_violation(exc_info.value), (
             f"Expected FK violation (23503), got: {exc_info.value}"
         )

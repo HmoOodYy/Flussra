@@ -182,7 +182,7 @@ async def test_a_change_arriving_during_creation_waits_and_the_snapshot_is_the_b
     # The change was not lost: it applies to the next layout.
     async with p3c_engine.connect() as conn:
         configured = (await conn.execute(text("""
-            SELECT count(*) FROM payroll.branchpayitemconfig
+            SELECT count(*) FROM payroll.branchpaydefinitionconfig
             WHERE branchid = :b AND paydefinitionid = :pd
         """), {"b": tenant.branch_a, "pd": added["pay_definition_id"]})).scalar_one()
     assert configured == 1

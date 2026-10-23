@@ -282,7 +282,7 @@ async def get_day_grid(
         in_clause, in_params = build_in_clause(driver_assignment_ids, "drv")
         dl_result = await db.execute(
             text(f"""
-                SELECT dl.draftlineid, dl.driverassignmentid, dl.linetype,
+                SELECT dl.draftlineid, dl.driverassignmentid,
                        dl.payrollperioddefinitionid,
                        dl.quantity, dl.notes, dl.status
                 FROM   payroll.payrolldraftlines dl
@@ -445,11 +445,6 @@ async def get_day_grid(
                                 is_off = bool(dk["isoffreason"])
 
         for line in drv_lines:
-            lt = line["linetype"]
-
-            if lt is not None:
-                continue
-
             ppd_id = line["payrollperioddefinitionid"]
             if ppd_id is not None and ppd_id in column_ids:
                 qty = line["quantity"]

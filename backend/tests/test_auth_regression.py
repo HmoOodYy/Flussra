@@ -335,8 +335,8 @@ async def test_user_permission_overrides_appear_in_login(client, apply_schema):
     # Use a non-DRIVER company-wide role so its override remains generic access.
     cur.execute("""
         INSERT INTO sec.userbranchroles
-            (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-        SELECT u.userid, u.companyid, NULL, NULL,
+            (userid, companyid, branchid, companyroleId, scopetype, isactive)
+        SELECT u.userid, u.companyid, NULL,
                cr.companyroleid, 'AllCompanyBranches', TRUE
         FROM sec.users u
         JOIN core.companies c ON c.companyid = u.companyid

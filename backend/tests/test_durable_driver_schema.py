@@ -122,8 +122,8 @@ def _company(cursor, *, branches: int = 2) -> tuple[int, list[int]]:
 
 def _employee(cursor, company_id: int, branch_id: int) -> int:
     cursor.execute("""
-        INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-        VALUES (%s, %s, 'Durable Driver Test', 'Driver', 'Active') RETURNING employeeid
+        INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+        VALUES (%s, %s, 'Durable Driver Test', 'Active') RETURNING employeeid
     """, (company_id, branch_id))
     return cursor.fetchone()[0]
 
@@ -194,8 +194,8 @@ def test_0087_refuses_existing_driver_transfer_or_payroll_rows_atomically(
             """, (company_id, branch_id))
         else:
             cursor.execute("""
-                INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-                VALUES (%s, %s, 'DD87 Driver', 'Driver', 'Active') RETURNING employeeid
+                INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+                VALUES (%s, %s, 'DD87 Driver', 'Active') RETURNING employeeid
             """, (company_id, branch_id))
             employee_id = cursor.fetchone()[0]
             cursor.execute("""
@@ -243,8 +243,8 @@ def test_0087_applies_over_clean_rosters_without_drivers(pre_0087_database):
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         company_id, branch_id = _seed_0086_company(cursor, "DD87CLEAN")
         cursor.execute("""
-            INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-            VALUES (%s, %s, 'Office Staff', 'OfficeStaff', 'Active')
+            INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+            VALUES (%s, %s, 'Office Staff', 'Active')
         """, (company_id, branch_id))
     assert _alembic(env, "upgrade", "0087").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
@@ -263,7 +263,7 @@ def test_0087_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0092",)
+    assert cur.fetchone() == ("0093",)
 
     def columns(table: str, schema: str = "core") -> set[str]:
         cur.execute("""
@@ -319,7 +319,6 @@ def test_driver_reference_columns_are_classified_with_no_unvalidated_driver_fore
         "payrollbonusevents", "payrollfinallines", "payrollcalculationdrivertotals",
         "payrollcalculationsnapshotbonusevents", "payrollcalculationsnapshotstatusentries",
         "payrollcalculationsnapshotusedratedefinitions", "payrollperiodauditevidenceevents",
-        "driverrates",
     ]
     with_driver_id = {
         "payrollfinallines", "payrollcalculationdrivertotals",

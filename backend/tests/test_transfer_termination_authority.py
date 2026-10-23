@@ -26,6 +26,7 @@ from tests.builders.transfer_scenarios import (
     open_period,
     scheduled_transfer,
 )
+from tests.target_seed import seed_period_definition, seed_target_line
 
 pytestmark = pytest.mark.asyncio
 
@@ -145,13 +146,11 @@ async def test_termination_refuses_when_the_disposed_destination_already_has_pay
         client, auth_token, driver["driver_id"], target_branch, effective_at)
     period_id = await open_period(
         direct_db, target_branch, today + timedelta(days=5), today + timedelta(days=9))
-    await direct_db.execute(text("""
-        INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType,
-             SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :assignment_id, :work_date, 'HOURS', 'Scenario', 'Active')
-    """), {"branch_id": target_branch, "period_id": period_id,
-           "assignment_id": transfer["destination_id"], "work_date": today + timedelta(days=6)})
+    definition = await seed_period_definition(direct_db, period_id=period_id, branch_id=target_branch)
+    await seed_target_line(
+        direct_db, period_id=period_id, branch_id=target_branch,
+        driver_assignment_id=transfer["destination_id"], definition=definition,
+        quantity=1, work_date=today + timedelta(days=6))
     await direct_db.commit()
 
     refused = await _terminate(client, auth_token, driver["employee_id"], today + timedelta(days=1))
@@ -322,13 +321,11 @@ async def test_complete_refuses_to_orphan_source_facts_after_the_boundary(
     today = await branch_today(direct_db, source_branch)
     period_id = await open_period(
         direct_db, source_branch, today, today + timedelta(days=9))
-    await direct_db.execute(text("""
-        INSERT INTO payroll.PayrollDraftLines
-            (CompanyID, BranchID, PayrollPeriodID, DriverAssignmentID, WorkDate, LineType,
-             SourceType, Status)
-        VALUES (1, :branch_id, :period_id, :assignment_id, :work_date, 'HOURS', 'Scenario', 'Active')
-    """), {"branch_id": source_branch, "period_id": period_id,
-           "assignment_id": driver["assignment_id"], "work_date": today + timedelta(days=5)})
+    definition = await seed_period_definition(direct_db, period_id=period_id, branch_id=source_branch)
+    await seed_target_line(
+        direct_db, period_id=period_id, branch_id=source_branch,
+        driver_assignment_id=driver["assignment_id"], definition=definition,
+        quantity=1, work_date=today + timedelta(days=5))
     await direct_db.commit()
 
     effective_at = await local_boundary(direct_db, source_branch, today + timedelta(days=3))

@@ -176,7 +176,6 @@ _SEED_STMTS = [
         ('payroll.period.create',  'Create Payroll Period',    'payroll'),
         ('payroll.approve_rate',   'Approve Pay Rates',        'payroll'),
         ('payroll.finalize',       'Finalize Payroll',         'payroll'),
-        ('drivers.manage',         'Manage Drivers',           'core'),
         ('employees.view',         'View Employees',           'employees'),
         ('employees.manage',       'Manage Employees',         'employees'),
         ('review.decide',          'Decide on Review Items',   'review'),
@@ -266,71 +265,7 @@ _SEED_STMTS = [
     WHERE  u.username  = 'branch_user'
       AND  b.branchcode = 'HQ'
     """,
-    # Seed rate types used by pay-rate tests (Milestone 6).
-    # The 7 production types (HOURLY, MILEAGE, LOAD, OVERNIGHT, WAIT, PALLET, SILO)
-    # are now seeded by Alembic migration 0008.  Only INACTIVE is added here because
-    # it is test-only and intentionally absent from the production migration.
-    # M13C_* rate types are also test-only — used by test_m13c.py to avoid polluting
-    # system rate types with tiered-behavior test items.
-    # ON CONFLICT DO NOTHING makes this idempotent whether migration 0008 ran first or not.
-    """
-    INSERT INTO payroll.ratetypes (ratecode, ratename, unitname, isactive) VALUES
-        ('HOURLY',      'Hourly Rate',           'Hour',   TRUE),
-        ('MILEAGE',     'Mileage Rate',           'Mile',   TRUE),
-        ('LOAD',        'Load Rate',              'Load',   TRUE),
-        ('OVERNIGHT',   'Overnight Rate',         'Night',  TRUE),
-        ('WAIT',        'Wait Time Rate',         'Hour',   TRUE),
-        ('PALLET',      'Pallet Rate',            'Pallet', TRUE),
-        ('SILO',        'Silo Rate',              'Silo',   TRUE),
-        ('INACTIVE',    'Inactive Type',          'Unit',   FALSE),
-        ('M13C_ORDINAL','M13C Ordinal Test Rate', 'Load',   TRUE),
-        ('M13C_RBRKT',  'M13C Bracket Test Rate', 'Mile',   TRUE),
-        ('M13C_RPROG',  'M13C Progres Test Rate', 'Mile',   TRUE),
-        ('M13C_BLOCK',  'M13C Block Test Rate',   'Block',  TRUE)
-    ON CONFLICT (ratecode) DO NOTHING
-    """,
-    # Phase 4B.3: M13C_* rate types must have system PayItemRateTypeMap entries so
-    # they remain visible in GET /payroll/rate-types after the stricter filter
-    # (only show rate types with system or own-company mappings).
-    #
-    # Create test-only system-scope PayItems (companyid IS NULL) anchoring M13C_*
-    # so they pass the has_system_mapping=true check.  isdefaultbranchactive=FALSE
-    # ensures they never appear in any branch's active pay item list — purely used
-    # as ownership anchors for the mapping filter.
-    """
-    INSERT INTO payroll.payitems
-        (companyid, payitemcode, payitemname, ratebehavior, requiresrate,
-         isdefaultbranchactive, status, category, datatype, itemscope, issystemstandard)
-    SELECT NULL, v.code, v.name, v.behavior, TRUE, FALSE, 'Active',
-           'Custom', 'Decimal', 'Daily', FALSE
-    FROM (VALUES
-        ('M13C_SYS_ORDINAL', 'M13C Ordinal Anchor', 'OrdinalTier'),
-        ('M13C_SYS_RBRKT',   'M13C Bracket Anchor', 'RangeBracket'),
-        ('M13C_SYS_RPROG',   'M13C Progres Anchor', 'RangeProgressive'),
-        ('M13C_SYS_BLOCK',   'M13C Block Anchor',   'Block'),
-        ('INACTIVE_SYS',     'Inactive RT Anchor',  'PerUnit')
-    ) AS v(code, name, behavior)
-    WHERE NOT EXISTS (
-        SELECT 1 FROM payroll.payitems
-        WHERE payitemcode = v.code AND companyid IS NULL
-    )
-    """,
-    """
-    INSERT INTO payroll.payitemratetypemap (payitemid, ratetypeid, status, isprimary)
-    SELECT pi.payitemid, rt.ratetypeid, 'Active', TRUE
-    FROM payroll.payitems pi
-    JOIN payroll.ratetypes rt ON (
-        (pi.payitemcode = 'M13C_SYS_ORDINAL' AND rt.ratecode = 'M13C_ORDINAL')
-     OR (pi.payitemcode = 'M13C_SYS_RBRKT'   AND rt.ratecode = 'M13C_RBRKT')
-     OR (pi.payitemcode = 'M13C_SYS_RPROG'   AND rt.ratecode = 'M13C_RPROG')
-     OR (pi.payitemcode = 'M13C_SYS_BLOCK'   AND rt.ratecode = 'M13C_BLOCK')
-     OR (pi.payitemcode = 'INACTIVE_SYS'     AND rt.ratecode = 'INACTIVE')
-    )
-    WHERE pi.companyid IS NULL
-      AND pi.payitemcode IN ('M13C_SYS_ORDINAL','M13C_SYS_RBRKT','M13C_SYS_RPROG',
-                             'M13C_SYS_BLOCK','INACTIVE_SYS')
-    ON CONFLICT (payitemid, ratetypeid) DO NOTHING
-    """,
+
 ]
 
 
@@ -704,9 +639,6 @@ async def owned_driver_id(
                     (SELECT COUNT(*) FROM payroll.payrollbonusevents b
                      JOIN core.driverassignments a ON a.driverassignmentid = b.driverassignmentid
                      WHERE a.driverid = :did) AS bonuses,
-                    (SELECT COUNT(*) FROM payroll.driverrates r
-                     JOIN core.driverassignments a ON a.driverassignmentid = r.driverassignmentid
-                     WHERE a.driverid = :did) AS rates,
                     (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate s
                      JOIN core.driverassignments a ON a.driverassignmentid = s.driverassignmentid
                      WHERE a.driverid = :did) AS day_state
@@ -747,7 +679,7 @@ async def owned_branch_id(direct_db) -> int:
                 SELECT
                     (SELECT COUNT(*) FROM payroll.payrollperiods WHERE branchid = :bid) AS periods,
                     (SELECT COUNT(*) FROM core.driverassignments WHERE branchid = :bid) AS driver_assignments,
-                    (SELECT COUNT(*) FROM payroll.branchpayitemconfig WHERE branchid = :bid) AS item_config,
+                    (SELECT COUNT(*) FROM payroll.branchpaydefinitionconfig WHERE branchid = :bid) AS item_config,
                     (SELECT COUNT(*) FROM sec.userbranchroles WHERE branchid = :bid) AS user_roles
             """), {"bid": branch_id},
         )).mappings().one()
@@ -797,27 +729,6 @@ async def hq_driver_assignment_id(
 ) -> int:
     """The DriverAssignmentID (HQ home-Branch tenure) of ``hq_driver_id``."""
     return await _current_driver_assignment_id(session_client, auth_token, hq_driver_id)
-
-
-@pytest_asyncio.fixture(scope="session")
-async def paytest_rate_type_id(session_db_conn) -> int:
-    """
-    Return the rate_type_id for HOURLY (seeded in _SEED_STMTS).
-    Tests use this fixture to avoid hard-coding database-assigned IDs.
-    """
-    row = (await session_db_conn.execute(
-        text("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'HOURLY'"))).scalar_one_or_none()
-    assert row is not None, "HOURLY rate type not found — check seed data"
-    return int(row)
-
-
-@pytest_asyncio.fixture(scope="session")
-async def paytest_mileage_rate_type_id(session_db_conn) -> int:
-    """Return the rate_type_id for MILEAGE."""
-    row = (await session_db_conn.execute(
-        text("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'MILEAGE'"))).scalar_one_or_none()
-    assert row is not None, "MILEAGE rate type not found — check seed data"
-    return int(row)
 
 
 @pytest_asyncio.fixture(scope="session")

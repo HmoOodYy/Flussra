@@ -1,7 +1,7 @@
 """Branch-level authority for compensation configuration snapshots.
 
 A payroll period freezes the Branch's whole PayDefinition layout in one snapshot. The
-layout is a function of every BranchPayItemConfig version of the Branch, so the writers
+layout is a function of every BranchPayDefinitionConfig version of the Branch, so the writers
 of that configuration and the snapshot itself must be ordered against each other as
 whole units, not row by row.
 

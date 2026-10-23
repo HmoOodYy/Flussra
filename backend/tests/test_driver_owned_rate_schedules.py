@@ -414,7 +414,7 @@ async def test_a_definition_not_applicable_in_the_context_branch_is_authorable_a
 
     assert await flag() is False
     await direct_db.execute(text("""
-        INSERT INTO payroll.branchpayitemconfig
+        INSERT INTO payroll.branchpaydefinitionconfig
             (companyid, branchid, paydefinitionid, isactive, effectivefrom)
         VALUES (1, :b, :d, TRUE, DATE '2000-01-01')
     """), {"b": w.new_branch, "d": definition["pay_definition_id"]})

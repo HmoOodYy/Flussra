@@ -13,14 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.payroll import current_hub
 from tests.access_test_helpers import create_neutral_test_user
 from tests.builders.access import create_user_with_role_token, get_company_role_id
+from tests.builders.pay_rules import insert_pay_rule
 from tests.target_seed import seed_period_definition, seed_target_line
 
 _COMPANY_ID = 1
 _BASE_DATE = datetime.date(2096, 1, 1)
 _SECURITY_COUNTER = itertools.count(1)
-
-
-_ORDINARY_ITEMS = {"HOURS", "MILES", "LOADS", "PALLETS"}
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -211,41 +209,19 @@ async def _insert_daily_line(
             _text("SELECT startdate FROM payroll.payrollperiods WHERE payrollperiodid = :period_id"),
             {"period_id": period_id},
         )).scalar_one()
-    if line_type in _ORDINARY_ITEMS:
-        # Ordinary work is a source fact against a frozen period definition.
-        definition_id = (await db.execute(_text("""
-            SELECT payrollperioddefinitionid FROM payroll.payrollperioddefinitions
-            WHERE payrollperiodid = :period_id AND definitionnamesnapshot = :name
-        """), {"period_id": period_id, "name": line_type})).scalar_one_or_none()
-        if definition_id is None:
-            definition_id = (await seed_period_definition(
-                db, period_id=period_id, branch_id=branch_id, name=line_type)
-            ).payroll_period_definition_id
-        await seed_target_line(
-            db, period_id=period_id, branch_id=branch_id, driver_assignment_id=driver_assignment_id,
-            definition=definition_id, quantity=quantity, work_date=work_date,
-            source_type=source_type)
-        await db.commit()
-        return
-    await db.execute(
-        _text("""
-            INSERT INTO payroll.payrolldraftlines
-                (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
-                 linetype, quantity, sourcetype, status, needsmanagerreview, addedbyuserid)
-            VALUES (:company_id, :branch_id, :period_id, :driver_assignment_id, :work_date,
-                    :line_type, :quantity, :source_type, 'Active', FALSE, 1)
-        """),
-        {
-            "company_id": _COMPANY_ID,
-            "branch_id": branch_id,
-            "period_id": period_id,
-            "driver_assignment_id": driver_assignment_id,
-            "work_date": work_date,
-            "line_type": line_type,
-            "quantity": quantity,
-            "source_type": source_type,
-        },
-    )
+    # Ordinary work is a source fact against a frozen period definition.
+    definition_id = (await db.execute(_text("""
+        SELECT payrollperioddefinitionid FROM payroll.payrollperioddefinitions
+        WHERE payrollperiodid = :period_id AND definitionnamesnapshot = :name
+    """), {"period_id": period_id, "name": line_type})).scalar_one_or_none()
+    if definition_id is None:
+        definition_id = (await seed_period_definition(
+            db, period_id=period_id, branch_id=branch_id, name=line_type)
+        ).payroll_period_definition_id
+    await seed_target_line(
+        db, period_id=period_id, branch_id=branch_id, driver_assignment_id=driver_assignment_id,
+        definition=definition_id, quantity=quantity, work_date=work_date,
+        source_type=source_type)
     await db.commit()
 
 
@@ -474,16 +450,29 @@ class TestCurrentPayrollHub:
         await _insert_canonical_status(
             direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id,
         )
-        await _insert_daily_line(direct_db, period_id, paytest_branch_id, paytest_driver_assignment_id, "SYS_MIN_TOPUP", Decimal("1"), "System")
-
-        response = await _hub(session_client, auth_token, paytest_branch_id)
-        assert response.status_code == 200, response.text
-        metrics = _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"]
-        assert metrics == {
-            "total_eligible_drivers": 1,
-            "working_drivers": 0,
-            "fully_off_drivers": 0,
-        }
+        driver_id = (await direct_db.execute(_text(
+            "SELECT DriverID FROM core.DriverAssignments WHERE DriverAssignmentID = :id"),
+            {"id": paytest_driver_assignment_id})).scalar_one()
+        start_date, end_date = (await direct_db.execute(_text(
+            "SELECT StartDate, EndDate FROM payroll.PayrollPeriods WHERE PayrollPeriodID = :id"),
+            {"id": period_id})).one()
+        rule_id = await insert_pay_rule(
+            direct_db, company_id=_COMPANY_ID, driver_id=driver_id, branch_id=paytest_branch_id,
+            amount="1", start=start_date, end=end_date)
+        await direct_db.commit()
+        try:
+            response = await _hub(session_client, auth_token, paytest_branch_id)
+            assert response.status_code == 200, response.text
+            metrics = _branch(response.json(), paytest_branch_id)["slots"]["open"]["metrics"]
+            assert metrics == {
+                "total_eligible_drivers": 1,
+                "working_drivers": 0,
+                "fully_off_drivers": 0,
+            }
+        finally:
+            await direct_db.execute(_text("DELETE FROM payroll.DriverPayRules WHERE DriverPayRuleID = :id"),
+                                    {"id": rule_id})
+            await direct_db.commit()
 
     @pytest.mark.parametrize("line_type", ["HOURS", "MILES", "LOADS", "PALLETS"])
     async def test_normal_daily_work_sources_count_once(

@@ -143,90 +143,17 @@ def test_p10_t3_missing_final_line_insert_trigger_detected():
 
 
 # ---------------------------------------------------------------------------
-# T4 — missing used-DriverRate mutation trigger detected (Phase 9)
-# ---------------------------------------------------------------------------
+# Target draft identity index remains part of payroll trust.
 
-def test_p10_t4_missing_driverrate_mutation_trigger_detected():
-    """
-    T4: _check_payroll_trust() must report a Phase 9 error when
-    trg_guard_driverrate_used_mutation on payroll.driverrates is absent.
-    """
-    missing = {("trigger", "trg_guard_driverrate_used_mutation", "payroll", "driverrates")}
-    cur = _make_cur(missing)
-    errors = _check_payroll_trust(cur)
-
+def test_p10_t6_missing_target_draft_identity_index_detected():
+    missing = {("index", "payroll", "ux_draftlines_targetbusinesskey")}
+    errors = _check_payroll_trust(_make_cur(missing))
     assert any(
-        "trg_guard_driverrate_used_mutation" in e and "Phase 9" in e
-        for e in errors
-    ), (
-        f"Expected Phase 9 / trg_guard_driverrate_used_mutation error, got: {errors}"
-    )
+        "ux_draftlines_targetbusinesskey" in error and "Target source identity (0085)" in error
+        for error in errors
+    ), f"Expected target draft identity index error, got: {errors}"
 
 
-# ---------------------------------------------------------------------------
-# T5 — missing RateTypes.CompanyID column detected (Phase 4C)
-# ---------------------------------------------------------------------------
-
-def test_p10_t5_missing_ratetypes_companyid_column_detected():
-    """
-    T5: _check_payroll_trust() must report a Phase 4C error when
-    payroll.ratetypes.companyid column is absent.
-    """
-    missing = {("column", "payroll", "ratetypes", "companyid")}
-    cur = _make_cur(missing)
-    errors = _check_payroll_trust(cur)
-
-    assert any(
-        "companyid" in e and "Phase 4C" in e
-        for e in errors
-    ), (
-        f"Expected Phase 4C / companyid error, got: {errors}"
-    )
-
-
-def test_p10_t5b_missing_payitemratetypemap_ownership_trigger_detected():
-    """
-    T5b: _check_payroll_trust() must report a Phase 4C error when
-    trg_guard_payitemratetypemap_ownership is absent.
-    """
-    missing = {
-        ("trigger", "trg_guard_payitemratetypemap_ownership", "payroll", "payitemratetypemap")
-    }
-    cur = _make_cur(missing)
-    errors = _check_payroll_trust(cur)
-
-    assert any(
-        "trg_guard_payitemratetypemap_ownership" in e and "Phase 4C" in e
-        for e in errors
-    ), (
-        f"Expected Phase 4C / ownership trigger error, got: {errors}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# T6 — missing duplicate daily protection index detected (Phase 1 / 0033)
-# ---------------------------------------------------------------------------
-
-def test_p10_t6_missing_duplicate_daily_index_detected():
-    """
-    T6: _check_payroll_trust() must report a Phase 1 error when
-    the uix_payrolldraftlines_daily_active_business_key index is absent.
-    """
-    missing = {
-        ("index", "payroll", "uix_payrolldraftlines_daily_active_business_key")
-    }
-    cur = _make_cur(missing)
-    errors = _check_payroll_trust(cur)
-
-    assert any(
-        "uix_payrolldraftlines_daily_active_business_key" in e and "Phase 1" in e
-        for e in errors
-    ), (
-        f"Expected Phase 1 / duplicate-daily index error, got: {errors}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # T7 — missing Phase 3C immutability triggers detected
 # ---------------------------------------------------------------------------
 
@@ -495,56 +422,3 @@ def test_p10_t9c_legacy_error_only_warns_in_prod(apply_schema):
             assert mock_log.warning.called, (
                 "Expected log.warning for legacy mismatch in prod mode, but it was not called"
             )
-
-
-# ---------------------------------------------------------------------------
-# T10 — Phase 3B scalar columns all checked
-# ---------------------------------------------------------------------------
-
-def test_p10_t10_missing_phase3b_columns_detected():
-    """
-    T10: _check_payroll_trust() must report Phase 3B errors for all five
-    Phase 3B columns individually.
-    """
-    phase3b_cols = [
-        "payitemid", "ratetypeid", "driverrateid",
-        "resolvedrateamount", "ratebehavior",
-    ]
-    for col in phase3b_cols:
-        missing = {("column", "payroll", "payrollfinallines", col)}
-        cur = _make_cur(missing)
-        errors = _check_payroll_trust(cur)
-        assert any(col in e and "Phase 3B" in e for e in errors), (
-            f"Expected Phase 3B error for column {col!r}, got: {errors}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# T11 — Phase 5 void guard objects checked
-# ---------------------------------------------------------------------------
-
-def test_p10_t11_missing_phase5_void_guard_detected():
-    """
-    T11: _check_payroll_trust() must report Phase 5 errors when the
-    DriverRate void guard trigger/function/index are absent.
-    """
-    # Function missing
-    missing_fn = {("function", "payroll", "fn_guard_driverrate_void")}
-    errors = _check_payroll_trust(_make_cur(missing_fn))
-    assert any("fn_guard_driverrate_void" in e and "Phase 5" in e for e in errors), (
-        f"Expected Phase 5 / fn_guard_driverrate_void error, got: {errors}"
-    )
-
-    # Trigger missing
-    missing_trig = {("trigger", "trg_guard_driverrate_void", "payroll", "driverrates")}
-    errors = _check_payroll_trust(_make_cur(missing_trig))
-    assert any("trg_guard_driverrate_void" in e and "Phase 5" in e for e in errors), (
-        f"Expected Phase 5 / trg_guard_driverrate_void error, got: {errors}"
-    )
-
-    # Supporting index missing
-    missing_idx = {("index", "payroll", "ix_payrollfinallines_driverrateid")}
-    errors = _check_payroll_trust(_make_cur(missing_idx))
-    assert any("ix_payrollfinallines_driverrateid" in e and "Phase 5" in e for e in errors), (
-        f"Expected Phase 5 / ix_payrollfinallines_driverrateid error, got: {errors}"
-    )

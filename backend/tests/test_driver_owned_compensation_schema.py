@@ -137,8 +137,8 @@ def _user(cursor, company_id: int) -> int:
 def _driver_row(cursor, company_id: int, branch_id: int) -> tuple[int, int]:
     """A permanent Driver (and its Employee); no assignment yet."""
     cursor.execute("""
-        INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-        VALUES (%s, %s, 'DC88 Driver', 'Driver', 'Active') RETURNING employeeid
+        INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+        VALUES (%s, %s, 'DC88 Driver', 'Active') RETURNING employeeid
     """, (company_id, branch_id))
     employee_id = cursor.fetchone()[0]
     cursor.execute("""
@@ -339,8 +339,8 @@ def _seed_0087_rows(cursor, kind: str) -> None:
     """, (company_id,))
     branch_id = cursor.fetchone()[0]
     cursor.execute("""
-        INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-        VALUES (%s, %s, 'DC88', 'Driver', 'Active') RETURNING employeeid
+        INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+        VALUES (%s, %s, 'DC88', 'Active') RETURNING employeeid
     """, (company_id, branch_id))
     employee_id = cursor.fetchone()[0]
     cursor.execute("""
@@ -426,7 +426,7 @@ def test_0088_applies_over_a_roster_without_compensation(pre_0088_database):
     assert _alembic(env, "upgrade", "head").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         cursor.execute("SELECT version_num FROM public.alembic_version")
-        assert cursor.fetchone() == ("0092",)
+        assert cursor.fetchone() == ("0093",)
         cursor.execute("SELECT count(*) FROM core.driverassignments")
         assert cursor.fetchone() == (1,)
 
@@ -440,7 +440,7 @@ def test_0088_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0092",)
+    assert cur.fetchone() == ("0093",)
 
     def columns(table: str) -> set[str]:
         cur.execute("""
@@ -467,11 +467,9 @@ def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, c
         "calendarcustomintervaldays", "calendarsourcebranchid",
         "calendarsourcepayrollsetupversionid",
     }
-    for retired in ("driverrateassignments", "driverratevalues"):
+    for retired in ("driverrateassignments", "driverratevalues", "driverrates", "driverratetiers"):
         cur.execute("SELECT to_regclass(%s)", (f"payroll.{retired}",))
         assert cur.fetchone()[0] is None
-    # The legacy assignment-owned DriverRates remain until their final removal.
-    assert {"driverassignmentid", "branchid"} <= columns("driverrates")
 
 
 def test_no_object_keeps_a_retired_assignment_name_or_foreign_key(cur):
@@ -529,7 +527,7 @@ def test_no_object_keeps_a_retired_assignment_name_or_foreign_key(cur):
     assert len(cur.fetchall()) == 2
 
 
-def test_the_ended_assignment_guard_stays_on_status_rates_only(cur):
+def test_driver_owned_context_guards_remain_without_legacy_assignment_guards(cur):
     def triggers(name: str) -> set[str]:
         cur.execute("""
             SELECT c.relname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
@@ -538,14 +536,10 @@ def test_the_ended_assignment_guard_stays_on_status_rates_only(cur):
         """, (name,))
         return {row[0] for row in cur.fetchall()}
 
-    assert triggers("trg_compensationassignmentwritable") == {"driverrates", "driverratetiers"}
+    assert triggers("trg_compensationassignmentwritable") == set()
     assert triggers("trg_drivercompensationcontextwritable") == {"driverrateschedules", "driverpayrules"}
-    cur.execute("""
-        SELECT pg_get_functiondef('core.trg_compensationassignmentwritable'::regproc)
-    """)
-    body = cur.fetchone()[0].lower()
-    assert "driverrateassignments" not in body and "driverratevalues" not in body
-    assert "driverpayrules" not in body and "driverrateschedules" not in body
+    cur.execute("SELECT to_regprocedure('core.trg_compensationassignmentwritable()')")
+    assert cur.fetchone()[0] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1159,24 +1153,3 @@ def test_the_decision_uses_the_wall_clock_inside_a_long_transaction(cur):
         _void_schedule(cur, w, first)
     with refused_as_historical(cur):
         _pay_rule(cur, w, start=day)
-
-
-# ---------------------------------------------------------------------------
-# Status rates keep the Stage 1 guard
-# ---------------------------------------------------------------------------
-
-def test_status_rates_of_an_ended_assignment_are_still_read_only(cur):
-    w = _world(cur)
-    cur.execute("SELECT ratetypeid FROM payroll.ratetypes WHERE ratecode = 'HOURLY'")
-    rate_type = cur.fetchone()[0]
-    insert = """
-        INSERT INTO payroll.driverrates
-            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status)
-        VALUES (%s, %s, %s, %s, 10, DATE '2021-01-01', 'PendingApproval')
-    """
-    args = (w["company"], w["branches"][0], w["assignment"], rate_type)
-    cur.execute(insert, args)
-    _end_open_assignment_in_the_past(cur, w["assignment"], PAST_END)
-    with rejected(cur) as info:
-        cur.execute(insert, (w["company"], w["branches"][0], w["assignment"], rate_type))
-    assert info.value.pgcode == "FL001" and "DRIVER_ASSIGNMENT_ENDED" in str(info.value)

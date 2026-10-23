@@ -323,10 +323,16 @@ async def test_no_money_is_stored_on_the_source_line_so_none_can_become_authorit
     await enter(p3c_client, tenant, period, 1, ppd=ppd, quantity="4")
     async with p3c_engine.connect() as conn:
         stored = (await conn.execute(
-            text("SELECT quantity, calculatedamount, rateamount FROM payroll.payrolldraftlines "
-                 "WHERE payrollperiodid = :period"),
+            text("SELECT payrollperioddefinitionid, quantity, needsmanagerreview "
+                 "FROM payroll.payrolldraftlines WHERE payrollperiodid = :period"),
             {"period": period["payroll_period_id"]})).all()
-    assert [tuple(row) for row in stored] == [(D("4"), None, None)]
+        retired = (await conn.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema = 'payroll' AND table_name = 'payrolldraftlines'
+              AND column_name IN ('rateamount', 'calculatedamount', 'linetype', 'sourcesnapshot')
+        """))).scalars().all()
+    assert [tuple(row) for row in stored] == [(ppd, D("4"), False)]
+    assert retired == []
     driver = _driver(await build_packet(p3c_engine, tenant, period), tenant.driver_a)
     assert driver.daily_pay == D("17.00")
 

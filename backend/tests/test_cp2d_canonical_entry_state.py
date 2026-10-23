@@ -16,7 +16,7 @@ Product contracts verified:
     StatusLabelSnapshot, StatusIsOffReasonSnapshot, FinalizedAtUtc on canonical rows.
   - Locked period display: get_day_grid uses snapshot values (not live lookup) for
     Locked periods.
-  - Historical pseudo-lines are ignored and are never created by Day Grid.
+  - Ordinary source Notes never supply canonical Status or day-level notes.
   - Tenant isolation: canonical rows are scoped by CompanyID; cross-company
     rows are not visible.
   - Ordinary DraftLines remain keyed to PayrollPeriodDefinitionID.
@@ -41,6 +41,7 @@ from tests.db_state import (
     PERIOD_EVIDENCE_IMMUTABLE_TRIGGERS,
     suspended_test_triggers,
 )
+from tests.target_seed import seed_period_definition, seed_target_line
 
 # ---------------------------------------------------------------------------
 # Shared helpers / constants
@@ -298,6 +299,16 @@ async def _insert_approved_review_item(
     return r["reviewitemid"]
 
 
+async def _ordinary_source_with_note(db, period_id, branch_id, assignment_id, work_date, note):
+    definition = await seed_period_definition(db, period_id=period_id, branch_id=branch_id)
+    line_id = await seed_target_line(
+        db, period_id=period_id, branch_id=branch_id, driver_assignment_id=assignment_id,
+        definition=definition, quantity=1, work_date=work_date)
+    await db.execute(_text("UPDATE payroll.PayrollDraftLines SET Notes = :note WHERE DraftLineID = :id"),
+                     {"note": note, "id": line_id})
+    return line_id
+
+
 async def _canonical_rows(db: AsyncConnection, period_id: int) -> list[dict]:
     rows = (await db.execute(
         _text("""
@@ -550,7 +561,7 @@ class TestCp2dCanonicalEntryState:
                 _text("""
                     SELECT count(*) FROM payroll.payrolldraftlines
                     WHERE payrollperiodid = :pid AND driverassignmentid = :did
-                      AND linetype IN ('DailyStatus', 'DailyNote') AND status != 'Void'
+                      AND status != 'Void'
                 """),
                 {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar_one()
@@ -668,11 +679,11 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E06 — Historical Status pseudo-lines are ignored by current reads
+    # E06 — Ordinary source Notes do not supply canonical Status
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_e06_historical_status_pseudo_line_is_ignored_by_current_reads(
+    async def test_e06_ordinary_source_notes_are_not_status_authority(
         self,
         session_client,
         auth_token: str,
@@ -680,7 +691,7 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_assignment_id: int,
     ):
-        """E06: A historical pseudo-line cannot supply Status or note to current reads."""
+        """E06: Ordinary source Notes cannot supply day-level Status or note."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e06")
         code = _sk_code("E06KEY", start)
@@ -688,19 +699,9 @@ class TestCp2dCanonicalEntryState:
         wdate = str(start)
         headers = _auth(auth_token)
         try:
-            # Insert DraftLine directly — bypasses canonical write
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverassignmentid,
-                         workdate, linetype, quantity,
-                         sourcetype, status, needsmanagerreview, notes, addedbyuserid)
-                    VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyStatus', 0,
-                            'Manual', 'Active', FALSE, :code, 1)
-                """),
-                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id, "dt": start, "code": code},
-            )
+            # Seed ordinary source Notes without a canonical entry.
+            await _ordinary_source_with_note(
+                direct_db, pid, ces_branch_id, ces_driver_assignment_id, start, code)
             await direct_db.commit()
 
             # No canonical rows should exist
@@ -743,7 +744,7 @@ class TestCp2dCanonicalEntryState:
         ces_driver_assignment_id: int,
         ces_driver_assignment_id_b: int,
     ):
-        """EntryState supplies Driver A; a historical pseudo-line supplies no Status for B."""
+        """EntryState supplies Driver A; ordinary source Notes supply no Status for B."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e07")
         code_a = _sk_code("E07AKEY", start)
@@ -761,18 +762,9 @@ class TestCp2dCanonicalEntryState:
                       "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {}, "status_key": code_a}]},
             )
 
-            # Driver B: inject unsupported historical data; current reads ignore it.
-            await direct_db.execute(
-                _text("""
-                    INSERT INTO payroll.payrolldraftlines
-                        (companyid, branchid, payrollperiodid, driverassignmentid,
-                         workdate, linetype, quantity,
-                         sourcetype, status, needsmanagerreview, notes, addedbyuserid)
-                    VALUES (1, :bid, :pid, :did, :dt,
-                            'DailyStatus', 0, 'Manual', 'Active', FALSE, :code, 1)
-                """),
-                {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id_b, "dt": start, "code": code_b},
-            )
+            # Driver B: ordinary source Notes are separate from canonical Status.
+            await _ordinary_source_with_note(
+                direct_db, pid, ces_branch_id, ces_driver_assignment_id_b, start, code_b)
             await direct_db.commit()
 
             # get_day_grid: Driver A from EntryState, Driver B has no Status.
@@ -785,7 +777,7 @@ class TestCp2dCanonicalEntryState:
             drv_rows = {d["driver_assignment_id"]: d for d in r.json()["rows"]}
 
             assert drv_rows[ces_driver_assignment_id]["status_key"] == code_a, "A: canonical row"
-            assert drv_rows[ces_driver_assignment_id_b]["status_key"] is None, "Pseudo-lines are not Status authority"
+            assert drv_rows[ces_driver_assignment_id_b]["status_key"] is None, "Ordinary source Notes are not Status authority"
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             for sid in (sk_a, sk_b):
@@ -1212,7 +1204,7 @@ class TestCp2dCanonicalEntryState:
             dl_count = (await direct_db.execute(
                 _text("""
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverassignmentid = :did AND linetype = 'DailyStatus'
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
                 """),
                 {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar()
@@ -1270,7 +1262,7 @@ class TestCp2dCanonicalEntryState:
             dl_count = (await direct_db.execute(
                 _text("""
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverassignmentid = :did AND linetype = 'DailyStatus'
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
                 """),
                 {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar()
@@ -1320,7 +1312,7 @@ class TestCp2dCanonicalEntryState:
             dl_count = (await direct_db.execute(
                 _text("""
                     SELECT COUNT(*) FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverassignmentid = :did AND linetype = 'DailyStatus'
+                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
                 """),
                 {"pid": pid, "did": ces_driver_assignment_id},
             )).scalar()
@@ -1329,7 +1321,7 @@ class TestCp2dCanonicalEntryState:
             await _clean_branch(direct_db, ces_branch_id)
 
     # ------------------------------------------------------------------ #
-    # E19 — Direct update_draft_line: invalid code → 422, state unchanged
+    # E19 — Generic source PATCH cannot mutate canonical Status
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
@@ -1342,7 +1334,7 @@ class TestCp2dCanonicalEntryState:
         ces_driver_assignment_id: int,
     ):
         """E19 (G0.3): the generic DraftLine PATCH no longer mutates DailyStatus.
-        Existing DraftLine and canonical row must remain unchanged."""
+        The canonical row must remain unchanged and no source fact may be created."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e19")
         code = _sk_code("E19VALID", start)
@@ -1352,7 +1344,7 @@ class TestCp2dCanonicalEntryState:
         try:
             sk_id = await _insert_status_key(direct_db, _COMPANY_ID, ces_branch_id, code)
 
-            # Add a valid DailyStatus line first
+            # Create the canonical Status entry first
             add_r = await session_client.post(
                 f"/payroll/periods/{pid}/day-grid", headers=headers,
                 json={"work_date": wdate,
@@ -1360,28 +1352,11 @@ class TestCp2dCanonicalEntryState:
                                  "status_key": code}]},
             )
             assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
-            await direct_db.execute(_text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
-                     linetype, quantity, sourcetype, status, needsmanagerreview,
-                     notes, addedbyuserid)
-                VALUES (1, :bid, :pid, :did, :dt, 'DailyStatus', 0,
-                        'Manual', 'Active', FALSE, :code, 1)
-            """), {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id,
-                   "dt": start, "code": code})
-            await direct_db.commit()
-            line_id = (await direct_db.execute(
-                _text("""
-                    SELECT draftlineid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
-                      AND linetype = 'DailyStatus' AND status != 'Void'
-                """),
-                {"pid": pid, "did": ces_driver_assignment_id},
-            )).scalar_one()
-
-            # Canonical row must exist with the correct statuskeyid
             rows_before = await _canonical_rows(direct_db, pid)
             assert rows_before, "Canonical row must exist after valid add"
+            line_id = rows_before[0]["payrollperioddriverdayentrystateid"]
+
+            # Canonical row must exist with the correct statuskeyid
             canonical_sk_id_before = rows_before[0]["statuskeyid"]
             assert canonical_sk_id_before == sk_id
 
@@ -1391,14 +1366,11 @@ class TestCp2dCanonicalEntryState:
                 headers=headers,
                 json={"notes": "NONEXISTENT_E19"},
             )
-            assert upd_r.status_code == 404, f"Pseudo-line was exposed to current mutation: {upd_r.text}"
+            assert upd_r.status_code == 404, f"Canonical Status was exposed through source mutation: {upd_r.text}"
 
-            # DraftLine notes must still be the original code
-            dl = (await direct_db.execute(
-                _text("SELECT notes FROM payroll.payrolldraftlines WHERE draftlineid = :lid"),
-                {"lid": line_id},
-            )).mappings().first()
-            assert dl["notes"] == code, "DraftLine notes must not change on failed update"
+            assert (await direct_db.execute(_text(
+                "SELECT COUNT(*) FROM payroll.PayrollDraftLines WHERE PayrollPeriodID = :pid"),
+                {"pid": pid})).scalar_one() == 0
 
             # Canonical row must still hold the original statuskeyid
             rows_after = await _canonical_rows(direct_db, pid)
@@ -1414,8 +1386,8 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E20 — Direct update_draft_line: inactive code → 422 (no bypass on direct path)
-    # E20b — Same code after deactivation (unchanged resave) → also 422
+    # E20 — Generic source PATCH cannot address an inactive canonical Status
+    # E20b — An unchanged inactive resave also remains outside the source API
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
@@ -1427,9 +1399,9 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_assignment_id: int,
     ):
-        """E20 (G0.3): the generic DraftLine PATCH rejects a DailyStatus line
-        outright, including an unchanged resave of a deactivated key. The
-        deactivated-key bypass lives only in save_day_grid."""
+        """E20: generic source PATCH cannot address a canonical Status entry,
+        including an unchanged resave of a deactivated key. The deactivated-key
+        bypass lives only in save_day_grid."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e20")
         code = _sk_code("E20DEACT", start)
@@ -1439,7 +1411,7 @@ class TestCp2dCanonicalEntryState:
         try:
             sk_id = await _insert_status_key(direct_db, _COMPANY_ID, ces_branch_id, code)
 
-            # Add a valid DailyStatus line while key is active
+            # Create a canonical Status entry while the key is active
             add_r = await session_client.post(
                 f"/payroll/periods/{pid}/day-grid", headers=headers,
                 json={"work_date": wdate,
@@ -1447,24 +1419,8 @@ class TestCp2dCanonicalEntryState:
                                  "status_key": code}]},
             )
             assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
-            await direct_db.execute(_text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
-                     linetype, quantity, sourcetype, status, needsmanagerreview,
-                     notes, addedbyuserid)
-                VALUES (1, :bid, :pid, :did, :dt, 'DailyStatus', 0,
-                        'Manual', 'Active', FALSE, :code, 1)
-            """), {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id,
-                   "dt": start, "code": code})
-            await direct_db.commit()
-            line_id = (await direct_db.execute(
-                _text("""
-                    SELECT draftlineid FROM payroll.payrolldraftlines
-                    WHERE payrollperiodid = :pid AND driverassignmentid = :did
-                      AND linetype = 'DailyStatus' AND status != 'Void'
-                """),
-                {"pid": pid, "did": ces_driver_assignment_id},
-            )).scalar_one()
+            rows_before = await _canonical_rows(direct_db, pid)
+            line_id = rows_before[0]["payrollperioddriverdayentrystateid"]
 
             # Deactivate the key
             await direct_db.execute(
@@ -1473,21 +1429,19 @@ class TestCp2dCanonicalEntryState:
             )
             await direct_db.commit()
 
-            # Update to a DIFFERENT inactive code → 422
+            # An unchanged inactive Status still cannot be addressed through the source API.
             upd_r1 = await session_client.patch(
                 f"/payroll/periods/{pid}/lines/{line_id}",
                 headers=headers,
                 json={"notes": code},  # same code but now inactive
             )
             assert upd_r1.status_code == 404, \
-                "Historical pseudo-line must not be exposed through current source mutation"
+                "Canonical Status must not be exposed through current source mutation"
 
-            # DraftLine unchanged
-            dl = (await direct_db.execute(
-                _text("SELECT notes FROM payroll.payrolldraftlines WHERE draftlineid = :lid"),
-                {"lid": line_id},
-            )).mappings().first()
-            assert dl["notes"] == code, "DraftLine must not change on failed update"
+            assert await _canonical_rows(direct_db, pid) == rows_before
+            assert (await direct_db.execute(_text(
+                "SELECT COUNT(*) FROM payroll.PayrollDraftLines WHERE PayrollPeriodID = :pid"),
+                {"pid": pid})).scalar_one() == 0
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             if sk_id is not None:

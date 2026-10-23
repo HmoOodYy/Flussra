@@ -209,10 +209,10 @@ async def transfer_company_owner(
         await db.execute(
             text("""
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleId, scopetype,
+                    (userid, companyid, branchid, companyroleId, scopetype,
                      isactive, grantedbyuserid, notes)
                 VALUES
-                    (:uid, :cid, NULL, NULL, :crid, 'AllCompanyBranches',
+                    (:uid, :cid, NULL, :crid, 'AllCompanyBranches',
                      TRUE, :grantor, 'Assigned after ownership transfer')
             """),
             {
@@ -238,10 +238,10 @@ async def transfer_company_owner(
     await db.execute(
         text("""
             INSERT INTO sec.userbranchroles
-                (userid, companyid, branchid, roleid, companyroleId, scopetype,
+                (userid, companyid, branchid, companyroleId, scopetype,
                  isactive, grantedbyuserid, notes)
             VALUES
-                (:uid, :cid, NULL, NULL, :crid, 'AllCompanyBranches',
+                (:uid, :cid, NULL, :crid, 'AllCompanyBranches',
                  TRUE, :grantor, 'Company Owner role assigned via ownership transfer')
         """),
         {

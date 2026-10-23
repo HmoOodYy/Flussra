@@ -430,7 +430,7 @@ async def _create_period_definition_rows(
 ) -> None:
     """Freeze the period's PayDefinition layout.
 
-    One row per Company PayDefinition that is Active and has a BranchPayItemConfig
+    One row per Company PayDefinition that is Active and has a BranchPayDefinitionConfig
     version applicable to the Branch on ``start_date`` (an explicitly inactive version
     is frozen as inactive). A PayDefinition with no applicable version is not
     applicable to the Branch and gets no row. Zero rows is a valid layout; there is no
@@ -471,7 +471,7 @@ async def _create_period_definition_rows(
             JOIN   payroll.ratedefinitions rd ON rd.paydefinitionid = pd.paydefinitionid
             WHERE  pd.companyid = :cid AND pd.status = 'Active'
               AND  EXISTS (
-                       SELECT 1 FROM payroll.branchpayitemconfig bpic
+                       SELECT 1 FROM payroll.branchpaydefinitionconfig bpic
                        WHERE  bpic.companyid = pd.companyid AND bpic.branchid = :bid
                          AND  bpic.paydefinitionid = pd.paydefinitionid
                          AND  bpic.effectivefrom <= :start
@@ -506,7 +506,7 @@ async def _create_period_definition_rows(
                    bpic.configid, bpic.effectivefrom, bpic.effectiveto
             FROM   payroll.paydefinitions pd
             JOIN   payroll.ratedefinitions rd ON rd.paydefinitionid = pd.paydefinitionid
-            JOIN   payroll.branchpayitemconfig bpic
+            JOIN   payroll.branchpaydefinitionconfig bpic
                    ON  bpic.companyid = pd.companyid AND bpic.branchid = :bid
                    AND bpic.paydefinitionid = pd.paydefinitionid
                    AND bpic.effectivefrom <= :start

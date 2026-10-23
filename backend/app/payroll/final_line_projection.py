@@ -122,20 +122,8 @@ def _expected_columns(content: dict[str, Any], row: dict[str, Any]) -> dict[str,
         "payrollperioddefinitionid": row["payroll_period_definition_id"],
         "paydefinitionid": row["pay_definition_id"],
         "finalamount": row["amount"],
-        "quantity": 0,
-        "rateamount": None,
         "currencycode": content["CurrencyCode"],
         "currencyminorunitdigits": content["CurrencyMinorUnitDigits"],
-        # The legacy per-source provenance is never used by a component line.
-        "workdate": None,
-        "draftlineid": None,
-        "bonuseventid": None,
-        "payitemid": None,
-        "resolvedrateamount": None,
-        "ratetypeid": None,
-        "driverrateid": None,
-        "ratebehavior": None,
-        "notes": None,
         "sourcesnapshot": row["source_snapshot"],
     }
 
@@ -148,17 +136,16 @@ async def verify_final_lines(
     Every official component has exactly one FinalLine, and every field of that line equals the
     projection: scope (Company, Branch, period, snapshot, component), identity (DriverAssignment,
     Driver, Employee), classification (kind, line type, scope, source type and id), definition,
-    money (amount, quantity, rate, currency), the frozen provenance JSON (compared under strict
-    JSON typing, so ``true`` is not ``1``) and the legacy columns that component lines never use. No other FinalLine may exist for the period. Raises
+    money (final amount and currency), the frozen provenance JSON (compared under strict
+    JSON typing, so ``true`` is not ``1``). No other FinalLine may exist for the period. Raises
     ``SnapshotEvidenceError`` (FINAL_LINES_INTEGRITY_ERROR) otherwise; returns the rows.
     """
     rows = (await db.execute(text("""
         SELECT finallineid, companyid, branchid, payrollperiodid, driverassignmentid, driverid,
                employeeid, componentkind, linetype, linescope, sourcetype, sourceid,
                payrollcalculationsnapshotid, payrollcalculationsnapshotcomponentid,
-               payrollperioddefinitionid, paydefinitionid, finalamount, quantity, rateamount,
-               currencycode, currencyminorunitdigits, workdate, draftlineid, bonuseventid,
-               payitemid, ratetypeid, driverrateid, resolvedrateamount, ratebehavior, notes,
+               payrollperioddefinitionid, paydefinitionid, finalamount,
+               currencycode, currencyminorunitdigits,
                CAST(sourcesnapshot AS text) AS sourcesnapshot
         FROM payroll.payrollfinallines
         WHERE payrollperiodid = :period_id AND companyid = :company_id

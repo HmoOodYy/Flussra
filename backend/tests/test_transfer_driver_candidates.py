@@ -42,8 +42,8 @@ def _sql(tenant: Tenant, statement: str, params=()):
 def _future_only_driver(tenant: Tenant, branch_id: int) -> int:
     """An Active Driver whose only assignment starts in the future: no current assignment."""
     employee = _sql(tenant, """
-        INSERT INTO core.employees (companyid, branchid, fullname, employeetype, employmentstatus)
-        VALUES (%s, %s, 'Future Only Driver', 'Driver', 'Active') RETURNING employeeid
+        INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
+        VALUES (%s, %s, 'Future Only Driver', 'Active') RETURNING employeeid
     """, (tenant.company_id, branch_id))[0][0]
     driver = _sql(tenant, """
         INSERT INTO core.drivers (companyid, employeeid, drivernumber, driverstatus)

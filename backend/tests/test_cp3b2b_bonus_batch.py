@@ -888,16 +888,22 @@ async def test_driver_self_user_denied(
 
 @pytest.mark.asyncio
 async def test_view_only_user_denied(
-    client, auth_token, branch_user_token, db_conn, hq_branch_id, hq_driver_assignment_id,
+    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers, session_client,
 ) -> None:
-    """branch_user (payroll.view only, HQ scope) cannot apply a batch."""
-    start, end = _week()
-    period_id = await _insert_period_db(db_conn, hq_branch_id, start, end, status="Open")
-    await _seed_snapshot(db_conn, hq_branch_id, period_id, [
-        {"driver_assignment_id": hq_driver_assignment_id, "code": "HQD-001", "name": "HQ Driver"},
-    ])
-    r = await _batch(client, branch_user_token, period_id, _key(), 0, [
-        {"driver_assignment_id": hq_driver_assignment_id, "amount": "10.00"},
+    """A Branch-scoped payroll.view-only user cannot apply a batch."""
+    username = f"cp3b2b_view_{_RUN_ID}"
+    await create_provisioned_test_user(
+        session_client, auth_token, username,
+        await get_company_role_id(session_client, auth_token, "PAYROLL_VIEWER_CO"),
+        scope_type="SpecificBranch", branch_id=cp3b2b_branch_id, password="TestPass123!",
+    )
+    login = await session_client.post("/auth/login", json={
+        "username": username, "password": "TestPass123!", "company_code": "DEMO"})
+    assert login.status_code == 200, login.text
+    period_id = await _open_period_with_roster(
+        db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
+    r = await _batch(client, login.json()["access_token"], period_id, _key(), 0, [
+        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
     ])
     assert r.status_code == 403, r.text
     assert await _count_events(db_conn, period_id) == 0
@@ -1100,7 +1106,7 @@ async def test_batch_creates_no_draftline_bonus_rows(
     ])
     row = (await db_conn.execute(
         _text("SELECT COUNT(*) FROM payroll.payrolldraftlines "
-              "WHERE payrollperiodid = :pid AND linetype = 'BONUS'"),
+              "WHERE payrollperiodid = :pid"),
         {"pid": period_id},
     )).first()
     assert row[0] == 0, "batch must never create BONUS DraftLines"

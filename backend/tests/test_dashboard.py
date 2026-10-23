@@ -505,7 +505,7 @@ class TestDashboardRegression:
         session_client: httpx.AsyncClient,
         auth_token: str,
     ):
-        """Admin (all perms incl. drivers.manage) gets transfers section and int count."""
+        """Admin gets transfers section and int count."""
         r = await session_client.get("/dashboard", headers=_hdr(auth_token))
         assert r.status_code == 200, r.text
         data = r.json()

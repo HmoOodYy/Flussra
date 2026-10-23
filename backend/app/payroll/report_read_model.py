@@ -91,7 +91,7 @@ async def _period_context(
 async def _operational_rows(period: dict[str, Any], db: AsyncConnection) -> tuple[dict[int, dict[str, Any]], list[dict[str, Any]]]:
     rows = (await db.execute(text("""
         SELECT dl.driverassignmentid, a.driverid, d.drivernumber, e.fullname AS drivername, dl.workdate,
-               dl.linetype, dl.quantity, dl.sourcetype, dl.sourceid,
+               dl.quantity, dl.sourcetype,
                dl.payrollperioddefinitionid, ppd.definitionnamesnapshot
         FROM payroll.payrolldraftlines dl
         LEFT JOIN payroll.payrollperioddefinitions ppd

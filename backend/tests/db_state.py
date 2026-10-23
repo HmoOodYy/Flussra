@@ -47,28 +47,14 @@ FINAL_LINE_IMMUTABLE_TRIGGER = TriggerIdentity(
 PERIOD_STATUS_REVERT_TRIGGER = TriggerIdentity(
     "payroll", "payrollperiods", "trg_period_status_revert"
 )
-CDPI_REQUEST_EVENTS_IMMUTABLE_TRIGGER = TriggerIdentity(
-    "payroll", "cdpirequestevents", "trg_guard_cdpi_request_events_immutable"
-)
 BONUS_EVENT_OWNERSHIP_TRIGGER = TriggerIdentity(
     "payroll", "payrollbonusevents", "trg_bonusevents_ownership"
-)
-PAY_ITEM_RATE_TYPE_MAP_OWNERSHIP_TRIGGER = TriggerIdentity(
-    "payroll", "payitemratetypemap", "trg_guard_payitemratetypemap_ownership"
 )
 # Deleting a DriverAssignment is allowed only for a never-effective transfer destination
 # removed by transfer cancel. Test teardown of test-owned Drivers suspends exactly this
 # guard (never DISABLE TRIGGER ALL) to remove effective assignments.
 DRIVER_ASSIGNMENT_HISTORY_TRIGGER = TriggerIdentity(
     "core", "driverassignments", "trg_driverassignments_historyimmutable"
-)
-# Status-rate tables of an ENDED DriverAssignment are read-only at the database
-# (core.trg_CompensationAssignmentWritable). A test that seeds or tears down
-# status rates on an assignment it has already ended suspends exactly these triggers,
-# never DISABLE TRIGGER ALL, through suspended_test_triggers.
-COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS = tuple(
-    TriggerIdentity("payroll", table, "trg_compensationassignmentwritable")
-    for table in ("driverrates", "driverratetiers")
 )
 # Driver-owned compensation (rate schedules, pay rules) is refused from a date whose home
 # tenure has ended (core.trg_DriverCompensationContextWritable, migration 0088). A test

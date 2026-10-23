@@ -151,6 +151,8 @@ If an issue is officially moved to a different work unit:
 
 \---
 
+**P8b:** Physical cutover locally closed after focused verification (merge pending), from exact P8a baseline `a9caa739330d81bd421dd845438b27ebcb2631eb`; single head `0093`. P8c reset/reseed and final closure remain deferred.
+
 # 2\. Deferred Work Entries
 
 ## DWR-001 — Workforce Write Authority Did Not Exist as an Independent Domain
@@ -561,13 +563,13 @@ P1b.
 Raw-SQL fixtures and historical references still use the column. Dropping it during P1b would create broad fixture churn with no architectural value.
 
 **Current State:**  
-P1b makes the column nullable and removes runtime read/write/filter/input/output authority.
+P1b removed runtime read/write/filter/input/output authority. P8b migration `0093` drops the physical column; affected current-schema fixtures use Workforce identity without EmployeeType.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolution Evidence:** `0093_target_physical_authorities.sql`; `test_target_physical_authorities.py`; focused Workforce/Employee tests.
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -586,13 +588,13 @@ P1b permission cutover.
 Physical deletion requires zero-reference proof across roles, tests, migrations, and compatibility paths.
 
 **Current State:**  
-There should be no runtime authorization dependency on `drivers.manage`.
+P8b migration `0093` deletes `drivers.manage` and its obsolete grants/overrides. Current Workforce permissions and Driver read/transfer permissions remain. Current fixtures no longer recreate the retired permission.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolution Evidence:** `0093_target_physical_authorities.sql`; `test_permission_catalog.py`; CompanyRole authorization and physical-authority tests.
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -615,7 +617,7 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 * **P7b** final Compensation / Settings UI cutover (closed, PR #66)
 * **P7c** payroll-entry and finalized-payroll frontend cutover (closed via PR #67 at `0fd86c76ee28c724270514728cdab7dcf1bba599`)
 * **P8a** runtime compatibility/authority deletion (implemented with migration `0092`)
-* **P8b** physical schema/catalog cleanup (open)
+* **P8b** physical schema/catalog cleanup (migration `0093`)
 
 **Why Deferred:**  
 Compensation must be built on stable Workforce identity rather than while Employee/Driver authority is still moving.
@@ -625,11 +627,13 @@ P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, en
 
 Update 2026-10-22: P4c and P5a–P5b are closed; target calculation, Status, OrdinalTier and Driver-owned schedules are live. P7a merged via PR #65 at `b4474728196b23cf2b95aad6a30abb4914e9ff05`; P7b merged via PR #66 at `a827a2d942594b339f9fd13441d7a1a835670bce`; P7c closed via PR #67 at baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`. P8a removes remaining operational compatibility; P8b owns physical schema/catalog cleanup.
 
-**Issue Resolved?:** NOT YET
+Update 2026-10-23: P8a is merged via PR #68 at `a9caa739330d81bd421dd845438b27ebcb2631eb`, head `0092`. P8b migration `0093` retires the PayItem/RateType/DriverRate family and CDPI-specific storage after catalog and consumer proof; generic governance/provenance and target immutable calculation evidence remain. Branch applicability is now `BranchPayDefinitionConfig`, with SourceBranchConfigID provenance intact. See the Unified Plan P8b physical inventory. P8c remains separate.
 
-**Resolved In:** —
-**Resolution Evidence:** —
-**Last Updated:** 2026-10-18
+**Issue Resolved?:** YES
+
+**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolution Evidence:** `0093_target_physical_authorities.sql`; focused governance, branch applicability, PerUnit, OrdinalTier, schedule and immutable calculation/finalization tests; schema-authority comparison: `NO_APPLICATION_SCHEMA_DIFFERENCES`.
+**Last Updated:** 2026-10-23
 
 \---
 
@@ -736,7 +740,7 @@ The staged refoundation strategy itself.
 The safe sequence is: build the replacement, prove behavior, cut authority over, then delete the old runtime. Deleting legacy before proving the replacement is risky.
 
 **Current State:**  
-P8a removed the agreed operational compatibility routes, global-role authorization paths, pseudo-line Status/note behavior, raw FinalLines read path, period-wide Drivers Off path, and Bonus v1 replay. Physical catalog artifacts remain for P8b.
+P8a removed the agreed operational compatibility routes, global-role authorization paths, pseudo-line Status/note behavior, raw FinalLines read path, period-wide Drivers Off path, and Bonus v1 replay. P8b migration `0093` now removes the remaining physical catalog artifacts; the runtime cutover itself remains P8a history.
 
 **Issue Resolved?:** YES
 
@@ -761,15 +765,13 @@ P1b and later staged refoundation planning.
 Physical deletion must happen only after proving zero runtime/test/migration references rather than based on assumption.
 
 **Current State:**  
-Examples include `EmployeeType`, possibly `drivers.manage`, and later legacy Compensation artifacts after their runtime consumers are gone.
+P8b migration `0093` implements the catalog-proven physical cutover: CompanyRole-only role assignment, retired permission/EmployeeType removal, predecessor Compensation/CDPI removal, in-place `BranchPayDefinitionConfig` rename, source/final predecessor-column removal, target period-audit identity and generic AuditLog append-only triggers. Target FinalLines, SourceSnapshot, NeedsManagerReview and immutable schedule/calculation evidence remain. Every DROP uses RESTRICT; an unexplained external FK aborts atomically. Historical migrations remain unchanged. Full inventory and retained-target rationale are in the Unified Plan P8b section. P8c reset/reseed tooling and final program closure are excluded.
 
-P8a leaves DWR-020 open: P8b owns catalog/FK dependency proof and all physical deletion.
+**Issue Resolved?:** YES
 
-**Issue Resolved?:** NOT YET
-
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Resolved In:** P8b physical authority cutover, migration `0093` (locally closed after focused verification; merge pending).
+**Resolution Evidence:** `0093_target_physical_authorities.sql`; `test_target_physical_authorities.py` (fresh/non-empty upgrade, unknown-dependency rollback, identity and append-only audit); schema guards; focused financial/audit tests; one Alembic head `0093`; schema-authority comparison: `NO_APPLICATION_SCHEMA_DIFFERENCES`; frontend build/lint; `git diff --check`.
+**Last Updated:** 2026-10-23
 
 \---
 

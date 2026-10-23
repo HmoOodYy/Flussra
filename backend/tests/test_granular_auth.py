@@ -399,8 +399,8 @@ class TestCompanyOwnerUnique:
                 cur.execute(
                     """
                     INSERT INTO sec.userbranchroles
-                        (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-                    SELECT %s, cr.companyid, NULL, NULL, cr.companyroleid,
+                        (userid, companyid, branchid, companyroleId, scopetype, isactive)
+                    SELECT %s, cr.companyid, NULL, cr.companyroleid,
                            'AllCompanyBranches', TRUE
                     FROM   sec.companyroles cr
                     WHERE  cr.companyroleid = %s
@@ -873,8 +873,8 @@ class TestCompanyOwnerTriggerUpdate:
             cur.execute(
                 """
                 INSERT INTO sec.userbranchroles
-                    (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-                SELECT %s, cr.companyid, NULL, NULL, cr.companyroleid,
+                    (userid, companyid, branchid, companyroleId, scopetype, isactive)
+                SELECT %s, cr.companyid, NULL, cr.companyroleid,
                        'AllCompanyBranches', FALSE   -- starts revoked
                 FROM   sec.companyroles cr
                 WHERE  cr.rolecode = 'COMPANY_OWNER'

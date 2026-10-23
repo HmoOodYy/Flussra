@@ -1,7 +1,7 @@
 """Branch applicability of Company PayDefinitions.
 
 A PayDefinition is Company-owned; it is operationally applicable to a Branch
-only through an effective-dated payroll.BranchPayItemConfig version keyed by
+only through an effective-dated payroll.BranchPayDefinitionConfig version keyed by
 PayDefinitionID. A missing configuration means not applicable: there is no
 implicit default activation and no global fallback.
 
@@ -169,7 +169,7 @@ async def apply_config(
     open_row = (await db.execute(
         text(f"""
             SELECT {_CFG_COLUMNS}
-            FROM   payroll.branchpayitemconfig bpic
+            FROM   payroll.branchpaydefinitionconfig bpic
             WHERE  bpic.paydefinitionid = :pid AND bpic.companyid = :cid
               AND  bpic.branchid = :bid AND bpic.effectiveto IS NULL
             FOR UPDATE
@@ -178,7 +178,7 @@ async def apply_config(
     )).mappings().first()
 
     insert_sql = text("""
-        INSERT INTO payroll.branchpayitemconfig
+        INSERT INTO payroll.branchpaydefinitionconfig
             (companyid, branchid, paydefinitionid, isactive, effectivefrom, notes,
              createdbyuserid)
         VALUES (:cid, :bid, :pid, :active, :eff_from, :notes, :uid)
@@ -202,7 +202,7 @@ async def apply_config(
                 # overlapping: re-close that version at the day before the new start.
                 previous = (await db.execute(
                     text("""
-                        SELECT configid, effectivefrom FROM payroll.branchpayitemconfig
+                        SELECT configid, effectivefrom FROM payroll.branchpaydefinitionconfig
                         WHERE  paydefinitionid = :pid AND companyid = :cid AND branchid = :bid
                           AND  effectiveto = :closed_on
                         FOR UPDATE
@@ -216,13 +216,13 @@ async def apply_config(
                             "CONFIG_VERSION_OVERLAP",
                             "The effective date overlaps an existing configuration version.", 409)
                     await db.execute(
-                        text("UPDATE payroll.branchpayitemconfig SET effectiveto = :close_on "
+                        text("UPDATE payroll.branchpaydefinitionconfig SET effectiveto = :close_on "
                              "WHERE configid = :config_id"),
                         {"close_on": effective_from - timedelta(days=1),
                          "config_id": previous["configid"]})
             await db.execute(
                 text("""
-                    UPDATE payroll.branchpayitemconfig
+                    UPDATE payroll.branchpaydefinitionconfig
                     SET    isactive = :active, notes = :notes, effectivefrom = :eff_from
                     WHERE  configid = :config_id
                 """),
@@ -234,13 +234,13 @@ async def apply_config(
                          "effective_from": str(open_row["effectivefrom"]),
                          "closed_effective_to": str(effective_from - timedelta(days=1))}
             await db.execute(
-                text("UPDATE payroll.branchpayitemconfig SET effectiveto = :close_on "
+                text("UPDATE payroll.branchpaydefinitionconfig SET effectiveto = :close_on "
                      "WHERE configid = :config_id"),
                 {"close_on": effective_from - timedelta(days=1),
                  "config_id": open_row["configid"]})
             config_id = (await db.execute(insert_sql, params)).scalar_one()
     except DBAPIError as exc:
-        if "excl_branchpayitemconfig_definitionversionoverlap" in str(exc).lower():
+        if "excl_branchpaydefinitionconfig_definitionversionoverlap" in str(exc).lower():
             raise compensation_error(
                 "CONFIG_VERSION_OVERLAP",
                 "The effective date overlaps an existing configuration version.", 409) from exc
@@ -248,7 +248,7 @@ async def apply_config(
 
     await write_audit(
         db, company_id=company_id, branch_id=branch_id, user_id=user_id,
-        action_code=action, entity_name="BranchPayItemConfig",
+        action_code=action, entity_name="BranchPayDefinitionConfig",
         entity_id=f"{branch_id}:{pay_definition_id}", old_value=old_value,
         new_value={"is_active": is_active, "notes": notes,
                    "effective_from": str(effective_from)})
@@ -261,7 +261,7 @@ async def _config_pair(
     current = (await db.execute(
         text(f"""
             SELECT DISTINCT ON (bpic.paydefinitionid) bpic.paydefinitionid, {_CFG_COLUMNS}
-            FROM   payroll.branchpayitemconfig bpic
+            FROM   payroll.branchpaydefinitionconfig bpic
             WHERE  bpic.companyid = :cid AND bpic.branchid = :bid
               AND  bpic.effectivefrom <= :today
               AND  (bpic.effectiveto IS NULL OR bpic.effectiveto >= :today)
@@ -272,7 +272,7 @@ async def _config_pair(
     pending = (await db.execute(
         text(f"""
             SELECT bpic.paydefinitionid, {_CFG_COLUMNS}
-            FROM   payroll.branchpayitemconfig bpic
+            FROM   payroll.branchpaydefinitionconfig bpic
             WHERE  bpic.companyid = :cid AND bpic.branchid = :bid
               AND  bpic.effectiveto IS NULL AND bpic.effectivefrom > :today
         """),
@@ -457,7 +457,7 @@ async def bulk_update_branch_config(
             status=_ACTIONS[action], config_id=config_id, effective_from=effective_from))
     await write_audit(
         db, company_id=company_id, branch_id=None, user_id=user_id,
-        action_code="BRANCH_PAY_DEFINITION_BULK_CONFIG", entity_name="BranchPayItemConfig",
+        action_code="BRANCH_PAY_DEFINITION_BULK_CONFIG", entity_name="BranchPayDefinitionConfig",
         entity_id=f"bulk:{pay_definition_id}",
         new_value={"is_active": data.is_active, "notes": data.notes,
                    "target": str(data.target), "branch_count": len(results)})
@@ -485,7 +485,7 @@ async def config_history(
     rows = (await db.execute(
         text(f"""
             SELECT {_CFG_COLUMNS}
-            FROM   payroll.branchpayitemconfig bpic
+            FROM   payroll.branchpaydefinitionconfig bpic
             WHERE  bpic.paydefinitionid = :pid AND bpic.companyid = :cid AND bpic.branchid = :bid
             ORDER  BY bpic.effectivefrom DESC, bpic.configid DESC
         """),

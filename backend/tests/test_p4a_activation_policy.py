@@ -50,7 +50,7 @@ def _period_around_today(cur, tenant, status: str, *, ends_in_days: int = 3):
 
 def _config_start(cur, tenant, request_branch_id: int) -> object:
     cur.execute("""
-        SELECT effectivefrom FROM payroll.branchpayitemconfig
+        SELECT effectivefrom FROM payroll.branchpaydefinitionconfig
         WHERE companyid = %s AND branchid = %s AND isactive
     """, (tenant.company_id, request_branch_id))
     return cur.fetchone()[0]

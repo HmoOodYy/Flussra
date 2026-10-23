@@ -169,7 +169,7 @@ def test_fresh_database_upgrades_to_the_period_definition_model(p4b_database):
     assert _alembic(env, "upgrade", "head").returncode == 0
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         cur.execute("SELECT version_num FROM public.alembic_version")
-        assert cur.fetchone() == ("0092",)
+        assert cur.fetchone() == ("0093",)
         assert _tables(cur) == {"payrollperioddefinitions"}
         columns = _columns(cur, "payrollperioddefinitions")
         assert {"payrollperioddefinitionid", "paydefinitionid", "ratedefinitionid",
@@ -180,9 +180,9 @@ def test_fresh_database_upgrades_to_the_period_definition_model(p4b_database):
         assert not columns & {"payitemid", "payitemcode", "itemscope", "ratebehavior"}
         draft_columns = _columns(cur, "payrolldraftlines")
         assert "payrollperioddefinitionid" in draft_columns
-        cur.execute("SELECT is_nullable FROM information_schema.columns WHERE table_schema = "
+        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_schema = "
                     "'payroll' AND table_name = 'payrolldraftlines' AND column_name = 'linetype'")
-        assert cur.fetchone() == ("YES",)
+        assert cur.fetchone() is None
 
 
 @pytest.mark.parametrize("dirty_table", ["driver", "transfer", "period"])

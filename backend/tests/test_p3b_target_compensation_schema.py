@@ -912,15 +912,12 @@ def test_superseded_and_voided_schedules_remain_durable_monetary_state(cur, fina
                     (fx.company_id,))
 
 
-def test_legacy_monetary_authority_is_unchanged_by_the_target_schema(cur):
+def test_retired_legacy_monetary_authorities_are_absent(cur):
     fx = Scalar(cur)
     assert _durable(cur, fx.company_id) is False
-    cur.execute("SELECT ratetypeid FROM payroll.ratetypes ORDER BY ratetypeid LIMIT 1")
-    rate_type_id = cur.fetchone()[0]
     cur.execute("""
-        INSERT INTO payroll.driverrates
-            (companyid, branchid, driverassignmentid, ratetypeid, amount, effectivefrom, status)
-        VALUES (%s, %s, %s, %s, 10, '2099-01-01', 'PendingApproval')
-    """, (fx.company_id, fx.branch_id, fx.driver_assignment_id, rate_type_id))
-    assert _durable(cur, fx.company_id) is True
+        SELECT to_regclass('payroll.ratetypes'), to_regclass('payroll.driverrates'),
+               to_regclass('payroll.driverratetiers')
+    """)
+    assert cur.fetchone() == (None, None, None)
     assert _durable(cur, make_company(cur)) is False

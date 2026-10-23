@@ -165,7 +165,7 @@ async def test_a_later_branch_or_definition_change_does_not_alter_the_period(
             "UPDATE payroll.paydefinitions SET definitionname = 'Renamed' "
             "WHERE paydefinitionid = :p"), {"p": definition["pay_definition_id"]})
         await conn.execute(text(
-            "UPDATE payroll.branchpayitemconfig SET isactive = FALSE "
+            "UPDATE payroll.branchpaydefinitionconfig SET isactive = FALSE "
             "WHERE paydefinitionid = :p"), {"p": definition["pay_definition_id"]})
     retired = await p3c_client.post(
         f"/compensation/pay-definitions/{definition['pay_definition_id']}/retire",
@@ -188,7 +188,7 @@ async def test_creation_sets_the_structural_lock_and_the_snapshot_references_the
     definition = await _direct_definition(p3c_engine, tenant)
     async with p3c_engine.begin() as conn:
         await conn.execute(text(
-            "UPDATE payroll.branchpayitemconfig SET effectivefrom = '2020-02-02' "
+            "UPDATE payroll.branchpaydefinitionconfig SET effectivefrom = '2020-02-02' "
             "WHERE paydefinitionid = :p"), {"p": definition["pay_definition_id"]})
     assert not await _structure_locked(p3c_engine, definition["rate_definition_id"])
     await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
@@ -200,7 +200,7 @@ async def test_creation_sets_the_structural_lock_and_the_snapshot_references_the
             SELECT ppd.sourcebranchconfigeffectivefrom, ppd.sourcebranchconfigeffectiveto,
                    bpic.effectivefrom
             FROM payroll.payrollperioddefinitions ppd
-            JOIN payroll.branchpayitemconfig bpic ON bpic.configid = ppd.sourcebranchconfigid
+            JOIN payroll.branchpaydefinitionconfig bpic ON bpic.configid = ppd.sourcebranchconfigid
             WHERE ppd.payrollperiodid = :p
         """), {"p": period["payroll_period_id"]})).one()
     assert row[0] == row[2] == date(2020, 2, 2) and row[1] is None

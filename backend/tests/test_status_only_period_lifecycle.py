@@ -9,7 +9,6 @@ to Locked without a fabricated earning, a live calculation or any FinalLine.
 """
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -68,8 +67,7 @@ async def _assert_no_status_pseudo_lines(engine, period) -> None:
     async with engine.connect() as conn:
         count = await conn.scalar(text("""
             SELECT count(*) FROM payroll.payrolldraftlines
-            WHERE payrollperiodid = :pid AND linetype IN ('DailyStatus', 'DailyNote')
-              AND status <> 'Void'
+            WHERE payrollperiodid = :pid AND status <> 'Void'
         """), {"pid": period["payroll_period_id"]})
     assert count == 0
 
@@ -161,30 +159,12 @@ async def test_a_period_whose_only_status_was_cleared_is_refused_at_resubmit(
     assert len(snapshot_ids(tenant, period)) == 1
 
 
-async def test_a_historical_status_pseudo_line_is_not_payroll_content(
-    p3c_client, p3c_engine, tenant,
-):
-    """Historical pseudo-lines do not count as a Status selection or ordinary quantity."""
+async def test_status_selections_are_not_duplicated_as_source_lines(p3c_client, p3c_engine, tenant):
     status_pay_setup(tenant, "25")
     period, _, _ = await open_period(p3c_client, p3c_engine, tenant)
-    async with p3c_engine.begin() as conn:
-        async with replica_replication_role(conn):
-            await conn.execute(text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
-                     linetype, quantity, sourcetype, status, needsmanagerreview, notes, addedbyuserid)
-                VALUES (:cid, :bid, :pid, :did, :dt, 'DailyStatus', 0, 'Manual', 'Active', FALSE,
-                        'PAID', :uid)
-            """), {"cid": tenant.company_id, "bid": tenant.branch_a,
-                   "pid": period["payroll_period_id"], "did": tenant.driver_a,
-                   "dt": date.fromisoformat(day(period, 0)), "uid": tenant.owner})
-    assert _live_content(tenant, period) == (0, 0)
-
-    response = await submit(p3c_client, tenant, period, expect=422)
-
-    assert "empty period" in response.text
-    assert period_status(tenant, period) == "Open"
-    assert snapshot_ids(tenant, period) == []
+    await _save_row(p3c_client, tenant, period, {"status_key": "PAID"})
+    await _assert_no_status_pseudo_lines(p3c_engine, period)
+    assert _live_content(tenant, period) == (0, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +184,7 @@ def _note_rows(tenant, period) -> int:
     """No note pseudo-lines are stored in ordinary quantity rows."""
     return rows(tenant, """
         SELECT count(*) FROM payroll.payrolldraftlines
-        WHERE payrollperiodid = %s AND linetype = 'DailyNote' AND status <> 'Void'
+        WHERE payrollperiodid = %s AND status <> 'Void'
     """, period["payroll_period_id"])[0][0]
 
 

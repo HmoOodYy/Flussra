@@ -188,17 +188,17 @@ def grant_applicability(
     tenant: Tenant, definition: dict, branch_id: int, *,
     effective_from: str = "2000-01-01", active: bool = True,
 ) -> None:
-    """Test setup: set a PayDefinition's single BranchPayItemConfig version directly."""
+    """Test setup: set a PayDefinition's single BranchPayDefinitionConfig version directly."""
     conn = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                DELETE FROM payroll.branchpayitemconfig
+                DELETE FROM payroll.branchpaydefinitionconfig
                 WHERE companyid = %s AND branchid = %s AND paydefinitionid = %s
             """, (tenant.company_id, branch_id, definition["pay_definition_id"]))
             cur.execute("""
-                INSERT INTO payroll.branchpayitemconfig
+                INSERT INTO payroll.branchpaydefinitionconfig
                     (companyid, branchid, paydefinitionid, isactive, effectivefrom)
                 VALUES (%s, %s, %s, %s, %s)
             """, (tenant.company_id, branch_id, definition["pay_definition_id"], active,

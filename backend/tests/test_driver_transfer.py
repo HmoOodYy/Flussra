@@ -24,6 +24,7 @@ from tests.builders.final_evidence import (
     seed_snapshot_component,
 )
 from tests.builders.pay_rules import insert_pay_rule
+from tests.target_seed import seed_period_definition
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -104,12 +105,6 @@ async def _get_any_period_for_branch(direct_db, branch_id: int) -> int | None:
     return r[0] if r else None
 
 
-async def _get_any_rate_type_id(direct_db) -> int:
-    row = await direct_db.execute(
-        _text("SELECT ratetypeid FROM payroll.ratetypes LIMIT 1")
-    )
-    return row.scalar_one()
-
 
 # ---------------------------------------------------------------------------
 # Exact-owned child state on the session-shared HQ period.
@@ -128,18 +123,21 @@ class _OwnedPeriodLines:
         self.chains: list[Chain] = []
 
     async def add_draft_line(
-        self, company_id: int, branch_id: int, period_id: int, assignment_id: int, source: str,
+        self, company_id: int, branch_id: int, period_id: int, assignment_id: int,
     ) -> int:
+        definition = await seed_period_definition(
+            self._db, period_id=period_id, branch_id=branch_id, company_id=company_id)
         line_id = (await self._db.execute(
             _text("""
                 INSERT INTO payroll.payrolldraftlines
                     (companyid, branchid, payrollperiodid, driverassignmentid,
-                     workdate, linetype, quantity, sourcetype)
-                VALUES (:cid, :bid, :period_id, :assignment_id, DATE '2090-01-01', 'REGULAR', 1, :source)
+                     payrollperioddefinitionid, workdate, quantity, sourcetype)
+                VALUES (:cid, :bid, :period_id, :assignment_id, :ppd_id,
+                        DATE '2090-01-01', 1, 'Manual')
                 RETURNING draftlineid
             """),
             {"cid": company_id, "bid": branch_id, "period_id": period_id,
-             "assignment_id": assignment_id, "source": source},
+             "assignment_id": assignment_id, "ppd_id": definition.payroll_period_definition_id},
         )).scalar_one()
         self.draft_line_ids.append(line_id)
         return line_id
@@ -263,7 +261,7 @@ class TestDriverBranchReassignment:
 
         # Inject a DraftLine for this driver (consistent branch)
         await owned_lines.add_draft_line(
-            company_id, hq_branch_id, created_period_id, assignment_id, "TransferTest",
+            company_id, hq_branch_id, created_period_id, assignment_id,
         )
 
         # Attempt reassignment → must fail with 422
@@ -310,48 +308,6 @@ class TestDriverBranchReassignment:
         )
         assert r.status_code == 422, (
             f"Expected 422 when driver has FinalLines, got {r.status_code}: {r.text}"
-        )
-
-        profile = await _get_driver_profile(session_client, auth_token, user_id)
-        assert profile["branch_id"] == hq_branch_id
-
-    async def test_driver_with_rates_cannot_be_reassigned(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        hq_branch_id: int,
-        paytest_branch_id: int,
-        direct_db,
-    ):
-        """Driver with DriverRates returns 422 when reassigned to another branch."""
-        driver_role_id = await _get_driver_role_id(session_client, auth_token)
-        user_id, driver_id, assignment_id = await _make_fresh_driver(
-            session_client, auth_token, hq_branch_id, driver_role_id
-        )
-        company_id = await _get_company_id(direct_db, hq_branch_id)
-        rate_type_id = await _get_any_rate_type_id(direct_db)
-
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.driverrates
-                    (companyid, branchid, driverassignmentid, ratetypeid,
-                     amount, effectivefrom, status)
-                VALUES
-                    (:cid, :bid, :assignment_id, :rt_id, 22.00, '2030-01-01', 'PendingApproval')
-            """),
-            {
-                "cid": company_id,
-                "bid": hq_branch_id,
-                "assignment_id": assignment_id,
-                "rt_id": rate_type_id,
-            },
-        )
-
-        r = await _assign_driver_role(
-            session_client, auth_token, user_id, driver_role_id, paytest_branch_id
-        )
-        assert r.status_code == 422, (
-            f"Expected 422 when driver has DriverRates, got {r.status_code}: {r.text}"
         )
 
         profile = await _get_driver_profile(session_client, auth_token, user_id)
@@ -404,7 +360,7 @@ class TestDriverBranchReassignment:
         company_id = await _get_company_id(direct_db, hq_branch_id)
 
         await owned_lines.add_draft_line(
-            company_id, hq_branch_id, created_period_id, assignment_id, "MsgTest",
+            company_id, hq_branch_id, created_period_id, assignment_id,
         )
 
         r = await _assign_driver_role(

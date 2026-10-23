@@ -1,4 +1,4 @@
-"""Migration 0076 clean-state, refusal, downgrade and schema trust regression."""
+"""Migration 0076 clean-state, refusal, downgrade and currency schema regression."""
 from __future__ import annotations
 
 import os
@@ -10,8 +10,6 @@ from uuid import uuid4
 import psycopg2
 import pytest
 from psycopg2 import sql
-
-from app.db.schema_guard import _check_payroll_trust
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -88,7 +86,28 @@ def test_0076_refuses_dirty_state_then_upgrades_clean_and_downgrades_safely(p3a_
             assert cur.fetchone()[0] >= 160
             cur.execute("SELECT minorunitdigits FROM core.supportedcurrencies WHERE currencycode='CLF'")
             assert cur.fetchone() == (4,)
-            assert _check_payroll_trust(cur) == []
+            # Validate this historical revision's currency authority at 0076.
+            cur.execute("SELECT version_num FROM alembic_version")
+            assert cur.fetchone() == ("0076",)
+            cur.execute("""
+                SELECT conrelid::regclass::text, convalidated
+                FROM pg_constraint
+                WHERE contype = 'f' AND confrelid = 'core.supportedcurrencies'::regclass
+                ORDER BY conrelid::regclass::text
+            """)
+            assert cur.fetchall() == [
+                ("core.companies", True),
+                ("payroll.payrollcalculationsnapshotbonusevents", True),
+                ("payroll.payrollcalculationsnapshots", True),
+                ("payroll.payrollcalculationsnapshotusedratedefinitions", True),
+                ("payroll.payrollfinallines", True),
+            ]
+            cur.execute("""
+                SELECT tgenabled, tgfoid::regproc::text FROM pg_trigger
+                WHERE tgrelid = 'core.companies'::regclass
+                  AND tgname = 'trg_companies_currencychange' AND NOT tgisinternal
+            """)
+            assert cur.fetchone() == ("O", "core.fn_guard_company_currency_change")
             cur.execute("UPDATE core.companies SET currencycode='USD' WHERE companyid=%s", (company_id,))
         conn.commit()
     protected = _alembic(env, "downgrade", "0075")

@@ -1020,7 +1020,7 @@ class TestPermissionsListFiltering:
         assert resp.status_code == 200
         codes = {p["permission_code"] for p in resp.json()}
         # At least one truly-legacy code (not in default list) should appear
-        assert any(c in codes for c in ("setup.manage", "drivers.manage")), (
+        assert any(c in codes for c in ("setup.manage",)), (
             "Expected at least one legacy code with ui_only=false"
         )
 

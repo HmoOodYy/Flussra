@@ -204,7 +204,7 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT version_num FROM public.alembic_version")
-            assert cur.fetchone()[0] == "0092"
+            assert cur.fetchone()[0] == "0093"
             cur.execute("""
                 SELECT pg_get_constraintdef(oid)
                 FROM pg_constraint
@@ -235,9 +235,9 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
                 trigger_body = cur.fetchone()[0].lower()
                 assert "sec.roles" not in trigger_body
                 assert "ubr.roleid" not in trigger_body
-            # P8a removes runtime authority, while P8b owns physical catalog deletion.
+            # P8b removes the obsolete physical global-role authority.
             cur.execute("SELECT to_regclass('sec.roles') IS NOT NULL")
-            assert cur.fetchone()[0] is True
+            assert cur.fetchone()[0] is False
             cur.execute("""
                 SELECT EXISTS (
                     SELECT 1 FROM information_schema.columns
@@ -245,7 +245,7 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
                       AND column_name='roleid'
                 )
             """)
-            assert cur.fetchone()[0] is True
+            assert cur.fetchone()[0] is False
     finally:
         conn.close()
 
@@ -439,7 +439,7 @@ def test_0092_ignores_roleid_only_grants_and_keeps_catalog_for_p8b(access_migrat
     finally:
         conn.close()
 
-    _upgrade(config, "head")
+    _upgrade(config, "0092")
     conn = _db(dsn)
     try:
         with conn.cursor() as cur:

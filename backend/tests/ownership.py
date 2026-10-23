@@ -5,11 +5,33 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text as _text
 
 from tests.db_state import (
-    COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS,
     DRIVER_ASSIGNMENT_HISTORY_TRIGGER,
     FINALIZED_HISTORY_TRIGGERS,
     suspended_test_triggers,
 )
+
+
+async def _audit_snapshot(db, entities: list[tuple[str, list[str]]]) -> list[dict]:
+    """Capture exact append-only AuditLog rows for test-owned entity identities."""
+    predicates = []
+    params = {}
+    for index, (entity_name, entity_ids) in enumerate(entities):
+        predicates.append(f"(entityname = :name_{index} AND entityid = ANY(:ids_{index}))")
+        params[f"name_{index}"] = entity_name
+        params[f"ids_{index}"] = entity_ids or [""]
+    if not predicates:
+        return []
+    result = await db.execute(_text(
+        "SELECT to_jsonb(a) AS event FROM audit.auditlog a WHERE "
+        + " OR ".join(predicates) + " ORDER BY auditid"
+    ), params)
+    return [row["event"] for row in result.mappings().all()]
+
+
+async def _assert_audit_snapshot(db, entities: list[tuple[str, list[str]]], before: list[dict], label: str) -> None:
+    # Compare the exact entity identities selected before domain cleanup.
+    after = await _audit_snapshot(db, entities)
+    assert after == before, f"Append-only AuditLog rows changed during {label}"
 
 
 class CleanupRunner:
@@ -136,8 +158,9 @@ async def retire_branch_periods_directly(
          (payroll / PayrollPeriods / <period id>) is one of those periods;
       3. cancel exactly those periods, clearing CurrentReturnReviewItemID (the
          pointer-consistency CHECK and the item FK both require it first);
-      4. delete exactly those items with their Decisions and audit rows, and verify
-         zero review residue for those IDs (``delete_review_items_and_children``).
+      4. delete exactly those items with their Decisions and verify domain residue;
+         ``delete_review_items_and_children`` proves their exact append-only AuditLog
+         snapshots are unchanged.
          Items that immutable P6D evidence references (workflow-action or audit-
          evidence rows RESTRICT their deletion) are retained history by product
          rule; for exactly those, a Pending item is cancelled instead of deleted so
@@ -219,11 +242,9 @@ async def delete_period_and_children(db, period_id: int) -> None:
     `add_draft_line`/bonus-event creation each write a
     real AuditLog row (`_write_line_audit`, entity_name='PayrollDraftLines'
     or 'PayrollBonusEvents') immediately after insert -- this captures the
-    exact DraftLineIDs/BonusEventIDs for this period BEFORE the rows
-    themselves are deleted, deletes their matching audit rows by exact
-    EntityID (never a broad company/branch/time-window delete), then
-    asserts zero residue for every row and audit type this period could
-    have produced.
+    exact DraftLineIDs/BonusEventIDs for this period before the rows are
+    deleted. It snapshots the associated append-only AuditLog events and
+    verifies the exact rows remain unchanged after domain cleanup.
     """
     has_p6d_evidence = (await db.execute(
         _text("""
@@ -262,16 +283,13 @@ async def delete_period_and_children(db, period_id: int) -> None:
     draft_line_id_strs = [str(i) for i in draft_line_ids] or [""]
     bonus_event_id_strs = [str(i) for i in bonus_event_ids] or [""]
 
+    audit_entities = [
+        ("PayrollPeriods", [str(period_id)]),
+        ("PayrollDraftLines", draft_line_id_strs),
+        ("PayrollBonusEvents", bonus_event_id_strs),
+    ]
+    audit_before = await _audit_snapshot(db, audit_entities)
     runner = CleanupRunner()
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollPeriods' AND entityid = :eid",
-        {"eid": str(period_id)}, label="delete PayrollPeriods audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:ids)",
-        {"ids": draft_line_id_strs}, label="delete PayrollDraftLines audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollBonusEvents' AND entityid = ANY(:ids)",
-        {"ids": bonus_event_id_strs}, label="delete PayrollBonusEvents audit")
     await runner.execute(db,
         "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE payrollperiodid = :pid",
         {"pid": period_id}, label="delete PPDES rows")
@@ -310,10 +328,10 @@ async def delete_period_and_children(db, period_id: int) -> None:
         assert (
             residue["periods"] == 0 and residue["draftlines"] == 0 and residue["finallines"] == 0
             and residue["bonusevents"] == 0 and residue["ppdes"] == 0
-            and residue["period_audit"] == 0 and residue["draftline_audit"] == 0 and residue["bonus_audit"] == 0
         ), f"Residue check failed for period {period_id}: {dict(residue)}"
 
     await runner.check(_residue, label=f"period {period_id} residue assertion")
+    await _assert_audit_snapshot(db, audit_entities, audit_before, f"period {period_id} cleanup")
     runner.raise_if_any()
 
 
@@ -322,7 +340,7 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
     Hard-deletes exactly the test-owned permanent Driver (and its Employee) together with
     every DriverAssignment of that Driver and every dependent row scoped to those exact
     DriverAssignmentIDs, then verifies every exact Driver, Employee, assignment,
-    dependent-row, and related audit residue query.
+    dependent-row residue, while verifying its append-only AuditLog rows remain unchanged.
 
     ``driver_id`` is the permanent DriverID. Deleting an effective DriverAssignment is
     refused by its history trigger, so exactly that trigger is suspended through the
@@ -372,49 +390,23 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
     pay_rule_id_strs = [str(i) for i in pay_rule_ids] or [""]
     transfer_id_strs = [str(i) for i in transfer_ids] or [""]
 
+    audit_entities = [
+        ("PayrollDraftLines", draft_line_id_strs), ("PayrollBonusEvents", bonus_event_id_strs),
+        ("DriverPayRules", pay_rule_id_strs), ("DriverTransferRequests", transfer_id_strs),
+        ("Drivers", [str(driver_id)]), ("Employees", [str(employee_id)] if employee_id is not None else []),
+    ]
+    audit_before = await _audit_snapshot(db, audit_entities)
     runner = CleanupRunner()
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:ids)",
-        {"ids": draft_line_id_strs}, label="delete driver-scoped PayrollDraftLines audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'PayrollBonusEvents' AND entityid = ANY(:ids)",
-        {"ids": bonus_event_id_strs}, label="delete driver-scoped PayrollBonusEvents audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'DriverPayRules' AND entityid = ANY(:ids)",
-        {"ids": pay_rule_id_strs}, label="delete driver-scoped DriverPayRules audit")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'DriverTransferRequests' AND entityid = ANY(:ids)",
-        {"ids": transfer_id_strs}, label="delete driver-scoped DriverTransferRequests audit")
     await runner.execute(db, "DELETE FROM payroll.payrollfinallines WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete FinalLines")
     await runner.execute(db, "DELETE FROM payroll.payrolldraftlines WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DraftLines")
     await runner.execute(db, "DELETE FROM payroll.payrollbonusevents WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete BonusEvents")
     await runner.execute(db, "DELETE FROM payroll.payrollperioddriverdayentrystate WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete PPDES")
     await runner.execute(db, "DELETE FROM payroll.payrollperioddrivereligibility WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete PPDE")
-    # Compensation of an ended assignment is read-only at the database; only a driver that
-    # owns such an assignment needs the exact compensation guards suspended to be retired.
-    has_ended_assignment = bool(assignment_ids) and (await db.execute(
-        _text("""
-            SELECT EXISTS (
-                SELECT 1 FROM core.driverassignments
-                WHERE driverassignmentid = ANY(:ids)
-                  AND effectivetoat IS NOT NULL AND effectivetoat <= clock_timestamp()
-            )
-        """), {"ids": assignment_ids},
-    )).scalar_one()
-
     async def _delete_compensation() -> None:
-        await runner.execute(db, "DELETE FROM payroll.driverrates WHERE driverassignmentid = ANY(:ids)", {"ids": assignment_ids}, label="delete DriverRates")
         # Pay rules belong to the permanent Driver, not to an assignment.
         await runner.execute(db, "DELETE FROM payroll.driverpayrules WHERE driverid = :id", {"id": driver_id}, label="delete DriverPayRules")
-    if has_ended_assignment:
-        async with suspended_test_triggers(db, COMPENSATION_ASSIGNMENT_WRITABLE_TRIGGERS):
-            await _delete_compensation()
-    else:
-        await _delete_compensation()
+    await _delete_compensation()
     await runner.execute(db, "DELETE FROM core.drivertransferrequests WHERE driverid = :id", {"id": driver_id}, label="delete TransferRequests")
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'Drivers' AND entityid = :eid", {"eid": str(driver_id)},
-        label="delete Drivers audit")
     try:
         async with suspended_test_triggers(db, (DRIVER_ASSIGNMENT_HISTORY_TRIGGER,)):
             await db.execute(
@@ -425,9 +417,6 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
         runner._errors.append(exc)
     await runner.execute(db, "DELETE FROM core.drivers WHERE driverid = :id", {"id": driver_id}, label="delete Driver row")
     if employee_id is not None:
-        await runner.execute(db,
-            "DELETE FROM audit.auditlog WHERE entityname = 'Employees' AND entityid = :eid", {"eid": str(employee_id)},
-            label="delete Employees audit")
         await runner.execute(db, "DELETE FROM core.employees WHERE employeeid = :id", {"id": employee_id}, label="delete Employee row")
     async def _residue():
         residue = (await db.execute(
@@ -442,7 +431,6 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
                     (SELECT COUNT(*) FROM payroll.payrollbonusevents WHERE driverassignmentid = ANY(:aids)) AS bonuses,
                     (SELECT COUNT(*) FROM payroll.payrollperioddriverdayentrystate WHERE driverassignmentid = ANY(:aids)) AS day_state,
                     (SELECT COUNT(*) FROM payroll.payrollperioddrivereligibility WHERE driverassignmentid = ANY(:aids)) AS eligibility,
-                    (SELECT COUNT(*) FROM payroll.driverrates WHERE driverassignmentid = ANY(:aids)) AS rates,
                     (SELECT COUNT(*) FROM payroll.driverpayrules WHERE driverid = :did) AS pay_rules,
                     (SELECT COUNT(*) FROM audit.auditlog
                      WHERE entityname = 'PayrollDraftLines' AND entityid = ANY(:dlids)) AS draft_line_audit,
@@ -464,29 +452,28 @@ async def delete_driver_and_residue(db, driver_id: int, employee_id: int | None)
                 "eid_text": str(employee_id) if employee_id is not None else "",
             },
         )).mappings().one()
-        assert all(value == 0 for value in residue.values()), (
+        assert all(value == 0 for key, value in residue.items() if not key.endswith("_audit")), (
             f"Owned Driver cleanup left residue for {driver_id}: {dict(residue)}"
         )
 
     await runner.check(_residue, label=f"driver {driver_id} residue assertion")
+    await _assert_audit_snapshot(db, audit_entities, audit_before, f"driver {driver_id} cleanup")
     runner.raise_if_any()
 
 
 
 async def delete_review_items_and_children(db, item_ids: list[int]) -> None:
-    """Delete exactly the given ad-hoc ManagerReviewItems with their Decisions and audit.
+    """Delete the given ad-hoc ManagerReviewItems and Decisions, retaining their audit.
 
     Review-domain writes record one audit entity ('ManagerReviewItems', EntityID =
-    the item id). Every statement is keyed by the exact IDs, and the residue
-    assertion covers every table and audit type those items could have produced.
+    the item id). Statements and the append-only AuditLog snapshot use exact IDs.
     """
     if not item_ids:
         return
     id_strs = [str(i) for i in item_ids]
+    audit_entities = [("ManagerReviewItems", id_strs)]
+    audit_before = await _audit_snapshot(db, audit_entities)
     runner = CleanupRunner()
-    await runner.execute(db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'ManagerReviewItems' AND entityid = ANY(:ids)",
-        {"ids": id_strs}, label="delete ManagerReviewItems audit")
     await runner.execute(db,
         "DELETE FROM review.managerreviewdecisions WHERE reviewitemid = ANY(:ids)",
         {"ids": item_ids}, label="delete ManagerReviewDecisions rows")
@@ -504,16 +491,17 @@ async def delete_review_items_and_children(db, item_ids: list[int]) -> None:
                      WHERE entityname = 'ManagerReviewItems' AND entityid = ANY(:id_strs)) AS item_audit
             """), {"ids": item_ids, "id_strs": id_strs},
         )).mappings().one()
-        assert all(value == 0 for value in residue.values()), (
+        assert all(value == 0 for key, value in residue.items() if not key.endswith("_audit")), (
             f"Owned review item cleanup left residue for {item_ids}: {dict(residue)}"
         )
 
     await runner.check(_residue, label=f"review items {item_ids} residue assertion")
+    await _assert_audit_snapshot(db, audit_entities, audit_before, f"review items {item_ids} cleanup")
     runner.raise_if_any()
 
 
 async def delete_user_access_state(db, user_id: int) -> None:
-    """Delete one provisioned test User and its exact Access rows and audit."""
+    """Delete one provisioned test User and exact Access rows, retaining audit history."""
     user = (await db.execute(
         _text("SELECT employeeid FROM sec.users WHERE userid = :uid"), {"uid": user_id},
     )).mappings().first()
@@ -527,13 +515,13 @@ async def delete_user_access_state(db, user_id: int) -> None:
         {"uid": user_id},
     )).all()]
     assignment_entity_ids = [str(value) for value in assignment_ids] or [""]
+    audit_entities = [
+        ("Users", [str(user_id)]), ("UserBranchRoles", assignment_entity_ids),
+        ("UserPermissionOverrides", [str(user_id)]),
+    ]
+    audit_before = await _audit_snapshot(db, audit_entities)
 
     runner = CleanupRunner()
-    await runner.execute(
-        db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'UserPermissionOverrides' AND entityid = :eid",
-        {"eid": str(user_id)}, label="delete exact UserPermissionOverrides audit",
-    )
     await runner.execute(
         db, "DELETE FROM sec.userpermissionoverrides WHERE userid = :uid", {"uid": user_id},
         label="delete exact UserPermissionOverrides rows",
@@ -541,15 +529,6 @@ async def delete_user_access_state(db, user_id: int) -> None:
     await runner.execute(
         db, "DELETE FROM sec.userbranchroles WHERE userid = :uid", {"uid": user_id},
         label="delete exact UserBranchRoles rows",
-    )
-    await runner.execute(
-        db,
-        "DELETE FROM audit.auditlog WHERE entityname = 'UserBranchRoles' AND entityid = ANY(:ids)",
-        {"ids": assignment_entity_ids}, label="delete exact UserBranchRoles audit",
-    )
-    await runner.execute(
-        db, "DELETE FROM audit.auditlog WHERE entityname = 'Users' AND entityid = :eid",
-        {"eid": str(user_id)}, label="delete exact Users audit",
     )
     await runner.execute(
         db, "DELETE FROM sec.users WHERE userid = :uid", {"uid": user_id},
@@ -574,9 +553,10 @@ async def delete_user_access_state(db, user_id: int) -> None:
                 "assignment_ids": assignment_entity_ids,
             },
         )).mappings().one()
-        assert all(value == 0 for value in residue.values()), (
+        assert all(value == 0 for key, value in residue.items() if not key.endswith("_audit")), (
             f"Owned User cleanup left residue for {user_id}: {dict(residue)}"
         )
 
     await runner.check(_residue, label=f"user {user_id} residue assertion")
+    await _assert_audit_snapshot(db, audit_entities, audit_before, f"user {user_id} cleanup")
     runner.raise_if_any()
