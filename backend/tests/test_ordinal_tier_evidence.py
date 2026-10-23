@@ -467,9 +467,7 @@ async def test_finalized_tier_payroll_is_the_frozen_snapshot_whatever_changes_af
     await finalize(p3c_client, tenant, period)
 
     pid = period["payroll_period_id"]
-    ledger = (await p3c_client.get(f"/payroll/periods/{pid}/final-lines", headers=tenant.admin)).json()
-    assert [(line["component_label"], D(line["final_amount"])) for line in ledger] == [
-        ("Tiered definition", D("17.00"))]
+    assert (await p3c_client.get(f"/payroll/periods/{pid}/final-lines", headers=tenant.admin)).status_code == 404
     assert rows(tenant, "SELECT sum(finalamount) FROM payroll.payrollfinallines "
                         "WHERE payrollperiodid = %s", pid) == [(D("17.00"),)]
     content = await _verify(p3c_engine, snapshot_id)
@@ -506,7 +504,7 @@ async def test_submission_finalization_and_the_frozen_readers_never_resolve_comp
     await finalization_preview(p3c_client, tenant, period)
     await finalize(p3c_client, tenant, period)
     pid = period["payroll_period_id"]
-    for path in (f"/payroll/periods/{pid}/final-lines", f"/payroll/finalized/{pid}/overview",
+    for path in (f"/payroll/finalized/{pid}/overview",
                  f"/payroll/finalized/{pid}/rates-used", f"/payroll/finalized/{pid}/reports/drivers",
                  f"/payroll/periods/{pid}/reports/period-pay"):
         response = await p3c_client.get(path, headers=tenant.admin)

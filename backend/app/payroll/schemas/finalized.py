@@ -20,46 +20,6 @@ from .reporting import (
 
 
 # ---------------------------------------------------------------------------
-# Final line schemas (Milestone 5 — finalization / ledger)
-# ---------------------------------------------------------------------------
-
-class FinalLineSummary(BaseModel):
-    """One locked payroll line as written to PayrollFinalLines: the projection of one official
-    component of the approved calculation snapshot. ``component_kind`` (with the component
-    identity) is the classification; ``line_type`` is the ledger display vocabulary only.
-    Per-day detail stays readable from the immutable snapshot lines."""
-    __module__ = "app.payroll.schemas"
-    final_line_id: int
-    currency_code: str
-    currency_minor_unit_digits: int
-    period_id: int
-    branch_id: int
-    driver_assignment_id: int
-    driver_id: int
-    employee_id: int
-    driver_number: str | None = None
-    driver_name: str
-    line_type: str
-    line_scope: str = "Period"
-    component_kind: str
-    component_label: str | None = None
-    payroll_calculation_snapshot_id: int
-    payroll_calculation_snapshot_component_id: int
-    payroll_period_definition_id: int | None = None
-    pay_definition_id: int | None = None
-    final_amount: Decimal
-    source_type: str
-    approved_by_user_id: int | None = None
-    approved_at_utc: datetime
-    locked_at_utc: datetime | None = None
-    notes: str | None = None
-    # The frozen provenance of the line: snapshot id, revision, hash, component identity and
-    # contributing source ids.
-    source_snapshot: dict | None = None
-
-
-
-# ---------------------------------------------------------------------------
 # P6A: Finalized Payroll Information Library. These contracts are read-only
 # projections over FinalLines plus the exact originating immutable snapshot.
 # ---------------------------------------------------------------------------

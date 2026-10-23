@@ -239,7 +239,7 @@ def test_0090_replaces_the_branch_default_columns_with_one_default_per_company(p
     result = _alembic(env, "upgrade", "head")
     assert result.returncode == 0, result.stderr
 
-    assert _version(dsn) == "0091"
+    assert _version(dsn) == "0092"
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         for world in (first, second):
             cursor.execute("""
@@ -262,7 +262,7 @@ def test_0090_is_irreversible(head_database):
 
 def test_fresh_upgrade_reaches_the_company_status_catalog_shape(head_database):
     _, dsn = head_database
-    assert _version(dsn) == "0091"
+    assert _version(dsn) == "0092"
     assert {"payrollstatuskeyaliases", "payrollstatuskeybranchlimits"} <= _tables(dsn)
     assert {"companyid", "normalizedkeyname", "allowancecategory"} <= _columns(dsn, "payrollstatuskeys")
     assert {"branchid", "limitusesperperiodenabled", "limitusesperperiod", "limitusesperdriver",

@@ -270,12 +270,10 @@ async def test_the_allowance_category_is_a_label_and_never_changes_the_amount(
     assert D(str(driver["status_pay"])) == D("400.00")
 
 
-async def test_a_status_with_a_rate_column_pays_from_the_selection_whatever_the_legacy_duplicate_says(
+async def test_a_status_with_a_rate_column_pays_from_canonical_entry_state(
     p3c_client, p3c_engine, tenant,
 ):
-    """Pay, the preview blockers and the frozen Status evidence read only the canonical
-    selection: the legacy DailyStatus duplicate row can be rewritten or voided without any
-    effect."""
+    """Status pay, blockers and frozen evidence use canonical EntryState only."""
     from tests.calculation_snapshot_helpers import capture
 
     _paid_status(tenant)
@@ -287,20 +285,12 @@ async def test_a_status_with_a_rate_column_pays_from_the_selection_whatever_the_
     assert query(tenant, """
         SELECT count(*) FROM payroll.payrolldraftlines
         WHERE payrollperiodid = %s AND linetype = 'DailyStatus' AND status <> 'Void'
-    """, (period_id,)) == [(1,)]
+    """, (period_id,)) == [(0,)]
 
     before = await _preview(p3c_client, tenant, period)
     frozen_before = await capture(p3c_engine, tenant, period)
 
-    query(tenant, """
-        UPDATE payroll.payrolldraftlines SET notes = 'OTHER LEAVE'
-        WHERE payrollperiodid = %s AND linetype = 'DailyStatus'
-    """, (period_id,))
     rewritten = await _preview(p3c_client, tenant, period)
-    query(tenant, """
-        UPDATE payroll.payrolldraftlines SET status = 'Void'
-        WHERE payrollperiodid = %s AND linetype = 'DailyStatus'
-    """, (period_id,))
     voided = await _preview(p3c_client, tenant, period)
     frozen_after = await capture(p3c_engine, tenant, period)
 

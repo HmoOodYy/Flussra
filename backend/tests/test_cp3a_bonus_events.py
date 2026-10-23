@@ -661,17 +661,12 @@ async def test_create_bonus_wrong_branch_driver_rejects(
 
     # Create a driver on the other branch.
     driver_number = f"CP3A-WRONGBRANCH-{uuid.uuid4().hex[:6]}"
-    resp = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id":   other_branch_id,
-            "full_name":   "CP3A Wrong Branch Driver",
-            "driver_number": driver_number,
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    wrong_branch_driver = await create_workforce_driver(
+        session_client, auth_token, other_branch_id,
+        "CP3A Wrong Branch Driver", driver_number,
     )
-    assert resp.status_code == 201, resp.text
-    wrong_branch_driver_assignment_id = resp.json()["driver_assignment_id"]
+    wrong_branch_driver_assignment_id = wrong_branch_driver["driver_assignment_id"]
 
     start, end = _week()
     period_id = await _insert_period_db(db_conn, cp3a_branch_id, start, end)
@@ -699,17 +694,12 @@ async def test_create_bonus_ineligible_driver_rejects(
     """POST /bonuses rejects a driver that is not eligible for the period."""
     # Create a driver then immediately terminate (making them ineligible).
     driver_number = f"CP3A-INELIGIBLE-{uuid.uuid4().hex[:6]}"
-    resp = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id":   cp3a_branch_id,
-            "full_name":   "CP3A Ineligible Driver",
-            "driver_number": driver_number,
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    ineligible_driver = await create_workforce_driver(
+        session_client, auth_token, cp3a_branch_id,
+        "CP3A Ineligible Driver", driver_number,
     )
-    assert resp.status_code == 201, resp.text
-    ineligible_driver_assignment_id = resp.json()["driver_assignment_id"]
+    ineligible_driver_assignment_id = ineligible_driver["driver_assignment_id"]
 
     # Terminate the driver's employment so they are not eligible in 2096.
     await db_conn.execute(

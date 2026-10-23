@@ -1,23 +1,8 @@
-"""Shared Workforce state builders for HTTP integration tests.
+"""Target Workforce setup helpers for tests that need a permanent Driver."""
 
-A Driver is the permanent identity; a DriverAssignment is one home-Branch tenure.
-Builders therefore never return a bare "driver id" ambiguously: they return either
-the full Employee detail, a ``DriverIds`` bundle, or an explicitly named id.
-"""
-
-from dataclasses import dataclass
+from uuid import uuid4
 
 import httpx
-
-
-@dataclass(frozen=True)
-class DriverIds:
-    """The identities one created Driver Employee carries."""
-
-    employee_id: int
-    driver_id: int
-    driver_assignment_id: int
-    branch_id: int
 
 
 async def create_driver_employee_record(
@@ -33,84 +18,67 @@ async def create_driver_employee_record(
     email: str | None = None,
     effective_from_at: str | None = None,
 ) -> dict:
-    """Create an Employee, its permanent Driver and first assignment through Workforce."""
-    driver_payload: dict = {"driver_number": driver_number, "cdl_number": cdl_number}
-    if effective_from_at is not None:
-        driver_payload["effective_from_at"] = effective_from_at
-    payload = {
-        "branch_id": branch_id,
-        "full_name": full_name,
-        "driver": driver_payload,
-    }
+    """Create an Employee, permanent Driver and first assignment via Workforce."""
+    body = {"branch_id": branch_id, "full_name": full_name, "driver": {
+        "driver_number": driver_number, "cdl_number": cdl_number,
+    }}
     if hire_date is not None:
-        payload["hire_date"] = hire_date
+        body["hire_date"] = hire_date
     if preferred_name is not None:
-        payload["preferred_name"] = preferred_name
+        body["preferred_name"] = preferred_name
     if email is not None:
-        payload["email"] = email
-
+        body["email"] = email
+    if effective_from_at is not None:
+        body["driver"]["effective_from_at"] = effective_from_at
     response = await client.post(
-        "/workforce/employees",
-        json=payload,
+        "/workforce/employees", json=body,
         headers={"Authorization": f"Bearer {token}"},
     )
-    response.raise_for_status()
+    if response.status_code != 201:
+        raise AssertionError(f"Workforce Driver setup failed: {response.text}")
     return response.json()
 
 
-def driver_ids_from_employee(employee: dict) -> DriverIds:
-    """Extract the identities from an Employee detail that has a Driver and an assignment."""
-    assignment = employee["current_or_pending_assignment"]
-    return DriverIds(
-        employee_id=employee["employee_id"],
-        driver_id=employee["driver"]["driver_id"],
-        driver_assignment_id=assignment["driver_assignment_id"],
-        branch_id=assignment["branch_id"],
-    )
-
-
-async def create_driver_ids(
+async def create_workforce_driver(
     client: httpx.AsyncClient,
     token: str,
-    *,
     branch_id: int,
     full_name: str,
     driver_number: str,
-    hire_date: str | None = None,
-    preferred_name: str | None = None,
-    cdl_number: str | None = None,
-    email: str | None = None,
-    effective_from_at: str | None = None,
-) -> DriverIds:
-    """Create an Employee with a Driver and return every identity it carries."""
-    employee = await create_driver_employee_record(
-        client, token, branch_id=branch_id, full_name=full_name,
-        driver_number=driver_number, hire_date=hire_date,
-        preferred_name=preferred_name, cdl_number=cdl_number, email=email,
-        effective_from_at=effective_from_at,
-    )
-    return driver_ids_from_employee(employee)
-
-
-async def create_driver_assignment_id(
-    client: httpx.AsyncClient,
-    token: str,
     *,
-    branch_id: int,
-    full_name: str,
-    driver_number: str,
-    hire_date: str | None = None,
     preferred_name: str | None = None,
     cdl_number: str | None = None,
     email: str | None = None,
-) -> int:
-    """Create an Employee with a Driver and return its first DriverAssignmentID.
-
-    Payroll provenance (draft lines, entries, rates) is keyed by DriverAssignmentID.
-    """
-    ids = await create_driver_ids(
-        client, token, branch_id=branch_id, full_name=full_name,
-        driver_number=driver_number, hire_date=hire_date,
-        preferred_name=preferred_name, cdl_number=cdl_number, email=email,
+    hire_date: str = "2020-01-01",
+    effective_from_at: str = "2020-01-01T00:00:00Z",
+) -> dict:
+    """Create an Employee and its first DriverAssignment through Workforce."""
+    marker = uuid4().hex[:12]
+    response = await client.post(
+        "/workforce/employees",
+        json={
+            "branch_id": branch_id,
+            "full_name": full_name,
+            "preferred_name": preferred_name,
+            "employee_key": f"TEST-{marker}",
+            "email": email,
+            "hire_date": hire_date,
+            "driver": {
+                "driver_number": driver_number,
+                "cdl_number": cdl_number,
+                "effective_from_at": effective_from_at,
+            },
+        },
+        headers={"Authorization": f"Bearer {token}"},
     )
-    return ids.driver_assignment_id
+    assert response.status_code == 201, f"Workforce Driver setup failed: {response.text}"
+    body = response.json()
+    driver = body["driver"]
+    assignment = body["current_or_pending_assignment"]
+    return {
+        "employee_id": body["employee_id"],
+        "driver_id": driver["driver_id"],
+        "driver_assignment_id": assignment["driver_assignment_id"],
+        "full_name": body["full_name"],
+        "driver_number": driver["driver_number"],
+    }

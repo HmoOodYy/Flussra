@@ -22,6 +22,7 @@ locate their period's pending item through it. Every item this module creates
 (through either HTTP client) is therefore recorded by exact ID and deleted, with
 its Decisions and audit rows, when the test ends; a failed delete fails the test.
 """
+import uuid
 from unittest.mock import patch
 
 import httpx
@@ -933,12 +934,32 @@ class TestSelfApprovalPolicy:
                 headers=self._auth(auth_token),
             )
             assert company_roles.status_code == 200
-            base_role = next(
+            assert next(
                 role for role in company_roles.json()
                 if role["role_code"] == "PAYROLL_VIEWER_CO"
             )
 
-            # Create a second PAYROLL_ADMIN user via the admin API.
+            reviewer_role = await session_client.post(
+                "/admin/company-roles",
+                json={
+                    "role_code": f"REVIEWER_{uuid.uuid4().hex[:8]}",
+                    "role_name": "Review approver",
+                    "role_level": 20,
+                    "is_default": False,
+                    "is_protected": False,
+                },
+                headers=self._auth(auth_token),
+            )
+            assert reviewer_role.status_code == 201, reviewer_role.text
+            role_id = reviewer_role.json()["company_role_id"]
+            permissions = await session_client.put(
+                f"/admin/company-roles/{role_id}/permissions",
+                json={"permission_codes": ["review.decide"]},
+                headers=self._auth(auth_token),
+            )
+            assert permissions.status_code == 200, permissions.text
+
+            # Create a second user with CompanyRole review authority.
             create_resp = await session_client.post(
                 "/admin/users",
                 json={
@@ -947,7 +968,7 @@ class TestSelfApprovalPolicy:
                     "password":    "TestPass123!",
                     "can_login":   True,
                     "role_assignment": {
-                        "company_role_id": base_role["company_role_id"],
+                        "company_role_id": role_id,
                         "scope_type": "AllCompanyBranches",
                     },
                 },
@@ -956,29 +977,6 @@ class TestSelfApprovalPolicy:
             assert create_resp.status_code == 201, (
                 f"Failed to create reviewer2: {create_resp.text}"
             )
-            reviewer2_id = create_resp.json()["user_id"]
-
-            # Assign PAYROLL_ADMIN role (AllCompanyBranches) to reviewer2.
-            roles_resp = await session_client.get(
-                "/admin/roles",
-                headers=self._auth(auth_token),
-            )
-            assert roles_resp.status_code == 200
-            admin_role = next(
-                r for r in roles_resp.json() if r["role_code"] == "PAYROLL_ADMIN"
-            )
-            assign_resp = await session_client.post(
-                f"/admin/users/{reviewer2_id}/roles",
-                json={
-                    "role_id":    admin_role["role_id"],
-                    "scope_type": "AllCompanyBranches",
-                },
-                headers=self._auth(auth_token),
-            )
-            assert assign_resp.status_code == 201, (
-                f"Failed to assign role to reviewer2: {assign_resp.text}"
-            )
-
             # Log in as reviewer2.
             login_resp = await session_client.post("/auth/login", json={
                 "username":     "reviewer2",

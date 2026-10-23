@@ -437,11 +437,22 @@ async def _owned_driver(session_client, auth_token, branch_id, direct_db, *, nam
     employee_id = None
     try:
         r = await session_client.post(
-            "/core/drivers", json={"branch_id": branch_id, "full_name": name}, headers=auth(auth_token),
+            "/workforce/employees",
+            json={
+                "branch_id": branch_id,
+                "full_name": name,
+                "employee_key": f"CP4A-{uuid.uuid4().hex[:10]}",
+                "hire_date": "2020-01-01",
+                "driver": {
+                    "driver_number": f"CP4A-{uuid.uuid4().hex[:10]}",
+                    "effective_from_at": "2020-01-01T00:00:00Z",
+                },
+            },
+            headers=auth(auth_token),
         )
         assert r.status_code == 201, f"Create driver failed: {r.text}"
         body = r.json()
-        driver_assignment_id = body["driver_assignment_id"]
+        driver_assignment_id = body["current_or_pending_assignment"]["driver_assignment_id"]
         employee_id = body["employee_id"]
         yield driver_assignment_id
     finally:

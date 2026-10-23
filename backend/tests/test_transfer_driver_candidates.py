@@ -68,7 +68,7 @@ def transfer_editor_tenant(p3b_dsn) -> Tenant:
 
 async def test_a_transfer_editor_without_drivers_view_gets_current_drivers(p3c_client, editor):
     tenant = editor
-    denied = await p3c_client.get("/core/drivers", headers=tenant.admin)
+    denied = await p3c_client.get("/workforce/employees", headers=tenant.admin)
     assert denied.status_code == 403
 
     response = await p3c_client.get(CANDIDATES, headers=tenant.admin)

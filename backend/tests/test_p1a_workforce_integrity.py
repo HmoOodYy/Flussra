@@ -366,17 +366,17 @@ async def test_current_assignment_uses_database_instant_not_branch_calendar_date
 
 
 @pytest.mark.asyncio
-async def test_core_driver_patch_is_driver_owned_and_rejects_workforce_fields(
+async def test_workforce_driver_patch_is_driver_owned_and_rejects_employee_fields(
     client, auth_token, created_driver_id, direct_db
 ):
     headers = {"Authorization": f"Bearer {auth_token}"}
     ordinary = await client.patch(
-        f"/core/drivers/{created_driver_id}",
+        f"/workforce/drivers/{created_driver_id}",
         json={"cdl_number": "P1A-LEGACY-EDIT"},
         headers=headers,
     )
     assert ordinary.status_code == 200
-    assert ordinary.json()["cdl_number"] == "P1A-LEGACY-EDIT"
+    assert ordinary.json()["driver"]["cdl_number"] == "P1A-LEGACY-EDIT"
 
     for payload in (
         {"driver_status": "Transferred"},
@@ -388,6 +388,6 @@ async def test_core_driver_patch_is_driver_owned_and_rejects_workforce_fields(
         {"driver_code": "OLD-NAME"},
     ):
         response = await client.patch(
-            f"/core/drivers/{created_driver_id}", json=payload, headers=headers
+            f"/workforce/drivers/{created_driver_id}", json=payload, headers=headers
         )
         assert response.status_code == 422

@@ -1,10 +1,9 @@
 """What is payroll content for Submit and Resubmit, and the lifecycle of a Status-only period.
 
-The canonical day-entry selection is the Status authority; the legacy DailyStatus duplicate row is
-never a lifecycle prerequisite. A period whose only content is a canonical Status submits and
-resubmits whether or not the duplicate exists, a period with nothing in it is still refused, and
-a Status that exists only as a legacy duplicate (no canonical selection) stays refused by the
-canonicalization blocker. A note is never payroll content. A period whose Statuses are all
+The canonical day-entry selection is the Status authority. A period whose only content is a
+canonical Status submits and resubmits, a period with nothing in it is still refused, and a
+historical pseudo-line without a canonical selection is ignored as period content. A note is never
+payroll content. A period whose Statuses are all
 non-monetary has frozen Status evidence but no official component, and runs the whole lifecycle
 to Locked without a fabricated earning, a live calculation or any FinalLine.
 """
@@ -64,15 +63,15 @@ async def _status_only_period(client, engine, tenant) -> dict:
     return period
 
 
-async def _void_legacy_duplicate(engine, period) -> None:
-    """Remove the legacy DailyStatus duplicate the Day Grid wrote beside the selection."""
-    async with engine.begin() as conn:
-        async with replica_replication_role(conn):
-            result = await conn.execute(text("""
-                UPDATE payroll.payrolldraftlines SET status = 'Void'
-                WHERE payrollperiodid = :pid AND linetype = 'DailyStatus' AND status <> 'Void'
-            """), {"pid": period["payroll_period_id"]})
-            assert result.rowcount == 1
+async def _assert_no_status_pseudo_lines(engine, period) -> None:
+    """Day Grid writes canonical entry state without duplicating Status as a DraftLine."""
+    async with engine.connect() as conn:
+        count = await conn.scalar(text("""
+            SELECT count(*) FROM payroll.payrolldraftlines
+            WHERE payrollperiodid = :pid AND linetype IN ('DailyStatus', 'DailyNote')
+              AND status <> 'Void'
+        """), {"pid": period["payroll_period_id"]})
+    assert count == 0
 
 
 def _live_content(tenant, period) -> tuple[int, int]:
@@ -80,6 +79,7 @@ def _live_content(tenant, period) -> tuple[int, int]:
     ((lines,),) = rows(tenant, """
         SELECT count(*) FROM payroll.payrolldraftlines
         WHERE payrollperiodid = %s AND status <> 'Void'
+          AND payrollperioddefinitionid IS NOT NULL
     """, period["payroll_period_id"])
     ((selections,),) = rows(tenant, """
         SELECT count(*) FROM payroll.payrollperioddriverdayentrystate
@@ -100,7 +100,7 @@ async def test_a_status_only_period_submits_without_a_legacy_duplicate(
     p3c_client, p3c_engine, tenant,
 ):
     period = await _status_only_period(p3c_client, p3c_engine, tenant)
-    await _void_legacy_duplicate(p3c_engine, period)
+    await _assert_no_status_pseudo_lines(p3c_engine, period)
     assert _live_content(tenant, period) == (0, 1)       # no source line at all, one selection
     allow_self_approval(tenant)
 
@@ -118,7 +118,7 @@ async def test_a_status_only_period_resubmits_without_a_legacy_duplicate(
     p3c_client, p3c_engine, tenant,
 ):
     period = await _status_only_period(p3c_client, p3c_engine, tenant)
-    await _void_legacy_duplicate(p3c_engine, period)
+    await _assert_no_status_pseudo_lines(p3c_engine, period)
     allow_self_approval(tenant)
     await submit(p3c_client, tenant, period)
     await decide(p3c_client, tenant, await pending_review_item(tenant, period), "EditRequested")
@@ -161,11 +161,10 @@ async def test_a_period_whose_only_status_was_cleared_is_refused_at_resubmit(
     assert len(snapshot_ids(tenant, period)) == 1
 
 
-async def test_a_legacy_only_status_is_refused_by_the_canonicalization_blocker(
+async def test_a_historical_status_pseudo_line_is_not_payroll_content(
     p3c_client, p3c_engine, tenant,
 ):
-    """A DailyStatus row with no canonical selection is not valid Status data: it makes the
-    period non-empty but is refused by the intended blocker, not accepted as content."""
+    """Historical pseudo-lines do not count as a Status selection or ordinary quantity."""
     status_pay_setup(tenant, "25")
     period, _, _ = await open_period(p3c_client, p3c_engine, tenant)
     async with p3c_engine.begin() as conn:
@@ -179,12 +178,11 @@ async def test_a_legacy_only_status_is_refused_by_the_canonicalization_blocker(
             """), {"cid": tenant.company_id, "bid": tenant.branch_a,
                    "pid": period["payroll_period_id"], "did": tenant.driver_a,
                    "dt": date.fromisoformat(day(period, 0)), "uid": tenant.owner})
-    assert _live_content(tenant, period) == (1, 0)
+    assert _live_content(tenant, period) == (0, 0)
 
     response = await submit(p3c_client, tenant, period, expect=422)
 
-    assert "LEGACY_STATUS_NOT_CANONICAL" in response.text
-    assert "empty period" not in response.text
+    assert "empty period" in response.text
     assert period_status(tenant, period) == "Open"
     assert snapshot_ids(tenant, period) == []
 
@@ -203,7 +201,7 @@ async def _save_row(client, tenant, period, row, *, offset=0):
 
 
 def _note_rows(tenant, period) -> int:
-    """The compatibility DailyNote rows that hold the note beside the canonical entry."""
+    """No note pseudo-lines are stored in ordinary quantity rows."""
     return rows(tenant, """
         SELECT count(*) FROM payroll.payrolldraftlines
         WHERE payrollperiodid = %s AND linetype = 'DailyNote' AND status <> 'Void'
@@ -213,7 +211,11 @@ def _note_rows(tenant, period) -> int:
 async def test_a_period_holding_only_a_note_cannot_be_submitted(p3c_client, p3c_engine, tenant):
     period, _, _ = await open_period(p3c_client, p3c_engine, tenant)
     await _save_row(p3c_client, tenant, period, {"notes": "only a note"})
-    assert _note_rows(tenant, period) == 1          # the compatibility row exists and is non-void
+    assert _note_rows(tenant, period) == 0
+    assert rows(tenant, """
+        SELECT notetext FROM payroll.payrollperioddriverdayentrystate
+        WHERE payrollperiodid = %s AND NOT isvoided
+    """, period["payroll_period_id"]) == [("only a note",)]
 
     response = await submit(p3c_client, tenant, period, expect=422)
 
@@ -233,7 +235,7 @@ async def test_a_returned_period_whose_status_was_cleared_but_note_kept_cannot_b
     await decide(p3c_client, tenant, await pending_review_item(tenant, period), "EditRequested")
     await _save_row(p3c_client, tenant, period, {"status_key": "", "notes": "kept note"})
     assert _live_content(tenant, period)[1] == 0     # no Status selection is left
-    assert _note_rows(tenant, period) == 1           # the note is
+    assert _note_rows(tenant, period) == 0
 
     response = await _resubmit(p3c_client, tenant, period, expect=422)
 
@@ -260,7 +262,7 @@ async def test_a_note_beside_a_canonical_status_does_not_change_that_the_period_
     status_pay_setup(tenant, "25")
     period, _, _ = await open_period(p3c_client, p3c_engine, tenant)
     await _save_row(p3c_client, tenant, period, {"status_key": "PAID", "notes": "with a note"})
-    await _void_legacy_duplicate(p3c_engine, period)
+    await _assert_no_status_pseudo_lines(p3c_engine, period)
     allow_self_approval(tenant)
 
     await submit(p3c_client, tenant, period)
@@ -277,7 +279,7 @@ async def _approved_non_monetary_period(client, engine, tenant) -> tuple[dict, i
     seed_status_key(tenant, "UNPAID", off=True, hoursvalue=D("8"))
     period, _, _ = await open_period(client, engine, tenant)
     await enter(client, tenant, period, 0, status_key="UNPAID")
-    await _void_legacy_duplicate(engine, period)
+    await _assert_no_status_pseudo_lines(engine, period)
     allow_self_approval(tenant)
     await submit(client, tenant, period)
     await decide(client, tenant, await pending_review_item(tenant, period))
@@ -328,9 +330,8 @@ async def test_a_finalized_non_monetary_period_reads_coherently_from_its_approve
     pid = period["payroll_period_id"]
     await finalize(p3c_client, tenant, period)
 
-    ledger = await p3c_client.get(f"/payroll/periods/{pid}/final-lines", headers=tenant.admin)
-    assert ledger.status_code == 200, ledger.text
-    assert ledger.json() == []
+    raw_lines = await p3c_client.get(f"/payroll/periods/{pid}/final-lines", headers=tenant.admin)
+    assert raw_lines.status_code == 404
 
     overview = await p3c_client.get(f"/payroll/finalized/{pid}/overview", headers=tenant.admin)
     assert overview.status_code == 200, overview.text
@@ -375,10 +376,12 @@ async def test_a_finalized_period_without_final_lines_needs_a_snapshot_that_proj
             await conn.execute(text("DELETE FROM payroll.payrollfinallines "
                                     "WHERE payrollperiodid = :pid"), {"pid": pid})
 
-    ledger = await p3c_client.get(f"/payroll/periods/{pid}/final-lines", headers=tenant.admin)
-
-    assert ledger.status_code == 422, ledger.text
-    assert "FINAL_LINES_EMPTY" in ledger.text
+    overview = await p3c_client.get(f"/payroll/finalized/{pid}/overview", headers=tenant.admin)
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["financial_summary"]["total_pay"] is None
+    unavailable = overview.json()["section_availability"]["financials"]
+    assert unavailable["state"] == "UNAVAILABLE"
+    assert unavailable["reason_code"] == "FINAL_LINES_EMPTY"
 
 
 async def test_a_monetary_status_with_an_explicit_zero_rate_still_finalizes_with_its_component(

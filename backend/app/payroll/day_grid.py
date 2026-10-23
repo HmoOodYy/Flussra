@@ -9,8 +9,7 @@ Owns one REST resource end to end, GET and POST on
                        DayGridResponse. Strictly read-only.
   - save_day_grid      batch write orchestrator: validates the whole payload before
                        any DML (all-or-nothing), then acquires locks, drives source-line
-                       mutation, writes its own DailyStatus/DailyNote rows, upserts
-                       canonical entry state, and returns get_day_grid's refreshed
+                       upserts canonical entry state, and returns get_day_grid's refreshed
                        response.
   - _parse_quantity    save-payload quantity parser; raises 422 before any DB write so
                        the batch stays atomic.
@@ -21,9 +20,8 @@ definition's code and name are display metadata only: they never route a save, c
 a total or select a rate. Money shown here is derived live
 (app.payroll.live_source_calculation); no stored amount is read.
 
-The DailyStatus/DailyNote INSERT/UPDATE/void SQL inside save_day_grid is Day-Grid-owned
-write policy, deliberately NOT routed through app.payroll.draft_line_mutation. Only the
-ordinary pay-definition quantities go through add_draft_line/update_draft_line/
+Status selections and notes are stored only in PayrollPeriodDriverDayEntryState.
+Ordinary pay-definition quantities go through add_draft_line/update_draft_line/
 void_draft_line.
 
 Transaction ownership is above this module: app.dependencies.get_db opens
@@ -61,7 +59,6 @@ from app.payroll.eligibility import (
     require_period_eligibility_snapshot,
 )
 from app.payroll.financial_authority import frozen_source_lines, resolve_financial_authority
-from app.payroll.line_audit import _write_line_audit
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.mutation_lock import _lock_period_for_mutation
 from app.payroll.period_day_calendar import _validate_period_work_date, resolve_period_work_date
@@ -450,18 +447,7 @@ async def get_day_grid(
         for line in drv_lines:
             lt = line["linetype"]
 
-            if lt == "DailyStatus":
-                if ces_row is None and not _is_finalized_period:
-                    # Legacy fallback: status code stored in DraftLine notes.
-                    # Not used for Locked/Archived -- see Stage B3 Unit 8C-3
-                    # note above: legacy DraftLine Status must not be used to
-                    # fabricate historical meaning.
-                    status_key_code = line["notes"]
-                continue
-            if lt == "DailyNote":
-                if ces_row is None:
-                    # Legacy fallback: note text stored in DraftLine notes.
-                    notes_text = line["notes"]
+            if lt is not None:
                 continue
 
             ppd_id = line["payrollperioddefinitionid"]
@@ -495,13 +481,6 @@ async def get_day_grid(
                     )
                 if line_amount is not None:
                     gross_total += line_amount
-
-        # Legacy path: resolve label/is_off from status_key_map when no canonical row.
-        if not _is_finalized_period and ces_row is None and status_key_code:
-            sk_obj = status_key_map.get(status_key_code)
-            if sk_obj is not None:
-                sk_label = sk_obj.label
-                is_off = bool(sk_obj.is_off_reason)
 
         # For Locked/Archived, override whatever the
         # blocks above computed (they are guarded off above, but this stays
@@ -606,8 +585,7 @@ async def save_day_grid(
     """
     Batch-save a day grid.  For each row:
       - Upsert pay item lines (create / update / void-zero)
-      - Upsert DailyStatus line (status_key stored in Notes)
-      - Upsert DailyNote line  (notes text)
+      - Upsert canonical Status/note entry state
 
     All operations share the caller's transaction (no nested BEGIN).
     Returns the refreshed day-grid response.
@@ -664,7 +642,7 @@ async def save_day_grid(
                 detail=f"Driver {driver_assignment_id} is not eligible for this branch or work date.",
             )
 
-    # Each row: (save_row, driver_assignment_id, parsed_values, validated_status_key, key_row)
+    # Each row: (save_row, driver_assignment_id, parsed_values, key_row)
     parsed_rows: list[tuple] = []
 
     for save_row in data.rows:
@@ -740,10 +718,7 @@ async def save_day_grid(
                         company_id, save_row.status_key, db,
                         allow_deactivated=True, key_id=held_key_id,
                     )
-        # The legacy DailyStatus duplicate row carries the canonical technical code.
-        validated_status_key = key_row["statuscode"] if key_row is not None else None
-
-        parsed_rows.append((save_row, driver_assignment_id, parsed_values, validated_status_key, key_row))
+        parsed_rows.append((save_row, driver_assignment_id, parsed_values, key_row))
 
     # ── Phase 2: execute DB writes (all validations passed) ──────────────── #
     # Period source-mutation lock (also rechecks the Period is still editable).
@@ -765,7 +740,7 @@ async def save_day_grid(
     # committed before this save (and is seen) or waits and is then refused as in use. A Status
     # deactivated since it was resolved cannot be newly selected.
     await lock_selected_status_keys(
-        [(row["statuskeyid"], bool(row["isactive"])) for _, _, _, _, row in parsed_rows
+        [(row["statuskeyid"], bool(row["isactive"])) for _, _, _, row in parsed_rows
          if row is not None],
         company_id, db,
     )
@@ -782,7 +757,7 @@ async def save_day_grid(
                 status_is_off=bool(key_row["isoffreason"]) if key_row is not None else False,
                 quantities=parsed_values,
             )
-            for _, driver_assignment_id, parsed_values, _, key_row in parsed_rows
+            for _, driver_assignment_id, parsed_values, key_row in parsed_rows
         ],
         db=db,
     )
@@ -796,7 +771,7 @@ async def save_day_grid(
     all_batch_pairs: list[tuple] = [(r.driver_assignment_id, work_date) for r in data.rows]
     batch_by_key: dict[int, list[int]] = {}
     key_by_id: dict[int, dict] = {}
-    for _, drv_id, _, _, krow in parsed_rows:
+    for _, drv_id, _, krow in parsed_rows:
         if krow is not None:
             batch_by_key.setdefault(krow["statuskeyid"], []).append(drv_id)
             key_by_id[krow["statuskeyid"]] = krow
@@ -813,7 +788,7 @@ async def save_day_grid(
             db=db,
         )
 
-    for save_row, driver_assignment_id, parsed_values, validated_status_key, key_row in parsed_rows:
+    for save_row, driver_assignment_id, parsed_values, key_row in parsed_rows:
 
         # ── Ordinary pay lines, by period definition ─────────────────────── #
         # Two passes around the Status write keep every intermediate database state free of a
@@ -881,202 +856,7 @@ async def save_day_grid(
 
         await apply_quantities(clearing=True)
 
-        # ── DailyStatus upsert ────────────────────────────────────────────── #
-        # P1 #4: write audit via _write_line_audit for all DailyStatus mutations
-        status_val = validated_status_key  # None = clear
-        existing_status = await db.execute(
-            text("""
-                SELECT draftlineid FROM payroll.payrolldraftlines
-                WHERE  payrollperiodid = :pid
-                  AND  workdate        = :dt
-                  AND  driverassignmentid        = :did
-                  AND  linetype        = 'DailyStatus'
-                  AND  status         != 'Void'
-                LIMIT 1
-            """),
-            {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
-        )
-        es_row = existing_status.mappings().first()
-
-        if status_val:
-            if es_row:
-                # Update notes (status code stored in notes)
-                upd = await db.execute(
-                    text(
-                        "UPDATE payroll.payrolldraftlines SET notes = :n "
-                        "WHERE draftlineid = :lid "
-                        "  AND payrollperiodid = :period_id AND companyid = :company_id"
-                    ),
-                    {
-                        "n": status_val,
-                        "lid": es_row["draftlineid"],
-                        "period_id": period_id,
-                        "company_id": company_id,
-                    },
-                )
-                if upd.rowcount:
-                    await _write_line_audit(
-                        db,
-                        company_id=company_id,
-                        branch_id=branch_id,
-                        user_id=user_id,
-                        line_id=es_row["draftlineid"],
-                        action_code="DRAFT_LINE_UPDATED",
-                        new_value={"status_key": status_val},
-                    )
-            else:
-                # Insert new DailyStatus line
-                ins_result = await db.execute(
-                    text("""
-                        INSERT INTO payroll.payrolldraftlines
-                            (companyid, branchid, payrollperiodid, driverassignmentid,
-                             workdate, linetype, quantity,
-                             sourcetype, status, needsmanagerreview, notes, addedbyuserid)
-                        VALUES
-                            (:cid, :bid, :pid, :did,
-                             :dt, 'DailyStatus', 0,
-                             'Manual', 'Active', FALSE, :n, :uid)
-                        RETURNING draftlineid
-                    """),
-                    {
-                        "cid": company_id, "bid": branch_id, "pid": period_id,
-                        "did": driver_assignment_id, "dt": work_date,
-                        "n": status_val, "uid": user_id,
-                    },
-                )
-                new_lid = ins_result.scalar_one()
-                await _write_line_audit(
-                    db,
-                    company_id=company_id,
-                    branch_id=branch_id,
-                    user_id=user_id,
-                    line_id=new_lid,
-                    action_code="DRAFT_LINE_ADDED",
-                    new_value={"line_type": "DailyStatus", "status_key": status_val},
-                )
-        elif es_row:
-            # Clear status: void the line (with audit)
-            upd = await db.execute(
-                text(
-                    "UPDATE payroll.payrolldraftlines SET status = 'Void' "
-                    "WHERE draftlineid = :lid "
-                    "  AND payrollperiodid = :period_id AND companyid = :company_id"
-                ),
-                {
-                    "lid": es_row["draftlineid"],
-                    "period_id": period_id,
-                    "company_id": company_id,
-                },
-            )
-            if upd.rowcount:
-                await _write_line_audit(
-                    db,
-                    company_id=company_id,
-                    branch_id=branch_id,
-                    user_id=user_id,
-                    line_id=es_row["draftlineid"],
-                    action_code="DRAFT_LINE_VOIDED",
-                    old_value={"line_type": "DailyStatus"},
-                    new_value={"status": "Void"},
-                )
-
-        # ── DailyNote upsert ──────────────────────────────────────────────── #
-        # P1 #4: write audit via _write_line_audit for all DailyNote mutations
-        notes_val = save_row.notes  # may be None or ''
-        existing_note = await db.execute(
-            text("""
-                SELECT draftlineid FROM payroll.payrolldraftlines
-                WHERE  payrollperiodid = :pid
-                  AND  workdate        = :dt
-                  AND  driverassignmentid        = :did
-                  AND  linetype        = 'DailyNote'
-                  AND  status         != 'Void'
-                LIMIT 1
-            """),
-            {"pid": period_id, "dt": work_date, "did": driver_assignment_id},
-        )
-        en_row = existing_note.mappings().first()
-
-        if notes_val:
-            if en_row:
-                upd = await db.execute(
-                    text(
-                        "UPDATE payroll.payrolldraftlines SET notes = :n "
-                        "WHERE draftlineid = :lid "
-                        "  AND payrollperiodid = :period_id AND companyid = :company_id"
-                    ),
-                    {
-                        "n": notes_val,
-                        "lid": en_row["draftlineid"],
-                        "period_id": period_id,
-                        "company_id": company_id,
-                    },
-                )
-                if upd.rowcount:
-                    await _write_line_audit(
-                        db,
-                        company_id=company_id,
-                        branch_id=branch_id,
-                        user_id=user_id,
-                        line_id=en_row["draftlineid"],
-                        action_code="DRAFT_LINE_UPDATED",
-                        new_value={"notes": notes_val},
-                    )
-            else:
-                ins_result2 = await db.execute(
-                    text("""
-                        INSERT INTO payroll.payrolldraftlines
-                            (companyid, branchid, payrollperiodid, driverassignmentid,
-                             workdate, linetype, quantity,
-                             sourcetype, status, needsmanagerreview, notes, addedbyuserid)
-                        VALUES
-                            (:cid, :bid, :pid, :did,
-                             :dt, 'DailyNote', 0,
-                             'Manual', 'Active', FALSE, :n, :uid)
-                        RETURNING draftlineid
-                    """),
-                    {
-                        "cid": company_id, "bid": branch_id, "pid": period_id,
-                        "did": driver_assignment_id, "dt": work_date,
-                        "n": notes_val, "uid": user_id,
-                    },
-                )
-                new_lid2 = ins_result2.scalar_one()
-                await _write_line_audit(
-                    db,
-                    company_id=company_id,
-                    branch_id=branch_id,
-                    user_id=user_id,
-                    line_id=new_lid2,
-                    action_code="DRAFT_LINE_ADDED",
-                    new_value={"line_type": "DailyNote", "notes": notes_val},
-                )
-        elif en_row:
-            upd = await db.execute(
-                text(
-                    "UPDATE payroll.payrolldraftlines SET status = 'Void' "
-                    "WHERE draftlineid = :lid "
-                    "  AND payrollperiodid = :period_id AND companyid = :company_id"
-                ),
-                {
-                    "lid": en_row["draftlineid"],
-                    "period_id": period_id,
-                    "company_id": company_id,
-                },
-            )
-            if upd.rowcount:
-                await _write_line_audit(
-                    db,
-                    company_id=company_id,
-                    branch_id=branch_id,
-                    user_id=user_id,
-                    line_id=en_row["draftlineid"],
-                    action_code="DRAFT_LINE_VOIDED",
-                    old_value={"line_type": "DailyNote"},
-                    new_value={"status": "Void"},
-                )
-
-        # CP-2D1: upsert canonical entry-state after both DailyStatus/DailyNote writes.
+        notes_val = save_row.notes
         await _upsert_entry_state(
             company_id, branch_id, period_id, driver_assignment_id, work_date, user_id, db,
             status_key_id=key_row["statuskeyid"] if key_row else None,

@@ -117,11 +117,10 @@ def test_inventory_records_match_tricky_route_authority():
     expected = {
         "GET /admin/company-roles/{role_id}/permissions": ("ANY_OF", ("roles.view", "settings.manage", "setup.manage")),
         "GET /admin/users/{user_id}/permission-overrides": ("ANY_OF", ("users.view", "settings.manage", "setup.manage")),
-        "GET /admin/users/{user_id}/roles": ("ANY_OF", ("users.view", "settings.manage", "setup.manage")),
         "PUT /admin/users/{user_id}/permission-overrides": ("ANY_OF", ("users.edit", "settings.manage", "setup.manage")),
-        "GET /admin/users/{user_id}/driver": ("ANY_OF", ("users.view", "payrates.view", "payrates.edit", "settings.manage", "setup.manage")),
+        "POST /admin/users/{user_id}/company-role-assignments": ("ANY_OF", ("users.edit", "roles.edit", "settings.manage", "setup.manage")),
         "GET /core/branches": ("NONE", ()),
-        "GET /core/people": ("PERMISSION", ("employees.view",)),
+        "GET /core/driver-assignments": ("PERMISSION", ("drivers.view",)),
         "GET /driver-transfers": ("ANY_OF", ("drivers.view", "drivers.edit")),
         "GET /driver-transfers/{transfer_request_id}": ("ANY_OF", ("drivers.view", "drivers.edit")),
         "GET /payroll-setup/branches/{branch_id}/history": ("PERMISSION", ("payroll.view",)),
@@ -159,15 +158,25 @@ def test_inventory_allows_resource_specific_allow_own_with_ownership_policy():
     assert inventory_errors({"POST /example": valid}) == []
 
 
-def test_core_compatibility_routes_report_delegated_workforce_authority():
-    expected = {
-        "POST /core/drivers": ("employees.manage", "BRANCH"),
-        "PATCH /core/drivers/{driver_id}": ("employees.manage", "RESOURCE_SPECIFIC"),
-        "GET /core/drivers": ("drivers.view", "BRANCH"),
-        "GET /core/people": ("employees.view", "BRANCH"),
+def test_p8a_compatibility_routes_are_not_mounted_and_target_roster_remains():
+    actual = _application_routes(create_app().router)
+    retired = {
+        "GET /core/people",
+        "POST /core/drivers",
+        "PATCH /core/drivers/{driver_id}",
+        "GET /core/drivers",
+        "GET /core/drivers/{driver_id}",
+        "GET /core/drivers/{driver_id}/assignments",
+        "GET /admin/users/{user_id}/driver",
+        "GET /admin/roles",
+        "GET /admin/users/{user_id}/roles",
+        "POST /admin/users/{user_id}/roles",
+        "DELETE /admin/users/{user_id}/roles/{assignment_id}",
+        "GET /payroll/periods/{period_id}/final-lines",
+        "GET /payroll/periods/{period_id}/drivers-off",
     }
-    for route, (permission_code, resource_scope) in expected.items():
-        item = ROUTE_AUTHORIZATION[route]
-        assert item.permission_mode == "PERMISSION"
-        assert item.permission_codes == (permission_code,)
-        assert item.resource_scope == resource_scope
+    assert retired.isdisjoint(actual)
+    assert "GET /core/branches" in actual
+    assert "GET /core/driver-assignments" in actual
+    assert "GET /payroll/finalized/{period_id}/overview" in actual
+    assert "GET /payroll/finalized/{period_id}/off-drivers" in actual

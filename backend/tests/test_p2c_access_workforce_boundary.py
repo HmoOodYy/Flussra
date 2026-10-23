@@ -237,7 +237,7 @@ async def test_unlinked_driver_assignment_and_provisioning_fail_without_workforc
     assert provisioned.status_code == 422, provisioned.text
     refreshed = await client.get(f"/admin/users/{staged['user_id']}", headers=_headers(auth_token))
     assert refreshed.json()["is_staged"] is True
-    assert refreshed.json()["role_assignments"] == []
+    assert refreshed.json()["company_role_assignment_id"] is None
     assert await _linked_employee_id(direct_db, staged["user_id"]) is None
     assert await _workforce_snapshot(direct_db) == before
 
@@ -389,14 +389,14 @@ async def test_driver_provisioning_uses_an_explicit_link_to_existing_workforce(
 
 
 @pytest.mark.asyncio
-async def test_legacy_role_assign_and_revoke_are_access_only(
+async def test_company_role_assign_and_revoke_are_access_only(
     client: httpx.AsyncClient,
     auth_token: str,
     direct_db,
 ):
     driver = await create_driver_employee_record(
         client, auth_token, branch_id=1,
-        full_name=f"P2c legacy-linked Driver {uuid4().hex[:8]}",
+        full_name=f"P2c linked Driver {uuid4().hex[:8]}",
         driver_number=f"P2C-{uuid4().hex[:10]}",
         hire_date="2000-01-01",
     )
@@ -410,61 +410,36 @@ async def test_legacy_role_assign_and_revoke_are_access_only(
     assert link.status_code == 200, link.text
     before = await _workforce_snapshot(direct_db)
 
-    roles = await client.get("/admin/roles", headers=_headers(auth_token))
-    assert roles.status_code == 200, roles.text
-    legacy_viewer = next(row for row in roles.json() if row["role_code"] == "PAYROLL_VIEWER")
+    extra_role = await create_company_role_with_permissions(
+        client, auth_token, f"P2C access-only {uuid4().hex[:8]}", [],
+    )
     assigned = await client.post(
-        f"/admin/users/{user['user_id']}/roles",
-        json={"role_id": legacy_viewer["role_id"], "scope_type": "AllCompanyBranches"},
+        f"/admin/users/{user['user_id']}/company-role-assignments",
+        json={"company_role_id": extra_role, "scope_type": "AllCompanyBranches"},
         headers=_headers(auth_token),
     )
     assert assigned.status_code == 201, assigned.text
     assert await _workforce_snapshot(direct_db) == before
     assert await _linked_employee_id(direct_db, user["user_id"]) == driver["employee_id"]
 
-    # The global Role API intentionally has no creation authority. Seed the
-    # legacy-only DRIVER identity here to verify the retained exact-code guard.
-    legacy_driver = await direct_db.execute(
-        text("SELECT RoleID FROM sec.Roles WHERE RoleCode = 'DRIVER'")
+    # A Driver identity can only be assigned through the Self-scoped CompanyRole flow.
+    driver_role = await get_company_role_id(client, auth_token, "DRIVER")
+    forbidden_driver = await client.post(
+        f"/admin/users/{user['user_id']}/company-role-assignments",
+        json={"company_role_id": driver_role, "scope_type": "AllCompanyBranches"},
+        headers=_headers(auth_token),
     )
-    legacy_driver_id = legacy_driver.scalar_one_or_none()
-    created_legacy_driver = legacy_driver_id is None
-    if created_legacy_driver:
-        legacy_driver_id = (
-            await direct_db.execute(
-                text("""
-                    INSERT INTO sec.Roles (RoleCode, RoleName, IsSystemRole, Notes)
-                    VALUES ('DRIVER', 'Legacy Driver (P2c test)', TRUE,
-                            'Historical legacy assignment guard test')
-                    RETURNING RoleID
-                """)
-            )
-        ).scalar_one()
-    try:
-        forbidden_driver = await client.post(
-            f"/admin/users/{user['user_id']}/roles",
-            json={"role_id": legacy_driver_id, "scope_type": "AllCompanyBranches"},
-            headers=_headers(auth_token),
-        )
-        assert forbidden_driver.status_code == 422, forbidden_driver.text
-        assert await _workforce_snapshot(direct_db) == before
-    finally:
-        if created_legacy_driver:
-            await direct_db.execute(
-                text("DELETE FROM sec.Roles WHERE RoleID = :role_id"),
-                {"role_id": legacy_driver_id},
-            )
+    assert forbidden_driver.status_code == 422, forbidden_driver.text
+    assert await _workforce_snapshot(direct_db) == before
 
     revoked = await client.delete(
-        f"/admin/users/{user['user_id']}/roles/{assigned.json()['assignment_id']}",
+        f"/admin/users/{user['user_id']}/company-role-assignments/{assigned.json()['assignment_id']}",
         headers=_headers(auth_token),
     )
     assert revoked.status_code == 200, revoked.text
     assert await _workforce_snapshot(direct_db) == before
     assert await _linked_employee_id(direct_db, user["user_id"]) == driver["employee_id"]
 
-
-@pytest.mark.asyncio
 async def test_owner_transfer_and_replacement_role_leave_workforce_unchanged(
     client: httpx.AsyncClient,
     auth_token: str,

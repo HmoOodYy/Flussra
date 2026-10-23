@@ -8,8 +8,7 @@ Product contracts verified:
     without period reopen (not snapshotted at creation time).
   - save_day_grid creates/upserts a canonical entry-state row for each driver row.
   - Canonical row has correct StatusKeyID, NoteText, IsVoided, CompanyID, BranchID.
-  - get_day_grid canonical-first read: canonical row takes precedence over DraftLines
-    for drivers that have a canonical row; others fall back to DraftLines.
+  - get_day_grid reads Status and notes only from canonical EntryState.
   - Deactivated key bypass: re-submitting the same status code when the key has
     since been deactivated → 200 (no change to status).
   - Voided entry state: IsVoided=TRUE when both StatusKeyID and NoteText are cleared.
@@ -17,19 +16,10 @@ Product contracts verified:
     StatusLabelSnapshot, StatusIsOffReasonSnapshot, FinalizedAtUtc on canonical rows.
   - Locked period display: get_day_grid uses snapshot values (not live lookup) for
     Locked periods.
-  - Legacy fallback: periods with no canonical rows read status/note from DraftLines.
-  - Solution B legacy-Status guard: a legacy DailyStatus DraftLine with no canonical
-    entry-state row blocks calculation preview/Submit/Resubmit with
-    LEGACY_STATUS_NOT_CANONICAL (immutable Status evidence is captured only from
-    canonical entry-state at Submit; finalize_period no longer canonicalizes
-    legacy DraftLines at Lock time). Re-saving the day through the Day Grid
-    clears the blocker. DailyNote-only legacy data and Voided legacy DailyStatus
-    lines do not trigger the guard.
-  - Dual-write: save_day_grid writes both DraftLine AND canonical row.
+  - Historical pseudo-lines are ignored and are never created by Day Grid.
   - Tenant isolation: canonical rows are scoped by CompanyID; cross-company
     rows are not visible.
-  - direct add_draft_line / update_draft_line / void_draft_line for DailyStatus and
-    DailyNote write / update / clear the canonical row.
+  - Ordinary DraftLines remain keyed to PayrollPeriodDefinitionID.
 
 
 Dates: 2096-* — isolated year (2094=CP-2C, 2095=CP-2B).
@@ -325,40 +315,6 @@ async def _canonical_rows(db: AsyncConnection, period_id: int) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def _advance_to_approved(
-    client, token: str, period_id: int, driver_assignment_id: int, work_date: str,
-) -> None:
-    headers = _auth(token)
-    lines_resp = await client.get(f"/payroll/periods/{period_id}/lines",
-                                  headers=headers, params={"status": "Active"})
-    if lines_resp.status_code == 200 and len(lines_resp.json()) == 0:
-        await client.post(
-            f"/payroll/periods/{period_id}/lines",
-            headers=headers,
-            json={"driver_assignment_id": driver_assignment_id, "work_date": work_date,
-                  "line_type": "DailyNote", "notes": "filler"},
-        )
-    r = await client.patch(f"/payroll/periods/{period_id}/status",
-                           headers=headers, json={"status": "InReview"})
-    assert r.status_code == 200, f"InReview failed: {r.text}"
-    review_resp = await client.get("/review/items", headers=headers)
-    assert review_resp.status_code == 200
-    item = next(
-        (i for i in review_resp.json()
-         if i.get("entity_name") == "PayrollPeriods"
-         and i.get("entity_id") == str(period_id)
-         and i.get("status") == "Pending"),
-        None,
-    )
-    assert item is not None, f"No pending review item for period {period_id}"
-    decide = await client.post(
-        f"/review/items/{item['review_item_id']}/decide",
-        headers=headers,
-        json={"decision": "Approved"},
-    )
-    assert decide.status_code == 200, f"Approval failed: {decide.text}"
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -381,39 +337,23 @@ async def ces_branch_id(session_db_conn) -> int:
 
 @pytest_asyncio.fixture(scope="class")
 async def ces_driver_assignment_id(session_client, auth_token: str, ces_branch_id: int) -> int:
-    resp = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id":      ces_branch_id,
-            "full_name":      "CES Driver Alpha",
-            "preferred_name": "CESA",
-            "driver_number":    "CESA-2096",
-            "cdl_number":     "CDL-CESA-2096",
-            "email":          "cesa2096@example.com",
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, ces_branch_id, "CES Driver Alpha", "CESA-2096",
+        preferred_name="CESA", cdl_number="CDL-CESA-2096", email="cesa2096@example.com",
     )
-    assert resp.status_code in (200, 201), f"driver seed failed: {resp.text}"
-    return resp.json()["driver_assignment_id"]
+    return driver["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture(scope="class")
 async def ces_driver_assignment_id_b(session_client, auth_token: str, ces_branch_id: int) -> int:
     """Second driver for per-driver precedence tests."""
-    resp = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id":      ces_branch_id,
-            "full_name":      "CES Driver Beta",
-            "preferred_name": "CESB",
-            "driver_number":    "CESB-2096",
-            "cdl_number":     "CDL-CESB-2096",
-            "email":          "cesb2096@example.com",
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, ces_branch_id, "CES Driver Beta", "CESB-2096",
+        preferred_name="CESB", cdl_number="CDL-CESB-2096", email="cesb2096@example.com",
     )
-    assert resp.status_code in (200, 201), f"driver B seed failed: {resp.text}"
-    return resp.json()["driver_assignment_id"]
+    return driver["driver_assignment_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -605,18 +545,16 @@ class TestCp2dCanonicalEntryState:
             assert ces[0]["branchid"] == ces_branch_id
             assert ces[0]["finalizedatutc"] is None, "Should not be finalized yet"
 
-            # Also verify DraftLine still written (dual-write)
-            dl = (await direct_db.execute(
+            # Status and note are canonical EntryState only; measured quantity lines remain separate.
+            pseudo_count = (await direct_db.execute(
                 _text("""
-                    SELECT notes FROM payroll.payrolldraftlines
+                    SELECT count(*) FROM payroll.payrolldraftlines
                     WHERE payrollperiodid = :pid AND driverassignmentid = :did
-                      AND linetype = 'DailyStatus' AND status != 'Void'
-                    LIMIT 1
+                      AND linetype IN ('DailyStatus', 'DailyNote') AND status != 'Void'
                 """),
                 {"pid": pid, "did": ces_driver_assignment_id},
-            )).mappings().first()
-            assert dl is not None, "DraftLine must also be written (dual-write)"
-            assert dl["notes"] == code
+            )).scalar_one()
+            assert pseudo_count == 0
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             if sk_id is not None:
@@ -730,11 +668,11 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E06 — Legacy fallback (no canonical rows → read from DraftLines)
+    # E06 — Historical Status pseudo-lines are ignored by current reads
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_e06_legacy_fallback_reads_from_draftlines(
+    async def test_e06_historical_status_pseudo_line_is_ignored_by_current_reads(
         self,
         session_client,
         auth_token: str,
@@ -742,7 +680,7 @@ class TestCp2dCanonicalEntryState:
         ces_branch_id: int,
         ces_driver_assignment_id: int,
     ):
-        """E06: Period with no canonical rows reads status/note from DraftLines."""
+        """E06: A historical pseudo-line cannot supply Status or note to current reads."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e06")
         code = _sk_code("E06KEY", start)
@@ -769,7 +707,7 @@ class TestCp2dCanonicalEntryState:
             rows = await _canonical_rows(direct_db, pid)
             assert not rows, "Test setup error: canonical rows should not exist"
 
-            # get_day_grid must fall back to DraftLine and return the status key code
+            # Current reads use canonical entry state only.
             r = await session_client.get(
                 f"/payroll/periods/{pid}/day-grid",
                 params={"work_date": wdate},
@@ -780,7 +718,8 @@ class TestCp2dCanonicalEntryState:
                 (d for d in r.json()["rows"] if d["driver_assignment_id"] == ces_driver_assignment_id), None
             )
             assert drv_row is not None
-            assert drv_row["status_key"] == code, "Legacy fallback must return DraftLine status"
+            assert drv_row["status_key"] is None
+            assert drv_row["notes"] is None
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             if sk_id is not None:
@@ -804,8 +743,7 @@ class TestCp2dCanonicalEntryState:
         ces_driver_assignment_id: int,
         ces_driver_assignment_id_b: int,
     ):
-        """E07: Driver A has canonical row; Driver B has only DraftLine.
-        get_day_grid uses canonical for A and DraftLine fallback for B."""
+        """EntryState supplies Driver A; a historical pseudo-line supplies no Status for B."""
         start, end = _week_2096()
         pid = await _open_period(direct_db, ces_branch_id, start, end, "-e07")
         code_a = _sk_code("E07AKEY", start)
@@ -823,7 +761,7 @@ class TestCp2dCanonicalEntryState:
                       "rows": [{"driver_assignment_id": ces_driver_assignment_id, "values": {}, "status_key": code_a}]},
             )
 
-            # Driver B: write DraftLine directly (no canonical row)
+            # Driver B: inject unsupported historical data; current reads ignore it.
             await direct_db.execute(
                 _text("""
                     INSERT INTO payroll.payrolldraftlines
@@ -837,7 +775,7 @@ class TestCp2dCanonicalEntryState:
             )
             await direct_db.commit()
 
-            # get_day_grid: Driver A from canonical, Driver B from DraftLine
+            # get_day_grid: Driver A from EntryState, Driver B has no Status.
             r = await session_client.get(
                 f"/payroll/periods/{pid}/day-grid",
                 params={"work_date": wdate},
@@ -847,7 +785,7 @@ class TestCp2dCanonicalEntryState:
             drv_rows = {d["driver_assignment_id"]: d for d in r.json()["rows"]}
 
             assert drv_rows[ces_driver_assignment_id]["status_key"] == code_a, "A: canonical row"
-            assert drv_rows[ces_driver_assignment_id_b]["status_key"] == code_b, "B: DraftLine fallback"
+            assert drv_rows[ces_driver_assignment_id_b]["status_key"] is None, "Pseudo-lines are not Status authority"
         finally:
             await _clean_branch(direct_db, ces_branch_id)
             for sid in (sk_a, sk_b):
@@ -1082,19 +1020,8 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E11 — Solution B: legacy Status blocks Submit until re-saved canonically
-    # ------------------------------------------------------------------ #
-    #
-    # Superseded contract (pre-CP-4F): finalize_period used to canonicalize
-    # leftover legacy DailyStatus DraftLines at Lock time
-    # (_finalize_canonicalize_entry_state). CP-4F's finalize_period consumes
-    # the immutable calculation snapshot captured at Submit and never touches
-    # PayrollPeriodDriverDayEntryState — so that finalize-time canonicalization
-    # can no longer run. Solution B instead rejects Submit/Resubmit up front
-    # (LEGACY_STATUS_NOT_CANONICAL) so an incomplete immutable Status snapshot
-    # is never created in the first place; the user re-saves the affected day
-    # through the Day Grid, which dual-writes the canonical row, and Submit
-    # then captures the correct Status evidence.
+    # Historical pseudo-lines cannot be introduced through current source APIs.
+    # Submit/Resubmit and immutable evidence consume canonical EntryState directly.
 
     # ------------------------------------------------------------------ #
     # E12 — Direct DraftLine API: add_draft_line writes canonical row
@@ -1433,6 +1360,16 @@ class TestCp2dCanonicalEntryState:
                                  "status_key": code}]},
             )
             assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
+            await direct_db.execute(_text("""
+                INSERT INTO payroll.payrolldraftlines
+                    (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
+                     linetype, quantity, sourcetype, status, needsmanagerreview,
+                     notes, addedbyuserid)
+                VALUES (1, :bid, :pid, :did, :dt, 'DailyStatus', 0,
+                        'Manual', 'Active', FALSE, :code, 1)
+            """), {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id,
+                   "dt": start, "code": code})
+            await direct_db.commit()
             line_id = (await direct_db.execute(
                 _text("""
                     SELECT draftlineid FROM payroll.payrolldraftlines
@@ -1454,8 +1391,7 @@ class TestCp2dCanonicalEntryState:
                 headers=headers,
                 json={"notes": "NONEXISTENT_E19"},
             )
-            assert upd_r.status_code == 422, f"Expected 422 for invalid update; got {upd_r.status_code}"
-            assert "Day Grid" in upd_r.json()["detail"]
+            assert upd_r.status_code == 404, f"Pseudo-line was exposed to current mutation: {upd_r.text}"
 
             # DraftLine notes must still be the original code
             dl = (await direct_db.execute(
@@ -1511,6 +1447,16 @@ class TestCp2dCanonicalEntryState:
                                  "status_key": code}]},
             )
             assert add_r.status_code == 200, f"day-grid seed failed: {add_r.text}"
+            await direct_db.execute(_text("""
+                INSERT INTO payroll.payrolldraftlines
+                    (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
+                     linetype, quantity, sourcetype, status, needsmanagerreview,
+                     notes, addedbyuserid)
+                VALUES (1, :bid, :pid, :did, :dt, 'DailyStatus', 0,
+                        'Manual', 'Active', FALSE, :code, 1)
+            """), {"bid": ces_branch_id, "pid": pid, "did": ces_driver_assignment_id,
+                   "dt": start, "code": code})
+            await direct_db.commit()
             line_id = (await direct_db.execute(
                 _text("""
                     SELECT draftlineid FROM payroll.payrolldraftlines
@@ -1533,8 +1479,8 @@ class TestCp2dCanonicalEntryState:
                 headers=headers,
                 json={"notes": code},  # same code but now inactive
             )
-            assert upd_r1.status_code == 422, \
-                "Unchanged-but-deactivated code must be rejected on direct update path"
+            assert upd_r1.status_code == 404, \
+                "Historical pseudo-line must not be exposed through current source mutation"
 
             # DraftLine unchanged
             dl = (await direct_db.execute(
@@ -1552,26 +1498,5 @@ class TestCp2dCanonicalEntryState:
                 await direct_db.commit()
 
     # ------------------------------------------------------------------ #
-    # E21 — Direct DailyNote add / update / void dual-writes canonical NoteText
-    # ------------------------------------------------------------------ #
-
-    # ------------------------------------------------------------------ #
-    # E22 — Solution B: DailyNote-only legacy data must NOT block Submit
-    # ------------------------------------------------------------------ #
-    #
-    # NoteText is never part of the immutable Status evidence contract:
-    # PayrollCalculationSnapshotStatusEntries.StatusKeyID is NOT NULL and
-    # _load_report_evidence requires StatusKeyID IS NOT NULL, so a note-only
-    # canonical row (StatusKeyID NULL, as E21 proves) is already excluded from
-    # capture regardless of whether it exists. A legacy DailyNote DraftLine
-    # with no canonical row therefore cannot cause a Status to disappear from
-    # evidence, and must not trigger LEGACY_STATUS_NOT_CANONICAL.
-
-    # ------------------------------------------------------------------ #
-    # E23 — Solution B: a Voided legacy DailyStatus line must NOT block Submit
-    # ------------------------------------------------------------------ #
-
-    # ------------------------------------------------------------------ #
-    # E24 — Solution B: Returned -> correction -> Resubmit captures the
-    # corrected Status, unaffected by the legacy-canonicalization guard
-    # ------------------------------------------------------------------ #
+    # DailyNote pseudo-line compatibility coverage was retired with the generic
+    # source API seam. Day Grid note behavior is covered through EntryState.

@@ -61,7 +61,7 @@ async def test_a_line_is_identified_by_its_period_definition_and_stores_no_money
     assert response.status_code == 201, response.text
     line = response.json()
     assert line["payroll_period_definition_id"] == ppd
-    assert line["line_type"] is None
+    assert "line_type" not in line
     assert line["rate_amount"] is None and line["calculated_amount"] is None
     async with p3c_engine.connect() as conn:
         stored = (await conn.execute(text(

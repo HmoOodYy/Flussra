@@ -204,7 +204,7 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT version_num FROM public.alembic_version")
-            assert cur.fetchone()[0] == "0091"
+            assert cur.fetchone()[0] == "0092"
             cur.execute("""
                 SELECT pg_get_constraintdef(oid)
                 FROM pg_constraint
@@ -224,6 +224,28 @@ def test_fresh_database_upgrades_to_head(access_migration_db):
             """)
             body = cur.fetchone()[0].lower()
             assert "self" in body and "userpermissionoverrides" in body
+            assert "sec.rolepermissions" not in body
+            assert "sec.roles" not in body
+            assert "ubr.roleid" not in body
+            for function in (
+                "sec.fn_enforce_userbranchrole_scope_authority()",
+                "sec.fn_check_company_owner_unique()",
+            ):
+                cur.execute("SELECT pg_get_functiondef(%s::regprocedure)", (function,))
+                trigger_body = cur.fetchone()[0].lower()
+                assert "sec.roles" not in trigger_body
+                assert "ubr.roleid" not in trigger_body
+            # P8a removes runtime authority, while P8b owns physical catalog deletion.
+            cur.execute("SELECT to_regclass('sec.roles') IS NOT NULL")
+            assert cur.fetchone()[0] is True
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema='sec' AND table_name='userbranchroles'
+                      AND column_name='roleid'
+                )
+            """)
+            assert cur.fetchone()[0] is True
     finally:
         conn.close()
 
@@ -380,6 +402,61 @@ def test_upgrade_0074_to_0075_migrates_and_enforces_runtime_authority(access_mig
                     UPDATE sec.UserBranchRoles SET ScopeType = 'SpecificBranch', BranchID = %s
                     WHERE UserID = %s
                 """, (ids["branch_a"], ids["owner_user"]))
+    finally:
+        conn.close()
+
+
+def test_0092_ignores_roleid_only_grants_and_keeps_catalog_for_p8b(access_migration_db):
+    config, dsn = access_migration_db
+    _upgrade(config, "0074")
+    ids = _seed_legacy_access_state(dsn)
+    _upgrade(config, "0091")
+    conn = _db(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO sec.Roles (RoleCode, RoleName, RoleLevel)
+                VALUES ('P8A_LEGACY', 'P8a legacy authority probe', 20)
+                RETURNING RoleID
+            """)
+            role_id = cur.fetchone()[0]
+            cur.execute("""
+                INSERT INTO sec.RolePermissions (RoleID, PermissionID)
+                SELECT %s, PermissionID FROM sec.Permissions
+                WHERE PermissionCode = 'payroll.view'
+            """, (role_id,))
+            cur.execute("""
+                INSERT INTO sec.Users (CompanyID, Username, DisplayName, IsActive, CanLogin)
+                VALUES (%s, 'legacy_probe', 'Legacy probe', TRUE, TRUE)
+                RETURNING UserID
+            """, (ids["company"],))
+            user_id = cur.fetchone()[0]
+            cur.execute("""
+                INSERT INTO sec.UserBranchRoles
+                    (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType, IsActive)
+                VALUES (%s, %s, %s, %s, NULL, 'SpecificBranch', TRUE)
+            """, (user_id, ids["company"], ids["branch_a"], role_id))
+    finally:
+        conn.close()
+
+    _upgrade(config, "head")
+    conn = _db(dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT sec.fn_UserHasPermission(%s, %s, %s, 'payroll.view')", (
+                user_id, ids["company"], ids["branch_a"],
+            ))
+            assert cur.fetchone()[0] is False
+            cur.execute("SELECT COUNT(*) FROM app.vw_UserBranchAccess WHERE UserID=%s", (user_id,))
+            assert cur.fetchone()[0] == 0
+            cur.execute("SELECT RoleID FROM sec.UserBranchRoles WHERE UserID=%s", (user_id,))
+            assert cur.fetchone()[0] == role_id
+            cur.execute("SELECT to_regclass('sec.roles') IS NOT NULL")
+            assert cur.fetchone()[0] is True
+            cur.execute("""
+                SELECT sec.fn_UserHasPermission(%s, %s, NULL, 'payroll.view')
+            """, (ids["viewer_company_user"], ids["company"]))
+            assert cur.fetchone()[0] is True
     finally:
         conn.close()
 

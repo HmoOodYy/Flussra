@@ -40,17 +40,12 @@ async def paytest_driver_assignment_id(
     paytest_branch_id: int,
 ) -> int:
     """Create the CP5B driver on its isolated branch."""
-    response = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id": paytest_branch_id,
-            "full_name": "CP5B Isolated Driver",
-            "driver_number": f"CP5B-D-{uuid4().hex[:10]}",
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, paytest_branch_id,
+        "CP5B Isolated Driver", f"CP5B-D-{uuid4().hex[:10]}",
     )
-    assert response.status_code == 201, response.text
-    return int(response.json()["driver_assignment_id"])
+    return int(driver["driver_assignment_id"])
 
 
 def _auth(token: str) -> dict[str, str]:
@@ -453,20 +448,13 @@ async def _create_driver(
     client: httpx.AsyncClient, token: str, branch_id: int,
 ) -> int:
     suffix = next(_COUNTER)
-    response = await client.post(
-        "/core/drivers",
-        json={
-            "branch_id": branch_id,
-            "full_name": f"CP5B Driver {suffix}",
-            "preferred_name": f"CP5B {suffix}",
-            "driver_number": f"CP5B-{suffix}",
-            "cdl_number": f"CP5B-CDL-{suffix}",
-            "email": f"cp5b-{suffix}@example.com",
-        },
-        headers=_auth(token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        client, token, branch_id, f"CP5B Driver {suffix}", f"CP5B-{suffix}",
+        preferred_name=f"CP5B {suffix}", cdl_number=f"CP5B-CDL-{suffix}",
+        email=f"cp5b-{suffix}@example.com",
     )
-    assert response.status_code == 201, response.text
-    return int(response.json()["driver_assignment_id"])
+    return int(driver["driver_assignment_id"])
 
 
 async def _summary(client: httpx.AsyncClient, token: str, period_id: int) -> httpx.Response:
@@ -516,16 +504,32 @@ async def _submit_approve_finalize(
     """Drive a period Open -> InReview -> Approved -> Locked through the
     real HTTP workflow, capturing immutable Status evidence at Submit."""
     headers = _auth(token)
-    lines_resp = await client.get(
-        f"/payroll/periods/{period_id}/lines", headers=headers, params={"status": "Active"},
+    grid = await client.get(
+        f"/payroll/periods/{period_id}/day-grid",
+        headers=headers,
+        params={"work_date": work_date.isoformat()},
     )
-    if lines_resp.status_code == 200 and len(lines_resp.json()) == 0:
-        await client.post(
-            f"/payroll/periods/{period_id}/lines",
-            headers=headers,
-            json={"driver_assignment_id": driver_assignment_id, "work_date": work_date.isoformat(),
-                  "line_type": "DailyNote", "notes": "filler"},
+    assert grid.status_code == 200, grid.text
+    row = next(
+        (item for item in grid.json().get("rows", [])
+         if item.get("driver_assignment_id") == driver_assignment_id),
+        None,
+    )
+    if row is not None and not row.get("status_key"):
+        status_key = next(
+            (item for item in grid.json().get("status_keys", []) if not item.get("is_off_reason")),
+            None,
         )
+        if status_key is not None:
+            saved = await client.post(
+                f"/payroll/periods/{period_id}/day-grid",
+                headers=headers,
+                json={"work_date": work_date.isoformat(), "rows": [{
+                    "driver_assignment_id": driver_assignment_id,
+                    "values": {}, "status_key": status_key["key_code"], "note": "filler",
+                }]},
+            )
+            assert saved.status_code == 200, saved.text
     submit = await client.patch(
         f"/payroll/periods/{period_id}/status", headers=headers, json={"status": "InReview"},
     )
@@ -808,39 +812,12 @@ class TestOffDrivers:
         assert selected.json()["total_count"] == 1
         assert (await _summary(session_client, auth_token, period_id)).json()["total_fully_off_drivers"] == 0
 
-    async def test_legacy_drivers_off_endpoint_retains_driver_day_row_semantics(
-        self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,
+    async def test_legacy_period_wide_drivers_off_route_is_not_mounted(
+        self, session_client,
     ):
-        await _clean(direct_db, paytest_branch_id)
-        period_id = await _insert_period(direct_db, paytest_branch_id, "LEGACY")
-        work_date = (await _period_dates(direct_db, period_id))[0]
-        off_code = f"CP5B_LEGACY_{next(_COUNTER)}"
-        await _status_key(direct_db, paytest_branch_id, off_code, True)
-        await direct_db.execute(
-            _text("""
-                INSERT INTO payroll.payrolldraftlines
-                    (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype, quantity, sourcetype, status, needsmanagerreview, notes, addedbyuserid)
-                VALUES (:company_id, :branch_id, :period_id, :driver_assignment_id, :work_date, 'DailyStatus',
-                        1, 'Manual', 'Active', FALSE, :status_code, 1)
-            """),
-            {
-                "company_id": _COMPANY_ID,
-                "branch_id": paytest_branch_id,
-                "period_id": period_id,
-                "driver_assignment_id": paytest_driver_assignment_id,
-                "work_date": work_date,
-                "status_code": off_code,
-            },
-        )
-        await direct_db.commit()
-
-        response = await session_client.get(
-            f"/payroll/periods/{period_id}/drivers-off", headers=_auth(auth_token),
-        )
+        response = await session_client.get("/openapi.json")
         assert response.status_code == 200, response.text
-        assert response.json()["total_count"] == 1
-        assert response.json()["entries"][0]["work_date"] == work_date.isoformat()
-        assert response.json()["entries"][0]["status_key_code"] == off_code
+        assert "/payroll/periods/{period_id}/drivers-off" not in response.json()["paths"]
 
     async def test_hub_uses_same_distinct_fully_off_resolver_as_summary(
         self, session_client, auth_token, paytest_branch_id, paytest_driver_assignment_id, direct_db,

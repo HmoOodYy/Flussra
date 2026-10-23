@@ -47,22 +47,34 @@ async def paytest_driver_id(
     paytest_branch_id: int,
 ) -> int:
     """Create the dashboard test driver on this module's isolated branch."""
-    resp = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id": paytest_branch_id,
-            "full_name": "Dashboard Isolated Driver",
-            "driver_number": f"M17-D-{uuid4().hex[:10]}",
-        },
-        headers={"Authorization": f"Bearer {auth_token}"},
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, paytest_branch_id,
+        "Dashboard Isolated Driver", f"M17-D-{uuid4().hex[:10]}",
     )
-    assert resp.status_code == 201, f"Dashboard driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return driver["driver_id"]
 
 
 async def _get_dashboard(client: httpx.AsyncClient, token: str) -> dict:
     resp = await client.get(BASE, headers={"Authorization": f"Bearer {token}"})
     return resp
+
+
+def _ensure_dashboard_entry_role(cur) -> int:
+    cur.execute("""
+        INSERT INTO sec.companyroles
+            (companyid, rolecode, rolename, rolelevel, isdefault, isprotected, iscustom, isactive)
+        SELECT companyid, 'DASHBOARD_ENTRY_TEST', 'Dashboard Entry Test', 20, FALSE, FALSE, TRUE, TRUE
+        FROM core.companies WHERE companycode = 'DEMO'
+        ON CONFLICT (companyid, rolecode) DO UPDATE SET isactive = TRUE
+        RETURNING companyroleid
+    """)
+    role_id = cur.fetchone()[0]
+    cur.execute("""
+        INSERT INTO sec.companyrolepermissions (companyroleid, permissioncode)
+        VALUES (%s, 'payroll.entry') ON CONFLICT DO NOTHING
+    """, (role_id,))
+    return role_id
 
 
 # ---------------------------------------------------------------------------
@@ -99,16 +111,16 @@ async def hq_entry_token(
         """,
         (pw_hash,),
     )
-    # Assign PAYROLL_ADMIN role with SpecificBranch scope on HQ (idempotent)
+    role_id = _ensure_dashboard_entry_role(cur)
+    # Assign a target CompanyRole with SpecificBranch scope on HQ (idempotent).
     cur.execute(
         """
-        INSERT INTO sec.userbranchroles (userid, companyid, branchid, roleid, scopetype, isactive)
-        SELECT u.userid, u.companyid, %(bid)s, r.roleid, 'SpecificBranch', TRUE
-        FROM sec.users u, sec.roles r
-        WHERE u.username = 'hq_entry_user' AND r.rolecode = 'PAYROLL_ADMIN'
+        INSERT INTO sec.userbranchroles (userid, companyid, branchid, companyroleid, scopetype, isactive)
+        SELECT u.userid, u.companyid, %(bid)s, %(rid)s, 'SpecificBranch', TRUE
+        FROM sec.users u WHERE u.username = 'hq_entry_user'
         ON CONFLICT DO NOTHING
         """,
-        {"bid": hq_branch_id},
+        {"bid": hq_branch_id, "rid": role_id},
     )
     conn.close()
 
@@ -407,15 +419,15 @@ class TestDashboardLastFinalized:
             """,
             (pw_hash,),
         )
+        role_id = _ensure_dashboard_entry_role(cur)
         cur.execute(
             """
-            INSERT INTO sec.userbranchroles (userid, companyid, branchid, roleid, scopetype, isactive)
-            SELECT u.userid, u.companyid, %(bid)s, r.roleid, 'SpecificBranch', TRUE
-            FROM sec.users u, sec.roles r
-            WHERE u.username = 'null_test_user' AND r.rolecode = 'PAYROLL_ADMIN'
+            INSERT INTO sec.userbranchroles (userid, companyid, branchid, companyroleid, scopetype, isactive)
+            SELECT u.userid, u.companyid, %(bid)s, %(rid)s, 'SpecificBranch', TRUE
+            FROM sec.users u WHERE u.username = 'null_test_user'
             ON CONFLICT DO NOTHING
             """,
-            {"bid": null_branch_id},
+            {"bid": null_branch_id, "rid": role_id},
         )
         conn.close()
 

@@ -23,9 +23,11 @@ def _first_full_match(path: str, method: str) -> APIRoute:
 
 
 def test_public_payroll_router_is_flat_and_handlers_live_in_owner_modules():
-    assert len(router.routes) == 46  # the assignment-owned rate routes are retired
+    assert len(router.routes) == 44  # the assignment-owned rates and two P8a legacy routes are retired
     assert all(isinstance(route, APIRoute) for route in router.routes)
     paths = {route.path for route in router.routes}
+    assert "/periods/{period_id}/final-lines" not in paths
+    assert "/periods/{period_id}/drivers-off" not in paths
     # Every rate is a Driver-owned schedule authored under /compensation: no assignment-level
     # rate route exists, and a transfer continues the Driver's rates by date.
     assert not any("/copy-from/" in path or path.startswith("/rates")

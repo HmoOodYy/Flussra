@@ -19,13 +19,11 @@ async def is_driver_self_subject(
                 SELECT 1
                 FROM sec.UserBranchRoles ubr
                 LEFT JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
-                LEFT JOIN sec.Roles r ON r.RoleID = ubr.RoleID
                 WHERE ubr.UserID = :uid
                   AND ubr.CompanyID = :cid
                   AND ubr.IsActive
                   AND (ubr.ScopeType = 'Self'
-                       OR cr.RoleCode = 'DRIVER'
-                       OR r.RoleCode = 'DRIVER')
+                       OR cr.RoleCode = 'DRIVER')
             )
         """),
         {"uid": user_id, "cid": company_id},
@@ -83,12 +81,11 @@ async def resolve_driver_self(
                   SELECT 1
                   FROM sec.UserBranchRoles ubr
                   LEFT JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
-                  LEFT JOIN sec.Roles r ON r.RoleID = ubr.RoleID
                   WHERE ubr.UserID = u.UserID
                     AND ubr.CompanyID = u.CompanyID
                     AND ubr.IsActive
                     AND ubr.ScopeType = 'Self'
-                    AND (cr.RoleCode = 'DRIVER' OR r.RoleCode = 'DRIVER')
+                    AND cr.RoleCode = 'DRIVER'
               )
         """),
         {"uid": user_id, "cid": company_id},

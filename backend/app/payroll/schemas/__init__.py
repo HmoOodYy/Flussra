@@ -64,8 +64,6 @@ from .entry import (
     DraftLineSummary,
     DraftLineUpdate,
     DriverPeriodSummary,
-    DriversOffEntry,
-    DriversOffResponse,
     FullyOffDriverSummary,
     OffDriversSummaryResponse,
     SelectedDayOffDriver,
@@ -91,7 +89,6 @@ from .finalized import (
     FinalizedUsedRateDefinition,
     FinalizedUsedRateTier,
     FinalizedWorkflowAuditEvent,
-    FinalLineSummary,
 )
 from .pay_rules import (
     _VALID_RULE_TYPES as _VALID_RULE_TYPES,
@@ -207,11 +204,8 @@ __all__ = (
     'DriverPayRuleNotesUpdate',
     'DriverPayRuleSummary',
     'DriverPeriodSummary',
-    'DriversOffEntry',
-    'DriversOffResponse',
     'DriversReportResponse',
     'ENTRY_ALLOWED_STATUSES',
-    'FinalLineSummary',
     'FinalizationPreviewDriverTotal',
     'FinalizationPreviewLine',
     'FinalizationPreviewResponse',

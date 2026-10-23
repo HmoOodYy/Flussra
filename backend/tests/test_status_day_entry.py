@@ -71,13 +71,13 @@ def _entry_key(tenant, period, driver_assignment_id, offset=0):
     return rows[0][0] if rows else None
 
 
-def _legacy_code(tenant, period, driver_assignment_id, offset=0):
+def _legacy_status_count(tenant, period, driver_assignment_id, offset=0):
     rows = query(tenant, """
-        SELECT notes FROM payroll.payrolldraftlines
+        SELECT count(*) FROM payroll.payrolldraftlines
         WHERE payrollperiodid = %s AND driverassignmentid = %s AND workdate = %s
           AND linetype = 'DailyStatus' AND status <> 'Void'
     """, (period["payroll_period_id"], driver_assignment_id, _day(period, offset)))
-    return rows[0][0] if rows else None
+    return rows[0][0] if rows else 0
 
 
 def _key_code(tenant, key_id) -> str:
@@ -134,7 +134,7 @@ async def test_name_alias_and_code_resolve_to_the_same_canonical_status(
     assert row["status_label"] == "Annual Leave"
     assert row["status_key"] == _key_code(tenant, key_id)
     assert _entry_key(tenant, period, tenant.driver_a) == key_id
-    assert _legacy_code(tenant, period, tenant.driver_a) == _key_code(tenant, key_id)
+    assert _legacy_status_count(tenant, period, tenant.driver_a) == 0
 
 
 async def test_the_technical_code_resolves_too(p3c_client, p3c_engine, tenant):
@@ -196,7 +196,7 @@ async def test_a_blank_input_clears_the_status(p3c_client, p3c_engine, tenant):
     assert cleared.status_code == 200
     assert _grid_row(cleared.json(), tenant.driver_a)["status_key"] is None
     assert _entry_key(tenant, period, tenant.driver_a) is None
-    assert _legacy_code(tenant, period, tenant.driver_a) is None
+    assert _legacy_status_count(tenant, period, tenant.driver_a) == 0
 
 
 async def test_a_deactivated_status_cannot_be_newly_selected_by_any_input(
@@ -429,27 +429,13 @@ async def test_a_voided_selection_does_not_count(p3c_client, p3c_engine, tenant)
     assert (await _save(p3c_client, tenant, period, [_row(tenant.driver_a2, "LIM")])).status_code == 200
 
 
-async def test_counts_come_from_canonical_selections_not_the_legacy_duplicate(
+async def test_status_limits_count_canonical_selections_only(
     p3c_client, p3c_engine, tenant,
 ):
     key_id = seed_status_key(tenant, "LIM")
-    code = _key_code(tenant, key_id)
     _limit(tenant, key_id, limitusesperperiodenabled=True, limitusesperperiod=1)
     period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
-    period_id = period["payroll_period_id"]
-
-    # A stray legacy DailyStatus line (no canonical selection) is not a use of the Status.
-    query(tenant, """
-        INSERT INTO payroll.payrolldraftlines
-            (companyid, branchid, payrollperiodid, driverassignmentid, workdate, linetype,
-             quantity, sourcetype, status, notes)
-        VALUES (%s, %s, %s, %s, %s, 'DailyStatus', 0, 'Manual', 'Active', %s)
-    """, (tenant.company_id, tenant.branch_a, period_id, tenant.driver_a2, _day(period, 2), code))
     assert (await _save(p3c_client, tenant, period, [_row(tenant.driver_a, "LIM")])).status_code == 200
-
-    # Removing the legacy duplicate of a canonical selection does not free the use either.
-    query(tenant, "UPDATE payroll.payrolldraftlines SET status = 'Void' "
-                  "WHERE payrollperiodid = %s AND linetype = 'DailyStatus'", (period_id,))
     assert (await _save(p3c_client, tenant, period, [_row(tenant.driver_a2, "LIM")])).status_code == 422
 
 

@@ -221,18 +221,16 @@ async def _get_or_create_driver(
     session_client: httpx.AsyncClient, auth_token: str,
     branch_id: int, driver_number: str, full_name: str,
 ) -> int:
-    r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
+    r_list = await session_client.get("/core/driver-assignments", headers=_auth(auth_token))
     if r_list.status_code == 200:
         for d in r_list.json():
-            if d.get("driver_number") == driver_number:
+            if d.get("driver_number") == driver_number and d["branch_id"] == branch_id:
                 return d["driver_assignment_id"]
-    resp = await session_client.post(
-        "/core/drivers",
-        json={"branch_id": branch_id, "full_name": full_name, "driver_number": driver_number},
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, branch_id, full_name, driver_number,
     )
-    assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_assignment_id"]
+    return driver["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture
@@ -611,7 +609,7 @@ async def test_exact_replay_does_not_require_currency_lookup(
 
 
 @pytest.mark.asyncio
-async def test_legacy_v1_replay_requires_the_exact_normalized_two_decimal_amount(
+async def test_stored_v1_batch_replay_is_rejected_after_v2_cutover(
     client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
 ) -> None:
     period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
@@ -638,19 +636,7 @@ async def test_legacy_v1_replay_requires_the_exact_normalized_two_decimal_amount
     await db_conn.commit()
 
     replay = await _batch(client, auth_token, period_id, key, 0, [item])
-    assert replay.status_code == 200, replay.text
-    assert replay.json()["replayed"] is True
-    # Amounts are normalized to the Company currency (USD: two decimals) before they are
-    # hashed, so 50.001 is the same request as 50.00; a different normalized amount is not.
-    equivalent = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.001"},
-    ])
-    assert equivalent.status_code == 200, equivalent.text
-    assert equivalent.json()["replayed"] is True
-    different = await _batch(client, auth_token, period_id, key, 0, [
-        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "50.01"},
-    ])
-    assert different.status_code == 409, different.text
+    assert replay.status_code == 409, replay.text
     assert await _count_events(db_conn, period_id) == 1
     await _cancel_period_db(db_conn, period_id)
 

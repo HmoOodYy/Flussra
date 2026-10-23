@@ -17,8 +17,8 @@ async def check_permission(
     Raise HTTP 403 if the user does not hold *permission_code* for the
     given company + branch.
 
-    Delegates to ``sec.fn_UserHasPermission`` which resolves both
-    ``SpecificBranch`` and ``AllCompanyBranches`` scope transparently.
+    Delegates to ``sec.fn_UserHasPermission`` which resolves CompanyRole
+    grants and both ``SpecificBranch`` and ``AllCompanyBranches`` scope.
 
     branch_id may be None for company-level operations (settings, admin
     writes).  Passing None means only AllCompanyBranches assignments will

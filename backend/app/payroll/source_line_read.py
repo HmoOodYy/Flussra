@@ -53,7 +53,6 @@ _LINE_SELECT = """
         ppd.inputtypesnapshot,
         ppd.unitsnapshot,
         ppd.calculationmethodsnapshot,
-        dl.linetype,
         dl.quantity,
         dl.rateamount,
         dl.calculatedamount,
@@ -77,8 +76,6 @@ def _line_row_to_summary(r: Any) -> DraftLineSummary:
     # and no review flag: the stored RateAmount/CalculatedAmount/NeedsManagerReview columns
     # are never surfaced for it. Live enrichment supplies the derived values, and no scalar
     # rate field exists for the target contract (a schedule may have several components).
-    # Status/internal compatibility rows keep their temporary stored behavior.
-    is_target = r["payrollperioddefinitionid"] is not None
     return DraftLineSummary(
         draft_line_id=r["draftlineid"],
         period_id=r["payrollperiodid"],
@@ -95,13 +92,12 @@ def _line_row_to_summary(r: Any) -> DraftLineSummary:
         input_type=r["inputtypesnapshot"],
         unit=r["unitsnapshot"],
         calculation_method=r["calculationmethodsnapshot"],
-        line_type=r["linetype"],
         quantity=r["quantity"],
-        rate_amount=None if is_target else r["rateamount"],
-        calculated_amount=None if is_target else r["calculatedamount"],
+        rate_amount=None,
+        calculated_amount=None,
         source_type=r["sourcetype"],
         status=r["status"],
-        needs_manager_review=False if is_target else r["needsmanagerreview"],
+        needs_manager_review=False,
         notes=r["notes"],
         added_by_user_id=r["addedbyuserid"],
         added_at_utc=r["addedatutc"],
@@ -118,7 +114,8 @@ async def _get_line_by_id(
     db: AsyncConnection,
 ) -> DraftLineSummary:
     result = await db.execute(
-        text(f"{_LINE_SELECT} WHERE dl.draftlineid = :lid AND dl.companyid = :cid"),
+        text(f"{_LINE_SELECT} WHERE dl.draftlineid = :lid AND dl.companyid = :cid "
+             "AND dl.payrollperioddefinitionid IS NOT NULL"),
         {"lid": draft_line_id, "cid": company_id},
     )
     row = result.mappings().first()
@@ -147,6 +144,7 @@ async def get_period_lines(
     conditions = [
         "dl.payrollperiodid  = :period_id",
         "dl.companyid        = :company_id",
+        "dl.payrollperioddefinitionid IS NOT NULL",
     ]
     params: dict[str, Any] = {
         "period_id": period_id,
@@ -173,7 +171,7 @@ async def get_period_lines(
     where = " AND ".join(conditions)
     result = await db.execute(
         text(f"{_LINE_SELECT} WHERE {where} "
-             "ORDER BY dl.workdate, dl.driverassignmentid, ppd.sortorder NULLS LAST, dl.linetype, "
+             "ORDER BY dl.workdate, dl.driverassignmentid, ppd.sortorder NULLS LAST, "
              "dl.draftlineid"),
         params,
     )

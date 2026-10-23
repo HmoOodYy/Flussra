@@ -284,13 +284,13 @@ P1b — Core → Workforce authority cutover.
 Removing the route before all consumers are migrated would create breakage without architectural value. The immediate goal is to remove the old authority, not to break compatibility early.
 
 **Current State:**  
-The route must be a thin adapter to the Workforce service with no independent Employee/Driver creation logic.
+P8a removed the mounted route after the consumer audit; Driver creation is through Workforce.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Resolved In:** P8a runtime cutover (baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`).
+**Resolution Evidence:** `POST /core/drivers` is not mounted; test setup creates Drivers through `/workforce/employees`.
+**Last Updated:** 2026-10-22
 
 \---
 
@@ -309,13 +309,13 @@ P1b.
 Existing callers still depend on the route. Removing it now would mix API-consumer migration with authority cutover.
 
 **Current State:**  
-After P1b, the route should accept Driver-profile-owned fields only and delegate to the Workforce owner. Employee-owned fields must no longer be handled through this endpoint.
+P8a removed the mounted route after the consumer audit; Driver profile changes are owned by Workforce.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Resolved In:** P8a runtime cutover (baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`).
+**Resolution Evidence:** `PATCH /core/drivers/{id}` is not mounted; mutations use Workforce.
+**Last Updated:** 2026-10-22
 
 \---
 
@@ -334,14 +334,14 @@ P1b.
 The frontend and some runtime consumers still use it.
 
 **Current State:**  
-The route must act as a compatibility read over the Workforce read model and use `driver\_state=current|pending|none` instead of `employee\_type`.
+The route was removed after P7a migrated its consumers and the P8a consumer audit confirmed no remaining runtime callers.
 
-Update 2026-10-22: P7a migrates every frontend consumer off `/core/people`: Workforce reads `/workforce/employees`, Access reads `/admin/users` with a minimal Access-scoped Employee candidate read, and the Transfer Requests driver picker reads the transfer-authorized `GET /driver-transfers/driver-candidates`. The endpoint itself is intentionally not removed here; final deletion remains P8a once zero consumers are proven.
+Update 2026-10-22: P7a migrated frontend consumers to Workforce, Access, and transfer-authorized reads. P8a removed `/core/people` after confirming the source tree has no target caller.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
+**Resolved In:** P8a runtime cutover (baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`).
+**Resolution Evidence:** `/core/people` is not mounted; Workforce and transfer reads remain the target surfaces.
 **Last Updated:** 2026-10-22
 
 \---
@@ -613,8 +613,9 @@ Unified refoundation planning; deliberately separated from Workforce refoundatio
 * **P5a–P5b** Status compensation + OrdinalTier
 * **P6a** transfer compensation copy — RETIRED (2026-10-18); superseded by Durable Driver Stages 1–3, which precede P4c
 * **P7b** final Compensation / Settings UI cutover (closed, PR #66)
-* **P7c** payroll-entry and finalized-payroll frontend cutover
-* **P8a–P8b** runtime and physical schema/catalog cleanup
+* **P7c** payroll-entry and finalized-payroll frontend cutover (closed via PR #67 at `0fd86c76ee28c724270514728cdab7dcf1bba599`)
+* **P8a** runtime compatibility/authority deletion (implemented with migration `0092`)
+* **P8b** physical schema/catalog cleanup (open)
 
 **Why Deferred:**  
 Compensation must be built on stable Workforce identity rather than while Employee/Driver authority is still moving.
@@ -622,12 +623,12 @@ Compensation must be built on stable Workforce identity rather than while Employ
 **Current State:**  
 P3a Company currency authority is closed (PR #30). G0 is closed (G0.1–G0.6, ending with PR #45). P3b is closed (PR #46): it established a dormant target persistence model and database invariants beside the legacy compensation model. P3c made the dormant model authorable and resolvable (generic PayDefinition governance and provenance, PerUnit assignment authoring, canonical resolver) without switching any operational path. P4a (closed, PR #48) cut the definition, branch-applicability and PerUnit rate authoring authority over to the target model and retired the legacy CDPI/PayItem writers and the ordinary legacy DriverRate writers. P4b (closed, PR #49, migration `0085`) is the clean pre-production runtime cutover: PayrollPeriodDefinitions replace the period PayItem snapshot, ordinary DraftLines become source facts keyed by `PayrollPeriodDefinitionID`, live PerUnit money is derived by the backend through `resolve_many` and the method-owned calculation boundary, and submit/resubmit/finalize stay closed (`TARGET_PAYROLL_EVIDENCE_NOT_READY`) until P4c. Zero PayDefinitions is valid and never falls back to PayItems; development databases that contain periods must be reset before `0085` applies. This debt is not resolved by P3b, P3c or P4a: the target period snapshots, calculation and evidence (P4b–P4c), Status and OrdinalTier (P5), transfer copy (P6, since retired) and removal of the inert legacy layer remain. Update 2026-10-18: Durable Driver Stages 1–3 (permanent Driver and DriverAssignments, Driver-owned compensation, payable rounding and proration) now precede P4c, and P6a is retired because compensation follows the Driver.
 
-Update 2026-10-22: P4c and P5a–P5b are closed; target calculation, Status, OrdinalTier and Driver-owned schedules are live. P7a merged via PR #65 at `b4474728196b23cf2b95aad6a30abb4914e9ff05`, and P7b completes the frontend Compensation / Settings cutover on that `0091` baseline without a migration. P7b merged via PR #66 at `a827a2d942594b339f9fd13441d7a1a835670bce`, and P7c (frontend-only) removes the last active frontend consumers of the legacy payroll-entry and raw FinalLines surfaces; it is implemented and awaiting independent review/merge. This entry remains open for P8 runtime/schema cleanup.
+Update 2026-10-22: P4c and P5a–P5b are closed; target calculation, Status, OrdinalTier and Driver-owned schedules are live. P7a merged via PR #65 at `b4474728196b23cf2b95aad6a30abb4914e9ff05`; P7b merged via PR #66 at `a827a2d942594b339f9fd13441d7a1a835670bce`; P7c closed via PR #67 at baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`. P8a removes remaining operational compatibility; P8b owns physical schema/catalog cleanup.
 
 **Issue Resolved?:** NOT YET
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
+**Resolved In:** —
+**Resolution Evidence:** —
 **Last Updated:** 2026-10-18
 
 \---
@@ -710,13 +711,13 @@ Cleaning payroll entry before target Compensation and final calculation paths ar
 **Current State:**  
 P1b must not be expanded into a payroll-entry redesign.
 
-Update 2026-10-22: P7c is implemented and awaiting independent review/merge. Current Payroll → Payroll Entry is the single operational Day Grid (the duplicate period-detail page and route are removed), the Finalized Payroll Library is the one finalized-payroll presentation (the raw FinalLines Ledger dialog, its client-side subtotal reconstruction, its permission helper and the merged Ledger discovery are removed), and no active frontend call remains to a legacy generic monetary or rate writer. The backend `GET /payroll/periods/{period_id}/final-lines` route and the FinalLines storage are intentionally retained for P8a. This entry becomes YES when P7c is accepted under the rules above.
+Update 2026-10-22: P7c closed via PR #67 at baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`. The Day Grid is the single operational entry UI and the Finalized Payroll Library is the finalized presentation. P8a removes the raw FinalLines API while retaining FinalLines storage/provenance, the approved immutable snapshot, and the Library read model.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Resolved In:** P7c (PR #67) and P8a runtime cutover.
+**Resolution Evidence:** Frontend no longer consumes the raw endpoint, which is unmounted in P8a; finalization and the Library continue to use immutable snapshot-backed FinalLines.
+**Last Updated:** 2026-10-22
 
 \---
 
@@ -735,13 +736,13 @@ The staged refoundation strategy itself.
 The safe sequence is: build the replacement, prove behavior, cut authority over, then delete the old runtime. Deleting legacy before proving the replacement is risky.
 
 **Current State:**  
-A temporary compatibility surface is acceptable only if it delegates to the target owner and does not contain independent business authority.
+P8a removed the agreed operational compatibility routes, global-role authorization paths, pseudo-line Status/note behavior, raw FinalLines read path, period-wide Drivers Off path, and Bonus v1 replay. Physical catalog artifacts remain for P8b.
 
-**Issue Resolved?:** NOT YET
+**Issue Resolved?:** YES
 
-**Resolved In:** —  
-**Resolution Evidence:** —  
-**Last Updated:** 2026-09-29
+**Resolved In:** P8a runtime cutover (baseline `0fd86c76ee28c724270514728cdab7dcf1bba599`).
+**Resolution Evidence:** Mounted-route/runtime consumer audit; CompanyRole-only migration `0092`; canonical EntryState-only Status/note runtime; Bonus v2-only replay.
+**Last Updated:** 2026-10-22
 
 \---
 
@@ -761,6 +762,8 @@ Physical deletion must happen only after proving zero runtime/test/migration ref
 
 **Current State:**  
 Examples include `EmployeeType`, possibly `drivers.manage`, and later legacy Compensation artifacts after their runtime consumers are gone.
+
+P8a leaves DWR-020 open: P8b owns catalog/FK dependency proof and all physical deletion.
 
 **Issue Resolved?:** NOT YET
 

@@ -28,13 +28,17 @@ async def create_owned_driver(
 ) -> int:
     marker = uuid4().hex
     resp = await client.post(
-        "/core/drivers",
+        "/workforce/employees",
         json={
             "branch_id": branch_id,
             "full_name": full_name or f"{label} owned driver {marker}",
-            "driver_number": f"{label[:3].upper()}-{marker[:10]}",
+            "hire_date": "2020-01-01",
+            "driver": {
+                "driver_number": f"{label[:3].upper()}-{marker[:10]}",
+                "effective_from_at": "2020-01-01T00:00:00Z",
+            },
         },
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 201, f"{label} owned driver create failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver"]["driver_id"]

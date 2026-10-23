@@ -20,30 +20,6 @@ _SCOPE_TYPES = {"AllCompanyBranches", "SpecificBranch", "Self"}
 
 
 # ---------------------------------------------------------------------------
-# Role assignment
-# ---------------------------------------------------------------------------
-
-class RoleAssignment(BaseModel):
-    """
-    One row from sec.UserBranchRoles, enriched with role and branch names.
-    Returned by role-assignment list and mutate endpoints.
-    """
-    assignment_id: int
-    user_id: int
-    role_id: int
-    role_code: str
-    role_name: str
-    scope_type: str            # AllCompanyBranches | SpecificBranch | Self
-    branch_id: int | None
-    branch_name: str | None
-    is_active: bool
-    granted_by_user_id: int | None
-    granted_at_utc: datetime
-    revoked_at_utc: datetime | None
-    notes: str | None = None
-
-
-# ---------------------------------------------------------------------------
 # User
 # ---------------------------------------------------------------------------
 
@@ -68,8 +44,7 @@ class UserAdmin(BaseModel):
     last_login_at_utc: datetime | None = None
     created_at_utc: datetime
     updated_at_utc: datetime | None = None
-    role_assignments: list[RoleAssignment]
-    # ── Company-role (new path) — None when no active company role is assigned ──
+    # CompanyRole assignment — None when no active company role is assigned.
     company_role_assignment_id: int | None = None
     company_role_id: int | None = None
     company_role_code: str | None = None
@@ -178,39 +153,6 @@ class UserPasswordReset(BaseModel):
 
 class UserEmployeeLink(BaseModel):
     employee_id: int
-
-
-# ---------------------------------------------------------------------------
-# Role assignment — write
-# ---------------------------------------------------------------------------
-
-class RoleAssignmentCreate(BaseModel):
-    """Payload to assign a role to a user."""
-    role_id: int
-    scope_type: str
-    branch_id: int | None = None   # required only for SpecificBranch
-    notes: str | None = None
-
-    @field_validator("scope_type")
-    @classmethod
-    def scope_valid(cls, v: str) -> str:
-        if v not in _SCOPE_TYPES:
-            raise ValueError(f"scope_type must be one of {sorted(_SCOPE_TYPES)}")
-        return v
-
-
-# ---------------------------------------------------------------------------
-# Roles catalogue (read-only)
-# ---------------------------------------------------------------------------
-
-class Role(BaseModel):
-    """A role record returned by GET /admin/roles."""
-    role_id: int
-    role_code: str
-    role_name: str
-    role_level: int
-    is_system_role: bool
-    notes: str | None = None
 
 
 # ---------------------------------------------------------------------------

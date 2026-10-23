@@ -44,9 +44,9 @@ async def _insert_company_role_assignment(
     result = await db.execute(
         text("""
             INSERT INTO sec.UserBranchRoles
-                (UserID, CompanyID, BranchID, RoleID, CompanyRoleID, ScopeType,
+                (UserID, CompanyID, BranchID, CompanyRoleID, ScopeType,
                  IsActive, GrantedByUserID, Notes)
-            VALUES (:user_id, :company_id, :branch_id, NULL, :role_id, :scope,
+            VALUES (:user_id, :company_id, :branch_id, :role_id, :scope,
                     TRUE, :caller_id, :notes)
             RETURNING UserBranchRoleID
         """),
@@ -177,10 +177,9 @@ async def unlink_user_employee(
     driver_role = await db.execute(
         text("""
             SELECT 1 FROM sec.UserBranchRoles ubr
-            LEFT JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
-            LEFT JOIN sec.Roles r ON r.RoleID = ubr.RoleID
+            JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
             WHERE ubr.UserID = :uid AND ubr.CompanyID = :cid AND ubr.IsActive
-              AND (cr.RoleCode = 'DRIVER' OR r.RoleCode = 'DRIVER')
+              AND cr.RoleCode = 'DRIVER'
             LIMIT 1
         """),
         {"uid": target_user_id, "cid": company_id},

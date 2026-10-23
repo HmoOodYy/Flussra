@@ -53,39 +53,6 @@ async def _create_user(client: httpx.AsyncClient, token: str, username: str) -> 
     return user["user_id"]
 
 
-async def _assign_company_role(
-    client: httpx.AsyncClient, token: str, user_id: int, company_role_id: int,
-    scope: str, branch_id: int | None = None,
-) -> None:
-    payload: dict = {"company_role_id": company_role_id, "scope_type": scope}
-    if branch_id is not None:
-        payload["branch_id"] = branch_id
-    resp = await client.post(
-        f"/admin/users/{user_id}/company-role-assignments",
-        json=payload, headers=_auth(token),
-    )
-    assert resp.status_code == 201, resp.text
-
-
-async def _legacy_role_id(client: httpx.AsyncClient, token: str, role_code: str) -> int:
-    resp = await client.get("/admin/roles", headers=_auth(token))
-    assert resp.status_code == 200, resp.text
-    return next(r["role_id"] for r in resp.json() if r["role_code"] == role_code)
-
-
-async def _assign_legacy_role(
-    client: httpx.AsyncClient, token: str, user_id: int, role_id: int,
-    scope: str, branch_id: int | None = None,
-) -> None:
-    payload: dict = {"role_id": role_id, "scope_type": scope}
-    if branch_id is not None:
-        payload["branch_id"] = branch_id
-    resp = await client.post(
-        f"/admin/users/{user_id}/roles", json=payload, headers=_auth(token),
-    )
-    assert resp.status_code == 201, resp.text
-
-
 async def _login(client: httpx.AsyncClient, username: str) -> str:
     resp = await client.post("/auth/login", json={
         "username": username, "password": "TestPass1234!", "company_code": "DEMO",
@@ -95,33 +62,34 @@ async def _login(client: httpx.AsyncClient, username: str) -> str:
 
 
 async def _make_mixed_authority_user(
-    client: httpx.AsyncClient, admin_token: str, payroll_branch_id: int,
+    client: httpx.AsyncClient, admin_token: str, payroll_branch_id: int, direct_db,
 ) -> str:
-    """Two simultaneously active assignments on one user:
-      - a new-path company-role assignment, AllCompanyBranches scope, granting
-        an unrelated permission (users.view) — this is what makes
-        check_branch_access report can_see_all=True;
-      - a legacy roleid-based assignment, SpecificBranch scope, granting
-        payroll.view (via the legacy PAYROLL_ADMIN role) on exactly one branch.
-
-    POST /admin/users/{id}/company-role-assignments revokes any other active
-    *company-role* assignment on assign, but never touches legacy roleid-based
-    rows, so both assignments coexist — this is the same dual-path shape the
-    test-seed admin/branch_user accounts already use (see conftest.py
-    _SEED_STMTS), just split across two scopes instead of one.
-    """
+    """Two CompanyRole assignments prove scope and permission evaluation independently."""
     marker = uuid4().hex[:12]
     company_wide_role = await _create_role_with_perms(
         client, admin_token, f"LG mixed all-branches {marker}", ["users.view"],
     )
+    branch_role = await _create_role_with_perms(
+        client, admin_token, f"LG mixed payroll branch {marker}", ["payroll.view"],
+    )
     username = f"lg_mixed_{marker}"
     user_id = await _create_user(client, admin_token, username)
-    await _assign_company_role(client, admin_token, user_id, company_wide_role, "AllCompanyBranches")
-
-    legacy_admin_role_id = await _legacy_role_id(client, admin_token, "PAYROLL_ADMIN")
-    await _assign_legacy_role(
-        client, admin_token, user_id, legacy_admin_role_id, "SpecificBranch", payroll_branch_id,
-    )
+    company_id = (await direct_db.execute(text(
+        "SELECT CompanyID FROM sec.Users WHERE UserID=:uid"), {"uid": user_id})).scalar_one()
+    # The helper provisions a neutral CompanyRole; remove that grant so the only
+    # payroll permission in this test is the explicit SpecificBranch assignment.
+    await direct_db.execute(text("""
+        UPDATE sec.UserBranchRoles SET IsActive = FALSE
+        WHERE UserID = :uid AND IsActive
+    """), {"uid": user_id})
+    await direct_db.execute(text("""
+        INSERT INTO sec.UserBranchRoles
+            (UserID, CompanyID, BranchID, CompanyRoleID, ScopeType, IsActive)
+        VALUES (:uid, :cid, NULL, :wide, 'AllCompanyBranches', TRUE),
+               (:uid, :cid, :bid, :branch_role, 'SpecificBranch', TRUE)
+    """), {"uid": user_id, "cid": company_id, "wide": company_wide_role,
+           "branch_role": branch_role, "bid": payroll_branch_id})
+    await direct_db.commit()
     return await _login(client, username)
 
 
@@ -142,11 +110,11 @@ async def _insert_cancelled_period(direct_db, branch_id: int, code_prefix: str) 
 
 @pytest.mark.asyncio
 async def test_mixed_authority_can_list_selected_branch_via_specific_branch_permission(
-    client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int,
+    client: httpx.AsyncClient, auth_token: str, paytest_branch_id: int, direct_db,
 ):
     """An AllCompanyBranches assignment without payroll.view must not shadow a
     SpecificBranch assignment that does grant it on the requested branch."""
-    token = await _make_mixed_authority_user(client, auth_token, paytest_branch_id)
+    token = await _make_mixed_authority_user(client, auth_token, paytest_branch_id, direct_db)
 
     resp = await client.get(
         "/payroll/periods", params={"branch_id": paytest_branch_id}, headers=_auth(token),
@@ -165,7 +133,7 @@ async def test_mixed_authority_unfiltered_discovery_excludes_branches_without_pa
     permitted_period_id = await _insert_cancelled_period(direct_db, paytest_branch_id, "LGMIXOK")
     excluded_period_id = await _insert_cancelled_period(direct_db, hq_branch_id, "LGMIXNO")
 
-    token = await _make_mixed_authority_user(client, auth_token, paytest_branch_id)
+    token = await _make_mixed_authority_user(client, auth_token, paytest_branch_id, direct_db)
 
     resp = await client.get("/payroll/periods", headers=_auth(token))
     assert resp.status_code == 200, resp.text

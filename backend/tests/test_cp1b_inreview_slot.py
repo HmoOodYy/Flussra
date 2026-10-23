@@ -81,16 +81,6 @@ async def _create_and_open_period(client, token, branch_id, direct_db) -> tuple[
     return row["payrollperiodid"], start_str
 
 
-async def _add_line(client, token, pid, driver_assignment_id, work_date) -> None:
-    r = await client.post(
-        f"/payroll/periods/{pid}/lines",
-        json={"driver_assignment_id": driver_assignment_id, "work_date": work_date,
-              "line_type": "DailyNote", "quantity": 1, "notes": "filler"},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, f"add line: {r.text}"
-
-
 async def _submit_to_inreview(client, token, pid) -> int:
     """Submit period to InReview. Returns review_item_id."""
     r = await client.patch(
@@ -151,8 +141,8 @@ class TestMigration:
             f"Expected exactly one alembic head (linear chain), got {len(lines)}: "
             f"{result.stdout}\n{result.stderr}"
         )
-        assert "0091" in lines[0], (
-            f"Expected head 0091, got: {lines[0]}\n{result.stderr}"
+        assert "0092" in lines[0], (
+            f"Expected head 0092, got: {lines[0]}\n{result.stderr}"
         )
 
     @pytest.mark.asyncio

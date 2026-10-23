@@ -331,9 +331,8 @@ async def set_user_permission_overrides(
             SELECT EXISTS (
                 SELECT 1 FROM sec.UserBranchRoles ubr
                 LEFT JOIN sec.CompanyRoles cr ON cr.CompanyRoleID = ubr.CompanyRoleID
-                LEFT JOIN sec.Roles r ON r.RoleID = ubr.RoleID
                 WHERE ubr.UserID = :uid AND ubr.CompanyID = :cid AND ubr.IsActive
-                  AND (ubr.ScopeType = 'Self' OR cr.RoleCode = 'DRIVER' OR r.RoleCode = 'DRIVER')
+                  AND (ubr.ScopeType = 'Self' OR cr.RoleCode = 'DRIVER')
             )
         """),
         {"uid": target_user_id, "cid": company_id},

@@ -52,11 +52,11 @@ async def ensure_any_permission(
     Raise 403 if the caller has NONE of the given permission codes.
 
     Always enforces scope first (via ensure_scope), then checks permissions
-    using sec.fn_UserHasPermission — which resolves both new and legacy paths
-    plus extra overrides.  Returns as soon as one passing code is found.
+    using sec.fn_UserHasPermission — which resolves CompanyRole grants and
+    explicit overrides. Returns as soon as one passing code is found.
 
-    Callers pass granular codes first, then ``*ADMIN_FALLBACKS`` so legacy
-    roles (setup.manage / settings.manage) remain valid:
+    Callers pass granular codes first, then ``*ADMIN_FALLBACKS`` so
+    administrative CompanyRoles (setup.manage / settings.manage) remain valid:
 
         await ensure_any_permission(cid, uid, db, "users.view", *ADMIN_FALLBACKS)
     """

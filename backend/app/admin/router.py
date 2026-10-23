@@ -1,5 +1,5 @@
 """
-Admin domain router — /admin/users, /admin/roles, /admin/permissions.
+Admin domain router — /admin/users, /admin/company-roles, /admin/permissions.
 
 All endpoints require a valid JWT.
 All endpoints require AllCompanyBranches scope — enforced inside the admin domain modules.
@@ -30,9 +30,6 @@ from app.admin.schemas import (
     OwnerTransferRequest,
     OwnerTransferResult,
     Permission,
-    Role,
-    RoleAssignment,
-    RoleAssignmentCreate,
     UserAdmin,
     UserCreate,
     UserEmployeeLink,
@@ -236,153 +233,6 @@ async def reset_password(
         company_id=int(token["cid"]),
         caller_id=int(token["sub"]),
         data=body,
-        db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Driver profile info
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/users/{user_id}/driver",
-    summary="Get driver profile info for a user",
-    responses={
-        403: {"description": "Insufficient scope"},
-        404: {"description": "User not found"},
-    },
-)
-async def get_user_driver(
-    user_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> dict:
-    return await user_reads.get_user_driver_info(
-        user_id=user_id,
-        company_id=int(token["cid"]),
-        caller_user_id=int(token["sub"]),
-        db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Role assignments
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/users/{user_id}/roles",
-    response_model=list[RoleAssignment],
-    summary="List all role assignments for a user",
-    description=(
-        "Returns both active and revoked role assignments so the admin can "
-        "see the full access history.  Filter by `is_active` client-side.\n\n"
-        "Requires AllCompanyBranches scope and granular permissions (see endpoint summary)."
-    ),
-    responses={
-        403: {"description": "Insufficient scope"},
-        404: {"description": "User not found"},
-    },
-)
-async def list_user_roles(
-    user_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> list[RoleAssignment]:
-    return await role_assignments.list_user_roles(
-        target_user_id=user_id,
-        company_id=int(token["cid"]),
-        caller_id=int(token["sub"]),
-        db=db,
-    )
-
-
-@router.post(
-    "/users/{user_id}/roles",
-    response_model=RoleAssignment,
-    status_code=201,
-    summary="Assign a role to a user",
-    description=(
-        "Creates a new role assignment.  For `AllCompanyBranches` scope, "
-        "`branch_id` must be null. For `SpecificBranch` scope, `branch_id` "
-        "is required and must belong to this company. `Self` scope requires "
-        "`branch_id` to be null. A duplicate active assignment (same user + role + "
-        "scope + branch) is rejected with 422.\n\n"
-        "Requires AllCompanyBranches scope and granular permissions (see endpoint summary)."
-    ),
-    responses={
-        403: {"description": "Insufficient scope"},
-        404: {"description": "User not found"},
-        422: {"description": "Validation error, invalid role, or duplicate assignment"},
-    },
-)
-async def assign_role(
-    user_id: int,
-    body: RoleAssignmentCreate,
-    token: TokenDep,
-    db: DbDep,
-) -> RoleAssignment:
-    return await role_assignments.assign_role(
-        target_user_id=user_id,
-        company_id=int(token["cid"]),
-        caller_id=int(token["sub"]),
-        data=body,
-        db=db,
-    )
-
-
-@router.delete(
-    "/users/{user_id}/roles/{assignment_id}",
-    response_model=RoleAssignment,
-    summary="Revoke a role assignment (soft delete)",
-    description=(
-        "Sets `is_active=false` and `revoked_at_utc=NOW()`.  The row is not "
-        "removed; it remains visible via `GET /admin/users/{id}/roles`.  "
-        "Idempotent: calling DELETE on an already-revoked assignment returns "
-        "it unchanged.\n\n"
-        "Requires AllCompanyBranches scope and granular permissions (see endpoint summary)."
-    ),
-    responses={
-        403: {"description": "Insufficient scope"},
-        404: {"description": "Role assignment not found"},
-    },
-)
-async def revoke_role(
-    user_id: int,
-    assignment_id: int,
-    token: TokenDep,
-    db: DbDep,
-) -> RoleAssignment:
-    return await role_assignments.revoke_role(
-        assignment_id=assignment_id,
-        target_user_id=user_id,
-        company_id=int(token["cid"]),
-        caller_id=int(token["sub"]),
-        db=db,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Roles catalogue (read-only)
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/roles",
-    response_model=list[Role],
-    summary="List all roles",
-    description=(
-        "Returns all roles (system and custom).  Used to populate the "
-        "role picker when assigning access.\n\n"
-        "Requires AllCompanyBranches scope and granular permissions (see endpoint summary)."
-    ),
-    responses={403: {"description": "Insufficient scope"}},
-)
-async def list_roles(
-    token: TokenDep,
-    db: DbDep,
-) -> list[Role]:
-    return await roles.list_roles(
-        company_id=int(token["cid"]),
-        caller_id=int(token["sub"]),
         db=db,
     )
 

@@ -45,15 +45,6 @@ async def _load_self_assignments(
               AND ubr.IsActive
               AND ubr.ScopeType = 'Self'
               AND cr.RoleCode = 'DRIVER'
-            UNION
-            SELECT DISTINCT r.RoleCode, r.RoleName
-            FROM sec.UserBranchRoles ubr
-            JOIN sec.Roles r ON r.RoleID = ubr.RoleID
-            WHERE ubr.UserID = :uid
-              AND ubr.CompanyID = :cid
-              AND ubr.IsActive
-              AND ubr.ScopeType = 'Self'
-              AND r.RoleCode = 'DRIVER'
             ORDER BY RoleCode
         """),
         {"uid": user_id, "cid": company_id},
@@ -180,6 +171,7 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
             WHERE  userid    = :uid
               AND  companyid = :cid
               AND  isactive  = TRUE
+              AND  companyroleid IS NOT NULL
         """),
         {"uid": user_id, "cid": company_id},
     )
@@ -234,7 +226,7 @@ async def login(request: LoginRequest, db: AsyncConnection) -> LoginResponse:
             },
         )
     # ------------------------------------------------------------------
-    # 4b. Load active permissions (UNION of new + legacy paths)
+    # 4b. Load active permissions from CompanyRole grants and explicit overrides.
     # ------------------------------------------------------------------
     active_permissions = await _load_active_permissions(user_id, company_id, db)
     authority = await _load_permission_authority(user_id, company_id, db)
@@ -274,12 +266,8 @@ async def _load_active_permissions(
     user_id: int, company_id: int, db: AsyncConnection
 ) -> list[str]:
     """
-    Return distinct permission codes active for this user across ALL active role
-    assignments.  Checks both paths so the transition is seamless:
-
-      • New path  — sec.CompanyRolePermissions (via CompanyRoleID)
-      • Legacy    — sec.RolePermissions        (via RoleID, no CompanyRoleID)
-      • Overrides — sec.UserPermissionOverrides (extra ALLOW grants)
+    Return distinct permission codes active for this user across CompanyRole
+    assignments and explicit ALLOW overrides.
 
     Fix 5: If the user is the Company Owner, return ALL permission codes from
     sec.Permissions dynamically — this ensures new permissions added to the
@@ -313,7 +301,6 @@ async def _load_active_permissions(
         text("""
             SELECT DISTINCT permissioncode
             FROM (
-                -- New path: company-scoped roles
                 SELECT crp.permissioncode
                 FROM   sec.userbranchroles        AS ubr
                 JOIN   sec.companyrolepermissions AS crp
@@ -321,20 +308,6 @@ async def _load_active_permissions(
                 WHERE  ubr.userid    = :uid
                   AND  ubr.companyid = :cid
                   AND  ubr.isactive  = TRUE
-
-                UNION
-
-                -- Legacy path: global role permissions
-                SELECT perm.permissioncode
-                FROM   sec.userbranchroles AS ubr
-                JOIN   sec.rolepermissions AS rp
-                       ON rp.roleid = ubr.roleid
-                JOIN   sec.permissions AS perm
-                       ON perm.permissionid = rp.permissionid
-                WHERE  ubr.userid    = :uid
-                  AND  ubr.companyid = :cid
-                  AND  ubr.isactive  = TRUE
-                  AND  ubr.roleid   IS NOT NULL
 
                 UNION
 

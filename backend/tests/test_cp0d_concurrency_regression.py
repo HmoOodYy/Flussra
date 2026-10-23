@@ -130,30 +130,6 @@ async def _create_open_period(
     return row["payrollperiodid"], start
 
 
-async def _add_draft_line(
-    client: httpx.AsyncClient,
-    token: str,
-    period_id: int,
-    driver_assignment_id: int,
-    work_date: str,
-) -> int:
-    """Add a DailyNote draft line while period is Open. Returns draft_line_id."""
-    r = await client.post(
-        f"/payroll/periods/{period_id}/lines",
-        json={
-            "driver_assignment_id":   driver_assignment_id,
-            "work_date":   work_date,
-            "line_type":   "DailyNote",
-            "quantity":    1,
-            "source_type": "Manual",
-            "notes":       "filler",
-        },
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, f"add line failed: {r.text}"
-    return r.json()["draft_line_id"]
-
-
 async def _force_cancel(direct_db, pid: int) -> None:
     """Force period to Cancelled -- suspends the finalized-history guards for Locked/Archived rows."""
     async with suspended_test_triggers(direct_db, FINALIZED_HISTORY_TRIGGERS):

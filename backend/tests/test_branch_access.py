@@ -147,10 +147,15 @@ class TestBranchScopeDenial:
         client: httpx.AsyncClient,
         branch_user_token: str,
         paytest_driver_id: int,
+        direct_db,
     ):
-        """GET /core/drivers/{id} for a driver on PAYTEST returns 403."""
+        """Workforce Employee detail remains branch scoped."""
+        employee_id = (await direct_db.execute(
+            _sqla_text("SELECT EmployeeID FROM core.Drivers WHERE DriverID=:did"),
+            {"did": paytest_driver_id},
+        )).scalar_one()
         resp = await client.get(
-            f"/core/drivers/{paytest_driver_id}",
+            f"/workforce/employees/{employee_id}",
             headers=auth(branch_user_token),
         )
         assert resp.status_code == 403
@@ -207,18 +212,23 @@ class TestPermissionDenial:
         hq_branch_id: int,
     ):
         """
-        POST /core/drivers on HQ branch.
+        POST /workforce/employees on HQ branch.
         Branch access check passes; employees.manage permission check fires → 403.
         """
         resp = await client.post(
-            "/core/drivers",
+            "/workforce/employees",
             json={
                 "branch_id":      hq_branch_id,
                 "full_name":      "Viewer Test Driver",
                 "preferred_name": "VTD",
-                "driver_number":  "VTD-VIEWER-001",
-                "cdl_number":     "CDL-VTD-001",
+                "employee_key":   "VTD-VIEWER-EMP",
                 "email":          "vtd_viewer@example.com",
+                "hire_date":      "2020-01-01",
+                "driver": {
+                    "driver_number": "VTD-VIEWER-001",
+                    "cdl_number": "CDL-VTD-001",
+                    "effective_from_at": "2020-01-01T00:00:00Z",
+                },
             },
             headers=auth(branch_user_token),
         )
@@ -332,18 +342,7 @@ class TestStaleTokenRejection:
         assert create_resp.status_code == 201
         stale_uid = create_resp.json()["user_id"]
 
-        # 2. Assign AllCompanyBranches role (need a role_id)
-        roles = await session_client.get("/admin/roles", headers=auth(auth_token))
-        admin_role_id = next(
-            r["role_id"] for r in roles.json() if r["role_code"] == "PAYROLL_ADMIN"
-        )
-        await session_client.post(
-            f"/admin/users/{stale_uid}/roles",
-            json={"role_id": admin_role_id, "scope_type": "AllCompanyBranches"},
-            headers=auth(auth_token),
-        )
-
-        # 3. Login as the new user to get their token
+        # 2. Login as the CompanyRole-provisioned user to get their token.
         login = await session_client.post("/auth/login", json={
             "username":     "stale_token_user",
             "password":     "StalePass123!",
@@ -352,21 +351,21 @@ class TestStaleTokenRejection:
         assert login.status_code == 200
         stale_token = login.json()["access_token"]
 
-        # 4. Verify the token works while the account is active
+        # 3. Verify the token works while the account is active
         active_resp = await session_client.get(
             "/core/branches",
             headers=auth(stale_token),
         )
         assert active_resp.status_code == 200
 
-        # 5. Deactivate the account via admin API
+        # 4. Deactivate the account via admin API
         await session_client.patch(
             f"/admin/users/{stale_uid}",
             json={"is_active": False},
             headers=auth(auth_token),
         )
 
-        # 6. The old (still cryptographically valid) token must now return 403
+        # 5. The old (still cryptographically valid) token must now return 403
         stale_resp = await session_client.get(
             "/core/branches",
             headers=auth(stale_token),
@@ -397,16 +396,6 @@ class TestStaleTokenRejection:
         )
         assert create_resp.status_code == 201
         uid = create_resp.json()["user_id"]
-
-        roles = await session_client.get("/admin/roles", headers=auth(auth_token))
-        admin_role_id = next(
-            r["role_id"] for r in roles.json() if r["role_code"] == "PAYROLL_ADMIN"
-        )
-        await session_client.post(
-            f"/admin/users/{uid}/roles",
-            json={"role_id": admin_role_id, "scope_type": "AllCompanyBranches"},
-            headers=auth(auth_token),
-        )
 
         login = await session_client.post("/auth/login", json={
             "username": "no_login_user", "password": "NoLoginPass123!", "company_code": "DEMO",

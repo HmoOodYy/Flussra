@@ -8,10 +8,10 @@ GET    /admin/users/{user_id}
 POST   /admin/users
 PATCH  /admin/users/{user_id}
 POST   /admin/users/{user_id}/reset-password
-GET    /admin/users/{user_id}/roles
-POST   /admin/users/{user_id}/roles
-DELETE /admin/users/{user_id}/roles/{assignment_id}
-GET    /admin/roles
+GET    /admin/users/{user_id}/company-role-assignments
+POST   /admin/users/{user_id}/company-role-assignments
+DELETE /admin/users/{user_id}/company-role-assignments/{assignment_id}
+GET    /admin/company-roles
 GET    /admin/permissions
 
 Users tested
@@ -26,17 +26,16 @@ TestGetUser          — 200, 404, 403
 TestCreateUser       — full/minimal create, dup username, short password, scope guard
 TestUpdateUser       — patch fields, self-deactivation blocked, scope guard
 TestResetPassword    — resets hash, clears lock, new password works, scope guard
-TestRoleAssignments  — list, assign company-wide + specific-branch, duplicate blocked,
-                       invalid scope combos, revoke, revoke idempotent, 404, scope guard
-TestListRoles        — returns seeded roles, scope guard
+TestLegacyRoleRoutesRetired — retired global-role APIs are not mounted
 TestListPermissions  — returns seeded permissions, scope guard
-TestAdminAudit       — rollback when audit fails on create_user, rollback on assign_role
+TestAdminAudit       — rollback when audit fails on create_user and CompanyRole assignment
 """
 from unittest.mock import patch
 
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import text
 
 from app.admin import audit as admin_audit
 
@@ -150,8 +149,8 @@ class TestListUsers:
         resp = await client.get("/admin/users", headers=auth(auth_token))
         assert resp.status_code == 200
         admin_entry = next(u for u in resp.json() if u["username"] == "admin")
-        assert isinstance(admin_entry["role_assignments"], list)
-        assert len(admin_entry["role_assignments"]) >= 1
+        assert admin_entry["company_role_code"] == "COMPANY_OWNER"
+        assert admin_entry["company_role_assignment_id"] is not None
 
 
 # ===========================================================================
@@ -192,7 +191,8 @@ class TestGetUser:
         assert data["username"]     == "target_user"
         assert data["display_name"] == "Target User"
         assert data["email"]        == "target@example.com"
-        assert isinstance(data["role_assignments"], list)
+        assert data["company_role_assignment_id"] is not None
+        assert data["company_role_code"] == "PAYROLL_VIEWER_CO"
 
     async def test_schema_complete(
         self,
@@ -207,7 +207,8 @@ class TestGetUser:
         for field in (
             "user_id", "company_id", "username", "display_name",
             "is_active", "can_login", "must_change_password",
-            "created_at_utc", "role_assignments",
+            "created_at_utc", "company_role_assignment_id", "company_role_id",
+            "company_role_code", "company_role_scope",
         ):
             assert field in data, f"Missing field: {field}"
 
@@ -262,7 +263,8 @@ class TestCreateUser:
         assert data["is_staged"]            is True
         assert data["must_change_password"] is True   # default
         assert data["email"]               is None
-        assert data["role_assignments"]    == []
+        assert data["company_role_assignment_id"] is None
+        assert data["company_role_id"] is None
 
     async def test_create_with_all_fields(
         self, client: httpx.AsyncClient, auth_token: str
@@ -680,333 +682,17 @@ class TestResetPassword:
 # TestRoleAssignments
 # ===========================================================================
 
-class TestRoleAssignments:
+class TestLegacyRoleRoutesRetired:
 
-    async def test_list_roles_requires_auth(
-        self, client: httpx.AsyncClient, target_user_id: int
-    ):
-        resp = await client.get(f"/admin/users/{target_user_id}/roles")
-        assert resp.status_code == 401
-
-    async def test_list_roles_branch_user_denied(
-        self,
-        client: httpx.AsyncClient,
-        branch_user_token: str,
-        target_user_id: int,
-    ):
-        resp = await client.get(
-            f"/admin/users/{target_user_id}/roles",
-            headers=auth(branch_user_token),
-        )
-        assert resp.status_code == 403
-
-    async def test_target_user_has_provisioned_company_role(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-    ):
-        resp = await client.get(
-            f"/admin/users/{target_user_id}/roles",
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
-        user = await client.get(f"/admin/users/{target_user_id}", headers=auth(auth_token))
-        assert user.json()["company_role_code"] == "PAYROLL_VIEWER_CO"
-
-    async def test_assign_all_company_branches_scope(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-    ):
-        """Assign PAYROLL_ADMIN role with AllCompanyBranches scope (no branch)."""
-        # Get the PAYROLL_ADMIN role id
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        admin_role_id = next(
-            r["role_id"] for r in roles_resp.json() if r["role_code"] == "PAYROLL_ADMIN"
-        )
-
-        resp = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    admin_role_id,
-                "scope_type": "AllCompanyBranches",
-                "branch_id":  None,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["scope_type"]  == "AllCompanyBranches"
-        assert data["branch_id"]   is None
-        assert data["is_active"]   is True
-        assert data["role_code"]   == "PAYROLL_ADMIN"
-
-    async def test_assign_specific_branch_scope(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-        hq_branch_id: int,
-    ):
-        """Assign PAYROLL_VIEWER role with SpecificBranch=HQ scope."""
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        viewer_role_id = next(
-            r["role_id"] for r in roles_resp.json() if r["role_code"] == "PAYROLL_VIEWER"
-        )
-
-        resp = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    viewer_role_id,
-                "scope_type": "SpecificBranch",
-                "branch_id":  hq_branch_id,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["scope_type"]  == "SpecificBranch"
-        assert data["branch_id"]   == hq_branch_id
-        assert data["branch_name"] is not None
-
-    async def test_duplicate_assignment_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-    ):
-        """Assigning the same role+scope+branch combination twice must return 422."""
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        admin_role_id = next(
-            r["role_id"] for r in roles_resp.json() if r["role_code"] == "PAYROLL_ADMIN"
-        )
-
-        resp = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    admin_role_id,
-                "scope_type": "AllCompanyBranches",
-                "branch_id":  None,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "already exists" in resp.json()["detail"]
-
-    async def test_all_company_branches_with_branch_id_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-        hq_branch_id: int,
-    ):
-        """AllCompanyBranches scope cannot have a branch_id."""
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        role_id = roles_resp.json()[0]["role_id"]
-
-        resp = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    role_id,
-                "scope_type": "AllCompanyBranches",
-                "branch_id":  hq_branch_id,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "null" in resp.json()["detail"].lower() or "branch_id" in resp.json()["detail"].lower()
-
-    async def test_specific_branch_without_branch_id_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-    ):
-        """SpecificBranch scope requires a branch_id."""
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        role_id = roles_resp.json()[0]["role_id"]
-
-        resp = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    role_id,
-                "scope_type": "SpecificBranch",
-                "branch_id":  None,
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "branch_id" in resp.json()["detail"].lower()
-
-    async def test_invalid_role_id_rejected(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-    ):
-        resp = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    9999999,
-                "scope_type": "AllCompanyBranches",
-            },
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "role" in resp.json()["detail"].lower()
-
-    async def test_revoke_assignment(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-        hq_branch_id: int,
-    ):
-        """Create an assignment, revoke it, verify is_active=False."""
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        viewer_role_id = next(
-            r["role_id"] for r in roles_resp.json() if r["role_code"] == "PAYROLL_VIEWER"
-        )
-
-        # Assign to a different (non-HQ) branch — PAYTEST — so it doesn't
-        # conflict with the SpecificBranch HQ assignment created earlier.
-        paytest_resp = await client.get("/core/branches", headers=auth(auth_token))
-        paytest_branch_id = next(
-            b["branch_id"] for b in paytest_resp.json() if b["branch_code"] == "PAYTEST"
-        )
-
-        assign = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    viewer_role_id,
-                "scope_type": "SpecificBranch",
-                "branch_id":  paytest_branch_id,
-            },
-            headers=auth(auth_token),
-        )
-        assert assign.status_code == 201
-        aid = assign.json()["assignment_id"]
-
-        revoke = await client.delete(
-            f"/admin/users/{target_user_id}/roles/{aid}",
-            headers=auth(auth_token),
-        )
-        assert revoke.status_code == 200
-        assert revoke.json()["is_active"]     is False
-        assert revoke.json()["revoked_at_utc"] is not None
-
-    async def test_revoke_idempotent(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-    ):
-        """Revoking an already-revoked assignment returns 200 unchanged."""
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
-        viewer_role_id = next(
-            r["role_id"] for r in roles_resp.json() if r["role_code"] == "PAYROLL_VIEWER"
-        )
-
-        # Create a fresh assignment on PAYTEST branch
-        paytest_resp = await client.get("/core/branches", headers=auth(auth_token))
-        paytest_branch_id = next(
-            b["branch_id"] for b in paytest_resp.json() if b["branch_code"] == "PAYTEST"
-        )
-
-        assign = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={
-                "role_id":    viewer_role_id,
-                "scope_type": "SpecificBranch",
-                "branch_id":  paytest_branch_id,
-                "notes":      "idempotent test",
-            },
-            headers=auth(auth_token),
-        )
-        assert assign.status_code == 201
-        aid = assign.json()["assignment_id"]
-
-        # First revoke
-        r1 = await client.delete(
-            f"/admin/users/{target_user_id}/roles/{aid}",
-            headers=auth(auth_token),
-        )
-        assert r1.status_code == 200
-
-        # Second revoke — must still be 200, still is_active=False
-        r2 = await client.delete(
-            f"/admin/users/{target_user_id}/roles/{aid}",
-            headers=auth(auth_token),
-        )
-        assert r2.status_code == 200
-        assert r2.json()["is_active"] is False
-
-    async def test_revoke_not_found(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        target_user_id: int,
-    ):
-        resp = await client.delete(
-            f"/admin/users/{target_user_id}/roles/9999999",
-            headers=auth(auth_token),
-        )
-        assert resp.status_code == 404
-
-    async def test_assign_branch_user_denied(
-        self,
-        client: httpx.AsyncClient,
-        branch_user_token: str,
-        target_user_id: int,
-    ):
-        resp = await client.post(
-            f"/admin/users/{target_user_id}/roles",
-            json={"role_id": 1, "scope_type": "AllCompanyBranches"},
-            headers=auth(branch_user_token),
-        )
-        assert resp.status_code == 403
-
-
-# ===========================================================================
-# TestListRoles
-# ===========================================================================
-
-class TestListRoles:
-
-    async def test_requires_auth(self, client: httpx.AsyncClient):
-        resp = await client.get("/admin/roles")
-        assert resp.status_code == 401
-
-    async def test_branch_user_denied(
-        self, client: httpx.AsyncClient, branch_user_token: str
-    ):
-        resp = await client.get("/admin/roles", headers=auth(branch_user_token))
-        assert resp.status_code == 403
-
-    async def test_returns_seeded_roles(
-        self, client: httpx.AsyncClient, auth_token: str
-    ):
-        resp = await client.get("/admin/roles", headers=auth(auth_token))
-        assert resp.status_code == 200
-        codes = {r["role_code"] for r in resp.json()}
-        assert "PAYROLL_ADMIN"  in codes
-        assert "PAYROLL_VIEWER" in codes
-
-    async def test_schema(self, client: httpx.AsyncClient, auth_token: str):
-        resp = await client.get("/admin/roles", headers=auth(auth_token))
-        assert resp.status_code == 200
-        role = resp.json()[0]
-        for field in ("role_id", "role_code", "role_name", "role_level", "is_system_role"):
-            assert field in role, f"Missing field: {field}"
-
-
-# ===========================================================================
-# TestListPermissions
-# ===========================================================================
-
+    async def test_global_role_routes_are_not_mounted(self, client, auth_token, target_user_id):
+        headers = auth(auth_token)
+        responses = [
+            await client.get("/admin/roles", headers=headers),
+            await client.get(f"/admin/users/{target_user_id}/roles", headers=headers),
+            await client.post(f"/admin/users/{target_user_id}/roles", json={}, headers=headers),
+            await client.delete(f"/admin/users/{target_user_id}/roles/1", headers=headers),
+        ]
+        assert [response.status_code for response in responses] == [404, 404, 404, 404]
 class TestListPermissions:
 
     async def test_requires_auth(self, client: httpx.AsyncClient):
@@ -1119,20 +805,21 @@ class TestAdminAudit:
         usernames = {u["username"] for u in list_resp.json()}
         assert unique_name not in usernames
 
-    async def test_assign_role_rolls_back_when_audit_fails(
+    async def test_company_role_assignment_rolls_back_when_audit_fails(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
         target_user_id: int,
+        db_conn,
     ):
         """
-        If write_admin_audit raises during assign_role(), the INSERT into
+        If write_admin_audit raises during CompanyRole assignment, the INSERT into
         sec.userbranchroles must roll back.
         """
-        # Get a role to assign
-        roles_resp = await client.get("/admin/roles", headers=auth(auth_token))
+        roles_resp = await client.get("/admin/company-roles", headers=auth(auth_token))
         viewer_id = next(
-            r["role_id"] for r in roles_resp.json() if r["role_code"] == "PAYROLL_VIEWER"
+            r["company_role_id"] for r in roles_resp.json()
+            if r["role_code"] == "PAYROLL_VIEWER_CO"
         )
 
         # Get the PAYTEST branch
@@ -1141,21 +828,21 @@ class TestAdminAudit:
             b["branch_id"] for b in branches_resp.json() if b["branch_code"] == "PAYTEST"
         )
 
-        # Count assignments before the failed call
-        before_resp = await client.get(
-            f"/admin/users/{target_user_id}/roles",
-            headers=auth(auth_token),
-        )
+        before = (await db_conn.execute(text("""
+            SELECT COUNT(*) FROM sec.UserBranchRoles
+            WHERE UserID=:uid AND CompanyRoleID=:role_id
+              AND BranchID=:branch_id AND IsActive
+        """), {"uid": target_user_id, "role_id": viewer_id, "branch_id": branch_id})).scalar_one()
 
         async def _raise(*args, **kwargs):
-            raise RuntimeError("Simulated audit failure on assign_role")
+            raise RuntimeError("Simulated audit failure on CompanyRole assignment")
 
         with patch.object(admin_audit, "write_admin_audit", _raise):
-            with pytest.raises(RuntimeError, match="Simulated audit failure on assign_role"):
+            with pytest.raises(RuntimeError, match="Simulated audit failure on CompanyRole assignment"):
                 await client.post(
-                    f"/admin/users/{target_user_id}/roles",
+                    f"/admin/users/{target_user_id}/company-role-assignments",
                     json={
-                        "role_id":    viewer_id,
+                        "company_role_id": viewer_id,
                         "scope_type": "SpecificBranch",
                         "branch_id":  branch_id,
                         "notes":      "audit rollback test",
@@ -1163,14 +850,9 @@ class TestAdminAudit:
                     headers=auth(auth_token),
                 )
 
-        # Verify no new assignment was committed
-        after_resp = await client.get(
-            f"/admin/users/{target_user_id}/roles",
-            headers=auth(auth_token),
-        )
-        # Active assignments only (revoked ones from earlier tests exist too)
-        active_after = [a for a in after_resp.json() if a["is_active"]]
-        active_before_count = len([
-            a for a in before_resp.json() if a["is_active"]
-        ])
-        assert len(active_after) == active_before_count
+        after = (await db_conn.execute(text("""
+            SELECT COUNT(*) FROM sec.UserBranchRoles
+            WHERE UserID=:uid AND CompanyRoleID=:role_id
+              AND BranchID=:branch_id AND IsActive
+        """), {"uid": target_user_id, "role_id": viewer_id, "branch_id": branch_id})).scalar_one()
+        assert after == before

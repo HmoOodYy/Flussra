@@ -72,23 +72,24 @@ async def main() -> None:
         else:
             print("  (none)")
 
-        # ── 3. User roles ─────────────────────────────────────────────────────
+        # ── 3. CompanyRole assignments ───────────────────────────────────────
         roles = await conn.fetch(
             """
             SELECT u.username,
-                   r.rolecode, r.rolename,
+                   cr.rolecode, cr.rolename,
                    ubr.scopetype, ubr.branchid,
                    b.branchname
               FROM sec.userbranchroles ubr
               JOIN sec.users    u ON u.userid   = ubr.userid
-              JOIN sec.roles    r ON r.roleid   = ubr.roleid
+              JOIN sec.companyroles cr ON cr.companyroleid = ubr.companyroleid
               LEFT JOIN core.branches b ON b.branchid = ubr.branchid
-             ORDER BY u.username, r.rolecode
+             WHERE ubr.companyroleid IS NOT NULL AND ubr.isactive
+             ORDER BY u.username, cr.rolecode
             """
         )
         print()
         print("=" * 60)
-        print("USER ROLES")
+        print("ACTIVE COMPANY ROLE ASSIGNMENTS")
         print("=" * 60)
         if roles:
             for r in roles:

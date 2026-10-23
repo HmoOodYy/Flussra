@@ -1,4 +1,4 @@
-"""Admin company-role lifecycle and legacy role catalogue operations."""
+"""Admin company-role lifecycle."""
 import random
 import string
 
@@ -13,36 +13,7 @@ from app.admin.schemas import (
     CompanyRoleCreate,
     CompanyRoleUpdate,
     CompanyRoleUser,
-    Role,
 )
-
-
-# Legacy System Role catalogue.
-async def list_roles(
-    company_id: int,
-    caller_id: int,
-    db: AsyncConnection,
-) -> list[Role]:
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", *security.ADMIN_FALLBACKS)
-
-    result = await db.execute(
-        text("""
-            SELECT roleid, rolecode, rolename, rolelevel, issystemrole, notes
-            FROM   sec.roles
-            ORDER  BY rolelevel DESC, rolename
-        """),
-    )
-    return [
-        Role(
-            role_id=row["roleid"],
-            role_code=row["rolecode"],
-            role_name=row["rolename"],
-            role_level=row["rolelevel"],
-            is_system_role=row["issystemrole"],
-            notes=row["notes"],
-        )
-        for row in result.mappings().all()
-    ]
 
 
 # Company Role administration.

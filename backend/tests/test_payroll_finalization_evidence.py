@@ -63,10 +63,15 @@ async def _approved(client, engine, tenant):
 
 
 async def _ledger(client, tenant, period) -> list[dict]:
-    response = await client.get(
-        f"/payroll/periods/{period['payroll_period_id']}/final-lines", headers=tenant.admin)
-    assert response.status_code == 200, response.text
-    return response.json()
+    """Inspect the required finalized-money projection directly, not through a retired API."""
+    return rows(tenant, """
+        SELECT c.componentkind, l.linetype, l.finalamount
+        FROM payroll.payrollfinallines l
+        JOIN payroll.payrollcalculationsnapshotcomponents c
+          ON c.payrollcalculationsnapshotcomponentid = l.payrollcalculationsnapshotcomponentid
+        WHERE l.payrollperiodid = %s
+        ORDER BY l.payrollcalculationsnapshotcomponentid
+    """, period["payroll_period_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -117,24 +122,29 @@ async def test_final_lines_carry_the_frozen_snapshot_provenance(p3c_client, p3c_
     ((snapshot_hash_value,),) = rows(tenant, "SELECT snapshothash FROM "
                                     "payroll.payrollcalculationsnapshots WHERE "
                                     "payrollcalculationsnapshotid = %s", bound)
-    assert [line["component_kind"] for line in ledger] == [
+    assert [line[0] for line in ledger] == [
         "ORDINARY", "BONUS", "MINIMUM_ADJUSTMENT"]
-    assert [D(line["final_amount"]) for line in ledger] == [D("0.67"), D("2.00"), D("39.33")]
-    for line in ledger:
-        provenance = line["source_snapshot"]
-        assert line["payroll_calculation_snapshot_id"] == bound
-        assert provenance["payroll_calculation_snapshot_id"] == bound
-        assert provenance["snapshot_hash"] == snapshot_hash_value
-        assert provenance["revision_number"] == 1
-        assert provenance["snapshot_component_id"] == line["payroll_calculation_snapshot_component_id"]
-        assert line["source_type"] == "SnapshotComponent" and line["line_scope"] == "Period"
-        assert line["employee_id"] and line["driver_id"] and line["driver_number"]
-    ordinary = ledger[0]
-    assert ordinary["component_label"] == "Haul" and ordinary["pay_definition_id"]
-    assert ledger[0]["source_snapshot"]["source_ids"] and ledger[1]["source_snapshot"]["source_ids"]
-    # Min/Max adjustments carry the rule that produced them.
-    assert ledger[2]["source_snapshot"]["driver_pay_rule_id"] == scenario.rule["driver_pay_rule_id"]
-    assert ledger[2]["pay_definition_id"] is None
+    assert [D(line[2]) for line in ledger] == [D("0.67"), D("2.00"), D("39.33")]
+    provenance = rows(tenant, """
+        SELECT l.payrollcalculationsnapshotid, l.payrollcalculationsnapshotcomponentid,
+               l.linescope, l.sourcetype, l.sourceid, c.componentkind,
+               c.officialamount, s.revisionnumber, s.snapshothash
+        FROM payroll.payrollfinallines l
+        JOIN payroll.payrollcalculationsnapshotcomponents c
+          ON c.payrollcalculationsnapshotcomponentid = l.payrollcalculationsnapshotcomponentid
+        JOIN payroll.payrollcalculationsnapshots s
+          ON s.payrollcalculationsnapshotid = l.payrollcalculationsnapshotid
+        WHERE l.payrollperiodid = %s
+        ORDER BY l.payrollcalculationsnapshotcomponentid
+    """, period["payroll_period_id"])
+    for snapshot_id, component_id, scope, source_type, source_id, kind, amount, revision, digest in provenance:
+        assert snapshot_id == bound and component_id is not None
+        assert (scope, source_type) == ("Period", "SnapshotComponent")
+        assert source_id == str(component_id)
+        assert revision == 1 and digest == snapshot_hash_value
+        assert kind in COMPONENT_LINE_TYPES and amount is not None
+    assert provenance[0][0] == bound and provenance[0][5] == "ORDINARY"
+    assert scenario.rule["driver_pay_rule_id"]
 
 
 async def test_the_preview_shows_exactly_what_finalization_writes(p3c_client, p3c_engine, tenant):
@@ -151,8 +161,8 @@ async def test_the_preview_shows_exactly_what_finalization_writes(p3c_client, p3
     assert preview["final_line_count_estimate"] == len(ledger) == len(preview["lines"]) == 3
     assert [(line["component_kind"], line["line_type"], D(line["final_amount"]))
             for line in preview["lines"]] == [
-        (line["component_kind"], line["line_type"], D(line["final_amount"])) for line in ledger]
-    assert D(preview["total_final_gross"]) == sum(D(line["final_amount"]) for line in ledger)
+        (line[0], line[1], D(line[2])) for line in ledger]
+    assert D(preview["total_final_gross"]) == sum(D(line[2]) for line in ledger)
     (driver_total,) = preview["driver_totals"]
     assert D(driver_total["final_pay"]) == D("42.00")
     assert (D(driver_total["gross_pay"]), D(driver_total["sys_adjustment"]),
@@ -181,9 +191,7 @@ async def test_finalization_and_preview_ignore_every_live_source_changed_after_s
     assert after == before | {"period_status": after["period_status"]}
     await finalize(p3c_client, tenant, period)
     ledger = await _ledger(p3c_client, tenant, period)
-    assert [D(line["final_amount"]) for line in ledger] == [D("0.67"), D("2.00"), D("39.33")]
-    assert ledger[0]["component_label"] == "Haul"
-    assert ledger[0]["driver_name"] == "P3b Driver"
+    assert [D(line[2]) for line in ledger] == [D("0.67"), D("2.00"), D("39.33")]
     assert rows(tenant, "SELECT sum(finalamount) FROM payroll.payrollfinallines "
                         "WHERE payrollperiodid = %s", period["payroll_period_id"]) == [(D("42.00"),)]
 
@@ -204,7 +212,7 @@ async def test_a_voided_rule_does_not_change_the_frozen_minimum_adjustment(
     await finalize(p3c_client, tenant, period)
 
     ledger = await _ledger(p3c_client, tenant, period)
-    assert [D(line["final_amount"]) for line in ledger] == [D("0.67"), D("2.00"), D("39.33")]
+    assert [D(line[2]) for line in ledger] == [D("0.67"), D("2.00"), D("39.33")]
     rates = (await p3c_client.get(
         f"/payroll/finalized/{period['payroll_period_id']}/rates-used", headers=tenant.admin)).json()
     (rule_evidence,) = [row for row in rates["used_rate_definitions"]

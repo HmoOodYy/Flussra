@@ -38,17 +38,15 @@ async def _participant_snapshot(
 
     roles = (await db.execute(text("""
         SELECT DISTINCT
-               COALESCE(cr.rolecode, r.rolecode) AS role_code,
-               COALESCE(cr.rolename, r.rolename) AS role_name,
+               cr.rolecode AS role_code,
+               cr.rolename AS role_name,
                ubr.scopetype,
                CASE
                    WHEN cr.rolecode = 'COMPANY_OWNER' THEN 'CompanyOwner'
-                   WHEN cr.companyroleid IS NOT NULL THEN 'CompanyRole'
-                   ELSE 'LegacyRole'
+                   ELSE 'CompanyRole'
                END AS grant_source
         FROM sec.userbranchroles ubr
-        LEFT JOIN sec.companyroles cr ON cr.companyroleid = ubr.companyroleid
-        LEFT JOIN sec.roles r ON r.roleid = ubr.roleid
+        JOIN sec.companyroles cr ON cr.companyroleid = ubr.companyroleid
         WHERE ubr.userid = :user_id
           AND ubr.companyid = :company_id
           AND ubr.isactive = TRUE
@@ -60,13 +58,6 @@ async def _participant_snapshot(
                   FROM sec.companyrolepermissions crp
                   WHERE crp.companyroleid = ubr.companyroleid
                     AND crp.permissioncode = :permission_code
-              )
-              OR EXISTS (
-                  SELECT 1
-                  FROM sec.rolepermissions rp
-                  JOIN sec.permissions p ON p.permissionid = rp.permissionid
-                  WHERE rp.roleid = ubr.roleid
-                    AND p.permissioncode = :permission_code
               )
           )
         ORDER BY role_code, role_name, ubr.scopetype

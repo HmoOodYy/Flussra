@@ -168,10 +168,6 @@ _SEED_STMTS = [
     SELECT companyid, 'PAYTEST', 'Payroll Test Branch', 'Active', FALSE, 'America/New_York'
     FROM core.companies WHERE companycode = 'DEMO'
     """,
-    """
-    INSERT INTO sec.roles (rolecode, rolename, rolelevel, issystemrole)
-    VALUES ('PAYROLL_ADMIN', 'Payroll Admin', 100, FALSE)
-    """,
     # Permission codes for write operations (used by action-level permission guards).
     # ON CONFLICT DO NOTHING: migration 0015 may already have inserted some of these.
     """
@@ -187,20 +183,6 @@ _SEED_STMTS = [
         ('setup.manage',           'Manage Settings',          'settings')
     ON CONFLICT (permissioncode) DO NOTHING
     """,
-    # Grant PAYROLL_ADMIN all write permissions
-    """
-    INSERT INTO sec.rolepermissions (roleid, permissionid)
-    SELECT r.roleid, p.permissionid
-    FROM   sec.roles r
-    CROSS JOIN sec.permissions p
-    WHERE  r.rolecode = 'PAYROLL_ADMIN'
-    """,
-    # Read-only role — no permissions; used to test that viewers cannot write
-    """
-    INSERT INTO sec.roles (rolecode, rolename, rolelevel, issystemrole)
-    VALUES ('PAYROLL_VIEWER', 'Payroll Viewer', 30, FALSE)
-    """,
-
     # ── Company-scoped roles (migration 0014/0016 new system) ─────────────────
     # COMPANY_OWNER: default protected role, gets all permissions
     """
@@ -250,41 +232,39 @@ _SEED_STMTS = [
     SELECT c.companyid, 'admin', 'Admin User', %(pw_hash)s, TRUE, TRUE
     FROM core.companies c WHERE c.companycode = 'DEMO'
     """,
-    # admin user assignment: AllCompanyBranches, PAYROLL_ADMIN global role (legacy path)
-    # + COMPANY_OWNER company role (new path).  Both paths grant full access.
+    # Admin user assignment: CompanyRole is the sole role authority.
     """
     INSERT INTO sec.userbranchroles
-        (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-    SELECT u.userid, u.companyid, NULL, r.roleid,
+        (userid, companyid, branchid, companyroleId, scopetype, isactive)
+    SELECT u.userid, u.companyid, NULL,
            (SELECT cr.companyroleid FROM sec.companyroles cr
             JOIN core.companies c2 ON c2.companyid = cr.companyid
             WHERE c2.companycode = 'DEMO' AND cr.rolecode = 'COMPANY_OWNER'),
            'AllCompanyBranches', TRUE
-    FROM sec.users u, sec.roles r
-    WHERE u.username = 'admin' AND r.rolecode = 'PAYROLL_ADMIN'
+    FROM sec.users u
+    WHERE u.username = 'admin'
     """,
     # Branch-limited read-only test user: SpecificBranch scope to HQ only,
-    # PAYROLL_VIEWER global role (no write permissions) + PAYROLL_VIEWER_CO company role
-    # (grants payroll.view only — NOT DRIVER so require_non_driver_subject passes).
+    # PAYROLL_VIEWER_CO CompanyRole (grants payroll.view only — NOT DRIVER so
+    # require_non_driver_subject passes).
     # Password is the same as admin ("TestPass123!") — only the role and scope differ.
     """
     INSERT INTO sec.users (companyid, username, displayname, passwordhash, isactive, canlogin)
     SELECT c.companyid, 'branch_user', 'Branch User', %(pw_hash)s, TRUE, TRUE
     FROM core.companies c WHERE c.companycode = 'DEMO'
     """,
-    # branch_user assignment: SpecificBranch HQ, PAYROLL_VIEWER global role + PAYROLL_VIEWER_CO company role
+    # branch_user assignment: SpecificBranch HQ, CompanyRole PAYROLL_VIEWER_CO
     """
     INSERT INTO sec.userbranchroles
-        (userid, companyid, branchid, roleid, companyroleId, scopetype, isactive)
-    SELECT u.userid, u.companyid, b.branchid, r.roleid,
+        (userid, companyid, branchid, companyroleId, scopetype, isactive)
+    SELECT u.userid, u.companyid, b.branchid,
            (SELECT cr.companyroleid FROM sec.companyroles cr
             JOIN core.companies c2 ON c2.companyid = cr.companyid
             WHERE c2.companycode = 'DEMO' AND cr.rolecode = 'PAYROLL_VIEWER_CO'),
            'SpecificBranch', TRUE
-    FROM   sec.users u, core.branches b, sec.roles r
+    FROM   sec.users u, core.branches b
     WHERE  u.username  = 'branch_user'
       AND  b.branchcode = 'HQ'
-      AND  r.rolecode   = 'PAYROLL_VIEWER'
     """,
     # Seed rate types used by pay-rate tests (Milestone 6).
     # The 7 production types (HOURLY, MILEAGE, LOAD, OVERNIGHT, WAIT, PALLET, SILO)
@@ -533,33 +513,40 @@ async def auth_token(session_client: httpx.AsyncClient) -> str:
 async def created_driver_id(session_client: httpx.AsyncClient, auth_token: str) -> int:
     """
     Create one driver record at session start; return its permanent driver_id.
-    All GET/PATCH tests for a specific driver use this fixture so only
+    Target Workforce setup is performed once for tests using this fixture.
     one INSERT happens for the entire session.
     """
     resp = await session_client.post(
-        "/core/drivers",
+        "/workforce/employees",
         json={
-            "branch_id": 1,          # seeded HQ branch
+            "branch_id": 1,
             "full_name": "Test Driver One",
             "preferred_name": "TD1",
-            "driver_number": "TD-001",
-            "cdl_number": "CDL-TEST-001",
+            "employee_key": "TD-EMP-001",
             "email": "td1@example.com",
+            "hire_date": "2020-01-01",
+            "driver": {
+                "driver_number": "TD-001",
+                "cdl_number": "CDL-TEST-001",
+                "effective_from_at": "2020-01-01T00:00:00Z",
+            },
         },
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver"]["driver_id"]
 
 
 async def _current_driver_assignment_id(
     client: httpx.AsyncClient, token: str, driver_id: int,
 ) -> int:
     resp = await client.get(
-        f"/core/drivers/{driver_id}", headers={"Authorization": f"Bearer {token}"},
+        "/core/driver-assignments", headers={"Authorization": f"Bearer {token}"},
     )
-    assert resp.status_code == 200, f"Driver lookup failed: {resp.text}"
-    return resp.json()["driver_assignment_id"]
+    assert resp.status_code == 200, f"Driver roster lookup failed: {resp.text}"
+    row = next((item for item in resp.json() if item["driver_id"] == driver_id and item["state"] == "current"), None)
+    assert row is not None, f"Current DriverAssignment not found for Driver {driver_id}"
+    return row["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -642,19 +629,24 @@ async def paytest_driver_id(
     request it first. Modules that own their branch shadow this fixture as well.
     """
     resp = await session_client.post(
-        "/core/drivers",
+        "/workforce/employees",
         json={
             "branch_id":      seeded_paytest_branch_id,
             "full_name":      "Paytest Driver",
             "preferred_name": "PTD",
-            "driver_number":  "PTD-001",
-            "cdl_number":     "CDL-PT-001",
+            "employee_key":   "PTD-EMP-001",
             "email":          "ptd1@example.com",
+            "hire_date":      "2020-01-01",
+            "driver": {
+                "driver_number": "PTD-001",
+                "cdl_number": "CDL-PT-001",
+                "effective_from_at": "2020-01-01T00:00:00Z",
+            },
         },
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert resp.status_code == 201, f"PAYTEST driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver"]["driver_id"]
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -682,17 +674,22 @@ async def owned_driver_id(
 
     marker = uuid4().hex
     created = await session_client.post(
-        "/core/drivers",
+        "/workforce/employees",
         json={
             "branch_id": paytest_branch_id,
             "full_name": f"Owned rule scenario {marker}",
-            "driver_number": f"OWN-{marker[:10]}",
+            "employee_key": f"OWN-EMP-{marker[:8]}",
+            "hire_date": "2020-01-01",
+            "driver": {
+                "driver_number": f"OWN-{marker[:10]}",
+                "effective_from_at": "2020-01-01T00:00:00Z",
+            },
         },
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert created.status_code == 201, f"Owned Driver create failed: {created.text}"
     body = created.json()
-    driver_id = body["driver_id"]
+    driver_id = body["driver"]["driver_id"]
     employee_id = body["employee_id"]
     try:
         yield driver_id
@@ -774,19 +771,24 @@ async def hq_driver_id(
 ) -> int:
     """Create one driver on the HQ branch at session start; return its permanent driver_id."""
     resp = await session_client.post(
-        "/core/drivers",
+        "/workforce/employees",
         json={
             "branch_id":      hq_branch_id,
             "full_name":      "HQ Driver",
             "preferred_name": "HQD",
-            "driver_number":  "HQD-001",
-            "cdl_number":     "CDL-HQ-001",
+            "employee_key":   "HQD-EMP-001",
             "email":          "hqd1@example.com",
+            "hire_date":      "2020-01-01",
+            "driver": {
+                "driver_number": "HQD-001",
+                "cdl_number": "CDL-HQ-001",
+                "effective_from_at": "2020-01-01T00:00:00Z",
+            },
         },
         headers={"Authorization": f"Bearer {auth_token}"},
     )
     assert resp.status_code == 201, f"HQ driver seed failed: {resp.text}"
-    return resp.json()["driver_id"]
+    return resp.json()["driver"]["driver_id"]
 
 
 @pytest_asyncio.fixture(scope="session")

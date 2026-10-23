@@ -257,22 +257,16 @@ async def _get_or_create_driver(
     driver_number: str,
     full_name: str,
 ) -> int:
-    r_list = await session_client.get("/core/drivers", headers=_auth(auth_token))
+    r_list = await session_client.get("/core/driver-assignments", headers=_auth(auth_token))
     if r_list.status_code == 200:
         for d in r_list.json():
-            if d.get("driver_number") == driver_number:
+            if d.get("driver_number") == driver_number and d["branch_id"] == branch_id:
                 return d["driver_assignment_id"]
-    resp = await session_client.post(
-        "/core/drivers",
-        json={
-            "branch_id":   branch_id,
-            "full_name":   full_name,
-            "driver_number": driver_number,
-        },
-        headers=_auth(auth_token),
+    from tests.builders.workforce import create_workforce_driver
+    driver = await create_workforce_driver(
+        session_client, auth_token, branch_id, full_name, driver_number,
     )
-    assert resp.status_code == 201, f"Driver seed failed: {resp.text}"
-    return resp.json()["driver_assignment_id"]
+    return driver["driver_assignment_id"]
 
 
 @pytest_asyncio.fixture(scope="module")

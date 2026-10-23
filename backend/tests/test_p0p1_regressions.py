@@ -107,17 +107,6 @@ async def _create_open_period(
     return row["payrollperiodid"]
 
 
-async def _add_line(client, token, pid, driver_assignment_id, work_date):
-    r = await client.post(
-        f"/payroll/periods/{pid}/lines",
-        json={"driver_assignment_id": driver_assignment_id, "line_type": "DailyNote",
-              "quantity": 1, "work_date": work_date, "source_type": "Manual", "notes": "filler"},
-        headers=_auth(token),
-    )
-    assert r.status_code == 201, r.text
-    return r.json()["draft_line_id"]
-
-
 async def _submit_for_review(client, token, pid):
     r = await client.patch(f"/payroll/periods/{pid}/status",
                             json={"status": "InReview"}, headers=_auth(token))
@@ -409,15 +398,27 @@ class TestDashboardPerBranchPermission:
             """,
             (pw_hash,),
         )
+        cur.execute("""
+            INSERT INTO sec.companyroles
+                (companyid, rolecode, rolename, rolelevel, isdefault, isprotected, iscustom, isactive)
+            SELECT companyid, 'P0P1_DASHBOARD_ENTRY', 'P0P1 Dashboard Entry', 20, FALSE, FALSE, TRUE, TRUE
+            FROM core.companies WHERE companycode = 'DEMO'
+            ON CONFLICT (companyid, rolecode) DO UPDATE SET isactive = TRUE
+            RETURNING companyroleid
+        """)
+        role_id = cur.fetchone()[0]
+        cur.execute("""
+            INSERT INTO sec.companyrolepermissions (companyroleid, permissioncode)
+            VALUES (%s, 'payroll.entry') ON CONFLICT DO NOTHING
+        """, (role_id,))
         cur.execute(
             """
-            INSERT INTO sec.userbranchroles (userid, companyid, branchid, roleid, scopetype, isactive)
-            SELECT u.userid, u.companyid, %(bid)s, r.roleid, 'SpecificBranch', TRUE
-            FROM sec.users u, sec.roles r
-            WHERE u.username = 'hq_only_entry' AND r.rolecode = 'PAYROLL_ADMIN'
+            INSERT INTO sec.userbranchroles (userid, companyid, branchid, companyroleid, scopetype, isactive)
+            SELECT u.userid, u.companyid, %(bid)s, %(rid)s, 'SpecificBranch', TRUE
+            FROM sec.users u WHERE u.username = 'hq_only_entry'
             ON CONFLICT DO NOTHING
             """,
-            {"bid": hq_branch_id},
+            {"bid": hq_branch_id, "rid": role_id},
         )
         conn.close()
 
