@@ -32,71 +32,60 @@ manually when needed.
 
 ## Development database reset and canonical demo
 
-Development data is disposable and is never converted. A database can be reset
-only after it has been explicitly provisioned as a resettable Flussra development
-database. The trust decision is the database's own identity, never its network
-location: a remote, Docker, WSL or cloud development database can be provisioned,
-and a local database that is not provisioned cannot be reset.
+The development database is disposable infrastructure. A reset replaces the
+whole database: nothing created inside it survives, so keep anything you need
+elsewhere. The repository's migrations and the canonical demo seed are the only
+sources it is rebuilt from:
 
-Provision once, as a PostgreSQL administrator (a superuser, or a role granted
-`SET` on the `flussra.*` parameters), from the `backend` directory:
+1. `DROP DATABASE`, then `CREATE DATABASE ... TEMPLATE template0 ENCODING 'UTF8'`;
+2. grant the application role its privileges;
+3. `alembic upgrade head`, and assert the single Alembic head;
+4. run the startup schema guard;
+5. write the canonical demo (`scripts/canonical_demo.py`) and verify it read-only.
 
-```powershell
-.\.venv\Scripts\python.exe scripts\provision_dev_database.py --admin-url postgresql://postgres@localhost:5432/payroll_v3 --confirm payroll_v3
-```
-
-This stores two database-level settings in the PostgreSQL catalog:
-`flussra.environment = development` (what the database is) and
-`flussra.reset_allowed = on` (destructive reset is allowed). They survive every
-reset. The application role cannot store them for its own database, and the
-reset command never grants them. A database already marked as another
-environment is refused. To withdraw the capability, an administrator runs
-`ALTER DATABASE payroll_v3 SET flussra.reset_allowed = off`.
-
-Then reset the database configured in `backend/.env` by repeating its name:
+Run it from the `backend` directory with a separate lifecycle connection. That
+connection goes to a control database on the same server (for example
+`postgres`) as a role that can drop and create the development database: a
+superuser, or a role with `CREATEDB` that owns the database. Supply the password
+through `PGPASSWORD` or a pgpass file, never in repository configuration:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\reset_dev_database.py --confirm payroll_v3
+.\.venv\Scripts\python.exe scripts\reset_dev_database.py --admin-url postgresql://postgres@localhost:5432/postgres --confirm payroll_v3
 ```
 
-The reset runs only when all of these hold:
+Roles and privileges:
+
+| Role | Does | Needs |
+|---|---|---|
+| Lifecycle role (`--admin-url`) | Drops and creates the development database, which it then owns | `SUPERUSER`, or `CREATEDB` plus ownership of the existing database |
+| Application role (`DATABASE_URL`) | Runs the migrations, the seed and the FastAPI backend, and owns every Flussra schema and object | `CONNECT`, `TEMPORARY` and `CREATE` on the database; `USAGE` and `CREATE` on schema `public` (granted by the reset); no `CREATEDB` |
+
+The lifecycle credential is never part of the application configuration, and the
+application credential cannot drop or create databases.
+
+Before anything is dropped, all of these must hold:
 
 - `ENVIRONMENT=development` is set explicitly in the environment or `.env` (the
   application default does not count);
-- the connected database's `flussra.environment` is `development`;
-- its `flussra.reset_allowed` is `on`;
-- `--confirm` names the database actually connected to.
+- `--admin-url` is supplied (the reset never falls back to `DATABASE_URL`), it
+  connects to a database other than the target, and its role can create
+  databases;
+- the target is the database named in `DATABASE_URL`, and `--confirm` repeats
+  that name;
+- the lifecycle connection and the application credential reach the same running
+  PostgreSQL server. The reset compares the server's start time and version, not
+  host names. Network location is not a trust boundary: local, Docker, WSL,
+  remote, CI and cloud development databases all work;
+- an existing target is owned by the lifecycle role or the application role;
+- no other session is connected to the target. Stop the backend and any other
+  client first: an open session refuses the reset, which never terminates
+  sessions and never uses `DROP DATABASE ... FORCE`.
 
-A missing or different value refuses the reset.
-
-The destructive step runs in an exclusive window. The reset closes the database
-to new connections (`ALLOW_CONNECTIONS false`) from a short control session in
-another database on the same server, by default `postgres` (change it with
-`--control-database`), because PostgreSQL does not let a session close its own
-database. It then checks that no other session is connected. Stop the backend
-and any other client first: an open session refuses the reset, and the reset
-never terminates sessions. A second reset of the same database is refused while
-one is running. The database is reopened when the destructive step finishes or
-fails, before the upgrade and seed connect. If the reset process is killed
-inside the window, the database stays closed rather than unprotected. Once no
-reset is running, the owner or a superuser reopens it while connected to another
-database:
-
-```sql
-ALTER DATABASE payroll_v3 WITH ALLOW_CONNECTIONS true;
-```
-
-Inside the window the reset drops the Flussra application schemas and
-`public.alembic_version` in one transaction. Before dropping anything it follows
-PostgreSQL's dependency graph from those schemas.
-If the drop would also remove any object outside them, such as a view, a column,
-a domain, a constraint or an index elsewhere, it lists those objects and changes
-nothing. Extensions and objects that do not depend on Flussra are kept. It then runs
-`alembic upgrade head`, asserts the single Alembic head, runs the startup schema
-guard, writes the canonical demo (`scripts/canonical_demo.py`) and verifies it.
-It keeps the database itself, so a database owner without `CREATEDB` can run it.
-`--verify-only` changes nothing and checks that the database is still the
-canonical demo.
+`DROP DATABASE` and `CREATE DATABASE` are not one transaction. If creating or
+rebuilding fails after the drop, the reset says so, and the database is absent
+or incomplete. Fix the cause and run the reset again; it also creates the
+database when it does not exist. `--verify-only` changes nothing and checks that
+the database configured in `DATABASE_URL` is still the canonical demo.
 
 The canonical demo is one payroll-ready Company, `DEMO` / Demo Logistics in
 `USD`, with no payroll history:

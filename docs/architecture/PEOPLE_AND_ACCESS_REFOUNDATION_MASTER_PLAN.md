@@ -597,7 +597,7 @@ LARGE — full replacement of a 1,256-line page and its modals.
 
 ## Phase 9 — Legacy cleanup, clean reset/reseed, closure validation
 
-**Delivered (2026-10-23):** Unified Plan P8a, P8b and P8c delivered this phase. The development reset is `backend/scripts/reset_dev_database.py` (after an administrator provisions the database as resettable, the database is kept and the Flussra application schemas are dropped, rather than dropping and recreating the database), and the single canonical seed is `backend/scripts/canonical_demo.py`; it replaces both `ensure_dev_admin.py` and the proposed separate `seed_workforce_demo.py`. Its actors follow the list below, with the custom Payroll Manager scoped to `HQ`. The P8c section of the Unified Plan records the contract and evidence; the instructions below are planning history.
+**Delivered (2026-10-23):** Unified Plan P8a, P8b and P8c delivered this phase. The development reset is `backend/scripts/reset_dev_database.py` (it replaces the whole disposable database from `template0` through a separately supplied lifecycle connection, which the plan below also intended), and the single canonical seed is `backend/scripts/canonical_demo.py`; it replaces both `ensure_dev_admin.py` and the proposed separate `seed_workforce_demo.py`. Its actors follow the list below, with the custom Payroll Manager scoped to `HQ`. The P8c section of the Unified Plan records the contract and evidence; the instructions below are planning history.
 
 ### Goal
 Remove obsolete code, reset development data to a clean baseline, prove the refoundation end to end, and close it.
