@@ -243,6 +243,31 @@ def test_target_schema_guard_detects_missing_audit_protection(target_database, t
         conn.close()
 
 
+_REVIEW_INVARIANT = "ALTER TABLE payroll.PayrollDraftLines DROP CONSTRAINT ck_DraftLines_NoStoredReview"
+
+
+@pytest.mark.parametrize("drift", [
+    _REVIEW_INVARIANT,
+    _REVIEW_INVARIANT + ", ADD CONSTRAINT ck_DraftLines_NoStoredReview "
+                        "CHECK (NeedsManagerReview = FALSE) NOT VALID",
+    _REVIEW_INVARIANT + ", ADD CONSTRAINT ck_DraftLines_NoStoredReview "
+                        "CHECK (NeedsManagerReview IS NOT NULL)",
+    "ALTER TABLE payroll.PayrollDraftLines ALTER COLUMN NeedsManagerReview DROP NOT NULL",
+], ids=["dropped", "not-validated", "weakened", "nullable"])
+def test_target_schema_guard_detects_a_missing_or_weakened_stored_review_invariant(target_database, drift):
+    _, dsn = target_database
+    conn = psycopg2.connect(**dsn)
+    try:
+        with conn.cursor() as cursor:
+            assert _check_target_physical_authorities(cursor) == []
+            cursor.execute(drift)
+            assert any("ck_DraftLines_NoStoredReview" in error
+                       for error in _check_target_physical_authorities(cursor))
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 def test_role_assignment_identity_and_uniqueness_use_company_role_only(target_database):
     from uuid import uuid4
 

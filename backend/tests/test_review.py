@@ -4,8 +4,8 @@ POST /review/items/{id}/decide.
 
 Users tested
 ------------
-admin        AllCompanyBranches scope, PAYROLL_ADMIN role (all permissions)
-branch_user  SpecificBranch=HQ scope, PAYROLL_VIEWER role (no write permissions)
+admin        AllCompanyBranches scope, COMPANY_OWNER role (all permissions)
+branch_user  SpecificBranch=HQ scope, PAYROLL_VIEWER_CO role (no write permissions)
 
 Test classes
 ------------
@@ -752,7 +752,7 @@ class TestSelfApprovalPolicy:
     - The DEMO company starts with AllowSelfApproval = TRUE (migration default).
     - Tests that set it to FALSE restore it to TRUE before returning so they
       don't interfere with other tests in the session.
-    - A second reviewer user (PAYROLL_ADMIN role, AllCompanyBranches scope) is
+    - A second reviewer user (custom review CompanyRole, AllCompanyBranches scope) is
       created once per class via a session-scoped fixture so the "different user
       can decide" tests have a valid second actor.
     """

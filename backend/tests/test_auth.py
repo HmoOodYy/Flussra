@@ -117,10 +117,9 @@ class TestLogin:
         branches = resp.json()["user"]["branches"]
         assert len(branches) == 1
         assert branches[0]["scope"] == "AllCompanyBranches"
-        # role_code may be PAYROLL_ADMIN (fresh session) or COMPANY_OWNER (after ownership
-        # transfer tests revoke+recreate the row via the new path).  Both represent the
-        # admin's full-access assignment — the scope is what matters.
-        assert branches[0]["role_code"] in ("PAYROLL_ADMIN", "COMPANY_OWNER")
+        # CompanyRole is the only role authority: the admin's full-access assignment is the
+        # Company Owner, also after ownership-transfer tests revoke and recreate the row.
+        assert branches[0]["role_code"] == "COMPANY_OWNER"
 
 
 # ---------------------------------------------------------------------------

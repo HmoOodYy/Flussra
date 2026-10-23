@@ -89,7 +89,7 @@ async def hq_entry_token(
 ) -> str:
     """
     A user with SpecificBranch scope on HQ and payroll.entry permission
-    (PAYROLL_ADMIN role, SpecificBranch on HQ).
+    (a custom entry CompanyRole, SpecificBranch on HQ).
 
     Created via direct SQL so we don't depend on the admin API's exact
     field names. Idempotent — ON CONFLICT DO NOTHING.

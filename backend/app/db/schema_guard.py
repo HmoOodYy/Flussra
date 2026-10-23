@@ -425,6 +425,22 @@ def _check_target_physical_authorities(cur) -> list[str]:
         row = cur.fetchone()
         if row is None or row[0] != "NO":
             errors.append(f"Target identity must be NOT NULL: {schema}.{table}.{column}")
+    # Source facts never store derived review state: consumers keep reading the column,
+    # but the database admits only a non-null FALSE (0001 NOT NULL, 0093 CHECK).
+    cur.execute("""
+        SELECT a.attnotnull, pg_get_constraintdef(c.oid)
+        FROM pg_attribute a
+        LEFT JOIN pg_constraint c
+          ON c.conrelid = a.attrelid AND c.conname = 'ck_draftlines_nostoredreview'
+         AND c.contype = 'c' AND c.convalidated
+        WHERE a.attrelid = to_regclass('payroll.payrolldraftlines')
+          AND a.attname = 'needsmanagerreview' AND NOT a.attisdropped
+    """)
+    row = cur.fetchone()
+    if (row is None or row[0] is not True or row[1] is None
+            or re.sub(r"[\s()]", "", row[1]).lower() != "checkneedsmanagerreview=false"):
+        errors.append("Missing or drifted source-fact invariant ck_DraftLines_NoStoredReview: "
+                      "payroll.PayrollDraftLines.NeedsManagerReview must be NOT NULL and FALSE.")
     cur.execute("SELECT 1 FROM sec.Permissions WHERE PermissionCode = 'drivers.manage'")
     if cur.fetchone() is not None:
         errors.append("Retired drivers.manage permission still exists.")

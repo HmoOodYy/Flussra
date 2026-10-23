@@ -3,8 +3,8 @@ Integration tests for branch-scope enforcement and action-level permission check
 
 Users tested
 ------------
-admin       AllCompanyBranches scope, PAYROLL_ADMIN role (all write permissions)
-branch_user SpecificBranch=HQ scope, PAYROLL_VIEWER role (no write permissions)
+admin       AllCompanyBranches scope, COMPANY_OWNER role (all permissions)
+branch_user SpecificBranch=HQ scope, PAYROLL_VIEWER_CO role (no write permissions)
 
 Branch scope tests
 ------------------
