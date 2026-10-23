@@ -2,8 +2,8 @@
 
 A fresh database is upgraded through the single Alembic head and seeded with the canonical
 demo exactly as ``scripts/reset_dev_database.py`` does. The seeded Company is then driven
-through the real payroll workflow, and the development reset restores the canonical
-payroll-ready state from that payroll history.
+through the real payroll workflow, and the development reset replaces the whole database with
+the canonical payroll-ready state.
 """
 from __future__ import annotations
 
@@ -252,26 +252,22 @@ async def test_the_seeded_company_runs_payroll_from_entry_to_the_finalized_libra
 
 
 def test_the_development_reset_restores_the_canonical_demo(seeded, tmp_path):
-    """The provisioning and reset tools, as a developer runs them, against this database."""
+    """The reset tool, as a developer runs it, replaces this database after the payroll run."""
     env = {**seeded["env"], "ENVIRONMENT": "development"}
-    database = seeded["dsn"]["database"]
-    script = [sys.executable, os.path.join(BACKEND, "scripts", "reset_dev_database.py")]
-
-    def run(*args, command=script):
-        return subprocess.run([*command, *args], cwd=tmp_path, env=env,
-                              capture_output=True, text=True, check=False)
-
-    unprovisioned = run("--confirm", database)
-    assert unprovisioned.returncode == 1
-    assert "flussra.environment is None" in unprovisioned.stderr
     dsn = seeded["dsn"]
-    provisioned = run("--admin-url", f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/{database}",
-                      "--confirm", database,
-                      command=[sys.executable, os.path.join(BACKEND, "scripts", "provision_dev_database.py")])
-    assert provisioned.returncode == 0, provisioned.stdout + provisioned.stderr
-    refused = run("--confirm", "another_database")
+    database = dsn["database"]
+    admin_url = f"postgresql://{dsn['user']}@{dsn['host']}:{dsn['port']}/postgres"
+
+    def run(*args):
+        return subprocess.run([sys.executable, os.path.join(BACKEND, "scripts", "reset_dev_database.py"),
+                               *args], cwd=tmp_path, env=env, capture_output=True, text=True,
+                              check=False)
+
+    without_lifecycle = run("--confirm", database)
+    assert without_lifecycle.returncode == 1 and "requires --admin-url" in without_lifecycle.stderr
+    refused = run("--admin-url", admin_url, "--confirm", "another_database")
     assert refused.returncode == 1 and "Refusing to reset" in refused.stderr
-    reset = run("--confirm", database)
+    reset = run("--admin-url", admin_url, "--confirm", database)
     assert reset.returncode == 0, reset.stdout + reset.stderr
     assert "canonical demo verified" in reset.stdout
     assert _version(seeded["dsn"]) == "0093"
