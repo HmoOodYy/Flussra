@@ -24,6 +24,7 @@ from scripts.provision_dev_database import provision
 from scripts.reset_dev_database import (
     ENVIRONMENT_SETTING,
     RESET_CAPABILITY_SETTING,
+    RESET_LOCK_CLASS,
     RESET_SCHEMAS,
     ResetError,
     boundary_violations,
@@ -60,7 +61,7 @@ async def owned(pg_instance):
         await provision(admin_url, confirm=name)
         yield {"name": name, "role": role, "owner_url": owner_url, "admin_url": admin_url,
                "env": env, "owner_dsn": {**admin_dsn, "user": role, "database": name},
-               "admin_dsn": {**admin_dsn, "database": name}}
+               "admin_dsn": {**admin_dsn, "database": name}, "server_dsn": admin_dsn}
     finally:
         with admin.cursor() as cursor:
             cursor.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
@@ -79,9 +80,16 @@ def _run(dsn, statement, params=None):
         conn.close()
 
 
+def _allows_connections(owned) -> bool:
+    """Read from the server's own database, so it works while the target is closed."""
+    return _run(owned["server_dsn"], "SELECT datallowconn FROM pg_database WHERE datname = %s",
+                (owned["name"],))[0][0]
+
+
 def _state(owned) -> dict:
-    """What a refused reset must leave untouched."""
+    """What a refused reset must leave untouched, including an open database."""
     return {
+        "allows_connections": _allows_connections(owned),
         "schemas": sorted(r[0] for r in _run(owned["owner_dsn"], """
             SELECT nspname FROM pg_namespace WHERE nspname = ANY(%s)""", (list(RESET_SCHEMAS),))),
         "relations": _run(owned["owner_dsn"], """
@@ -276,8 +284,10 @@ async def test_dependencies_inside_the_flussra_schemas_do_not_block_the_reset(ow
 
 async def test_a_failure_while_dropping_rolls_the_whole_reset_back(owned):
     """The last schema cannot be dropped by the owner, so the earlier drops must not survive."""
-    _run(owned["admin_dsn"], sql.SQL("ALTER SCHEMA sec OWNER TO {}").format(
-        sql.Identifier(owned["admin_dsn"]["user"])))
+    admin_role = sql.Identifier(owned["admin_dsn"]["user"])
+    _run(owned["admin_dsn"], sql.SQL("ALTER SCHEMA sec OWNER TO {}").format(admin_role))
+    _run(owned["admin_dsn"], sql.SQL("GRANT USAGE ON SCHEMA sec TO {}").format(
+        sql.Identifier(owned["role"])))
     try:
         before = _state(owned)
         with pytest.raises(Exception, match="must be owner of schema sec"):
@@ -289,15 +299,108 @@ async def test_a_failure_while_dropping_rolls_the_whole_reset_back(owned):
 
 
 # ---------------------------------------------------------------------------
+# The exclusive destructive window
+# ---------------------------------------------------------------------------
+
+def test_postgresql_does_not_let_a_session_close_its_own_database(owned):
+    """Why the reset closes the database from a control session in another database."""
+    with pytest.raises(psycopg2.Error, match="cannot disallow connections for current database"):
+        _run(owned["owner_dsn"], sql.SQL("ALTER DATABASE {} WITH ALLOW_CONNECTIONS false").format(
+            sql.Identifier(owned["name"])))
+
+
+async def test_the_window_admits_no_new_session_and_checks_the_boundary_inside_it(owned):
+    observed = {}
+
+    async def inside_the_window(conn):
+        observed["allows"] = await conn.fetchval(
+            "SELECT datallowconn FROM pg_database WHERE datname = current_database()")
+        for dsn in (owned["owner_dsn"], owned["admin_dsn"]):
+            with pytest.raises(psycopg2.OperationalError, match="not currently accepting connections"):
+                psycopg2.connect(**dsn)
+        # A dependency that appears now is caught by the check made inside the window.
+        await conn.execute("CREATE TYPE core.app_kind AS ENUM ('one')")
+        await conn.execute("CREATE DOMAIN public.unrelated_state AS core.app_kind")
+
+    try:
+        with pytest.raises(ResetError, match=r"type public\.unrelated_state"):
+            await drop_application_objects(owned["owner_url"], confirm=owned["name"],
+                                           after_isolation=inside_the_window)
+        assert observed == {"allows": False}
+        assert _allows_connections(owned) is True
+        assert _run(owned["owner_dsn"], "SELECT to_regtype('public.unrelated_state')")[0][0]
+    finally:
+        _run(owned["owner_dsn"], "DROP DOMAIN IF EXISTS public.unrelated_state")
+        _run(owned["owner_dsn"], "DROP TYPE IF EXISTS core.app_kind")
+
+
+async def test_a_connected_session_refuses_the_reset_and_the_database_reopens(owned):
+    before = _state(owned)
+    other = psycopg2.connect(**owned["admin_dsn"])
+    try:
+        with other.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            pid = cursor.fetchone()[0]
+        with pytest.raises(ResetError, match=rf"other sessions are connected[\s\S]*pid {pid}"):
+            await drop_application_objects(owned["owner_url"], confirm=owned["name"])
+        with other.cursor() as cursor:  # the session was never terminated
+            cursor.execute("SELECT 1")
+            assert cursor.fetchone() == (1,)
+        assert _state(owned) == before
+    finally:
+        other.close()
+
+
+async def test_a_second_reset_command_is_refused_while_one_is_running(owned):
+    before = _state(owned)
+    oid = _run(owned["admin_dsn"], "SELECT oid FROM pg_database WHERE datname = current_database()")[0][0]
+    running = psycopg2.connect(**owned["server_dsn"])
+    try:
+        with running.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_lock(%s)", ((RESET_LOCK_CLASS << 32) | oid,))
+        with pytest.raises(ResetError, match="another reset of it is running"):
+            await drop_application_objects(owned["owner_url"], confirm=owned["name"],
+                                           control_database=owned["server_dsn"]["database"])
+        assert _state(owned) == before
+    finally:
+        running.close()
+
+
+async def test_a_failure_inside_the_window_reopens_the_database_and_drops_nothing(owned):
+    before = _state(owned)
+
+    async def fail(conn):
+        raise RuntimeError("interrupted inside the window")
+
+    with pytest.raises(RuntimeError, match="interrupted inside the window"):
+        await drop_application_objects(owned["owner_url"], confirm=owned["name"],
+                                       after_isolation=fail)
+    assert _state(owned) == before
+
+
+# ---------------------------------------------------------------------------
 # The authorized reset (runs last: it replaces the database contents)
 # ---------------------------------------------------------------------------
 
 def test_an_authorized_reset_restores_the_canonical_demo_and_keeps_its_capability(owned, tmp_path):
     _run(owned["owner_dsn"], "CREATE TABLE public.unrelated_keep (id INTEGER)")
     env = {**owned["env"], "ENVIRONMENT": "development"}
-    result = subprocess.run([sys.executable, RESET_SCRIPT, "--confirm", owned["name"]],
-                            cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+
+    def reset():
+        return subprocess.run([sys.executable, RESET_SCRIPT, "--confirm", owned["name"]],
+                              cwd=tmp_path, env=env, capture_output=True, text=True, check=False)
+
+    # A session left open refuses the reset; once it closes, the retry succeeds.
+    other = psycopg2.connect(**owned["owner_dsn"])
+    try:
+        refused = reset()
+        assert refused.returncode == 1 and "other sessions are connected" in refused.stderr
+        assert _allows_connections(owned) is True
+    finally:
+        other.close()
+    result = reset()
     assert result.returncode == 0, result.stdout + result.stderr
+    assert _allows_connections(owned) is True
     assert "canonical demo verified" in result.stdout
     assert _run(owned["owner_dsn"], "SELECT version_num FROM public.alembic_version")[0][0] == "0093"
     for table in PAYROLL_HISTORY_TABLES:

@@ -21,13 +21,25 @@ The two database settings are stored by an administrator with
 and the application role cannot set them itself. A missing, malformed or different value
 refuses the reset.
 
+The destructive phase runs in an exclusive window. The reset takes a per-database advisory
+lock (so two reset commands never overlap), then closes the database to new connections with
+``ALTER DATABASE ... WITH ALLOW_CONNECTIONS false``, issued from a control session in another
+database of the same server (``--control-database``, default ``postgres``) because PostgreSQL
+does not let a session close its own database. It refuses, and reopens the database, if any
+other session is connected or starts connecting within a short settle period; it never
+terminates other sessions. Only then does it open the destructive transaction.
+
 The reset boundary is the set of Flussra application schemas (``RESET_SCHEMAS``) plus
-``public.alembic_version``. Inside one transaction, before dropping anything, the reset walks
-PostgreSQL's dependency graph from those schemas; if dropping them would also drop any object
-outside them (a view, a column, a domain, a constraint, ...), nothing is dropped and the
-objects are reported. ``public.alembic_version`` is dropped without CASCADE, and extensions are
-kept because the migrations create them only if absent. The database itself, its owner and
-its privileges are kept, so its owner can reset it without CREATEDB.
+``public.alembic_version``. Inside that transaction the reset locks the Flussra relations,
+checks again that it is alone, and walks PostgreSQL's dependency graph from those schemas; if
+dropping them would also drop any object outside them (a view, a column, a domain, a
+constraint, ...), nothing is dropped and the objects are reported. ``public.alembic_version``
+is dropped without CASCADE, and extensions are kept because the migrations create them only if
+absent. The previous connection setting is restored on success and on every handled failure,
+before the upgrade and seed open new connections. If the process is killed inside the window,
+the database stays closed (fail safe); the owner or a superuser reopens it from another
+database with ``ALTER DATABASE <database> WITH ALLOW_CONNECTIONS true``. The database itself,
+its owner and its privileges are kept, so its owner can reset it without CREATEDB.
 
 Usage (from the backend directory):
 
@@ -61,6 +73,10 @@ ENVIRONMENT_SETTING = "flussra.environment"
 RESET_CAPABILITY_SETTING = "flussra.reset_allowed"
 DEVELOPMENT = "development"
 RESET_ALLOWED = "on"
+# The reset closes the target database from a session in this database of the same server.
+CONTROL_DATABASE = "postgres"
+SETTLE_SECONDS = 1.0
+RESET_LOCK_CLASS = 0x464C5253  # advisory lock class for resets; the object is the database OID
 
 
 class ResetError(RuntimeError):
@@ -174,30 +190,129 @@ async def boundary_violations(conn: asyncpg.Connection, schemas=RESET_SCHEMAS) -
     return sorted({f"{r['type']} {r['identity']}" for key, r in nodes.items() if not inside(key)})
 
 
-async def drop_application_objects(database_url: str, *, confirm: str) -> list[str]:
-    """Authorize on the database side, then drop the Flussra schemas in one transaction.
+def recovery_command(database: str) -> str:
+    return (f'ALTER DATABASE "{database}" WITH ALLOW_CONNECTIONS true  '
+            "(run by the database owner or a superuser while connected to another database, "
+            "such as postgres)")
 
-    The caller has already established explicit runtime development intent.
+
+async def competing_sessions(conn: asyncpg.Connection, database_oid: int) -> list[str]:
+    """Other sessions that can run DDL in the database, including connections still starting.
+
+    A session counts when it runs as a role (system workers such as autovacuum have none) and
+    is connected to the database, or holds the database lock taken while a connection starts.
     """
-    conn = await asyncpg.connect(_plain_dsn(database_url))
+    rows = await conn.fetch("""
+        SELECT pid, usename, application_name, client_addr::text AS client
+        FROM pg_stat_activity
+        WHERE datid = $1 AND pid <> pg_backend_pid() AND usename IS NOT NULL
+        UNION
+        SELECT l.pid, NULL, NULL, NULL
+        FROM pg_locks l
+        WHERE l.locktype = 'object' AND l.classid = 'pg_database'::regclass
+          AND l.objid = $1 AND l.pid <> pg_backend_pid()
+        ORDER BY 1
+    """, database_oid)
+    return [f"pid {r['pid']}" + (f" ({r['usename']}, {r['application_name'] or 'no application'}"
+                                 f", {r['client'] or 'local'})" if r["usename"] else " (starting)")
+            for r in rows]
+
+
+async def _await_exclusive(conn: asyncpg.Connection, database_oid: int, settle: float) -> None:
+    """Refuse unless no other session is or becomes connected while new connections are closed.
+
+    The settle period lets a connection that passed PostgreSQL's connection check just before
+    the database was closed become visible, so it is refused rather than missed.
+    """
+    deadline = asyncio.get_running_loop().time() + settle
+    while True:
+        others = await competing_sessions(conn, database_oid)
+        if others:
+            raise ResetError(
+                "Refusing to reset: other sessions are connected to the database; close them "
+                "(for example, stop the backend) and retry:\n  - " + "\n  - ".join(others))
+        if asyncio.get_running_loop().time() >= deadline:
+            return
+        await asyncio.sleep(0.1)
+
+
+async def drop_application_objects(
+    database_url: str, *, confirm: str, control_database: str = CONTROL_DATABASE,
+    settle: float = SETTLE_SECONDS, after_isolation=None,
+) -> list[str]:
+    """Authorize on the database side, then drop the Flussra schemas in an exclusive window.
+
+    The caller has already established explicit runtime development intent. Once authorized,
+    the reset takes the reset lock, closes the database to new connections from a control
+    session in ``control_database`` (PostgreSQL does not let a session close its own database),
+    proves no other session is connected, and only then, in one transaction, locks the Flussra
+    relations, checks the dependency boundary again and drops. The previous connection setting
+    is restored on every handled path before this returns. ``after_isolation`` is an
+    observation point that runs once the database is exclusive, before the transaction.
+    """
+    try:
+        conn = await asyncpg.connect(_plain_dsn(database_url))
+    except asyncpg.PostgresError as exc:
+        if "not currently accepting connections" in str(exc):
+            raise ResetError(
+                f"The database is closed to new connections, either by a reset in progress or "
+                f"by an interrupted one. If no reset is running, reopen it with: "
+                f"{recovery_command(confirm)}") from exc
+        raise
     try:
         database = await conn.fetchval("SELECT current_database()")
         refusal = reset_refusal(database=database, confirm=confirm,
                                 settings=await database_settings(conn))
         if refusal:
             raise ResetError(refusal)
-        async with conn.transaction():
-            outside = await boundary_violations(conn)
-            if outside:
-                raise ResetError(
-                    "Refusing to reset: dropping the Flussra schemas would also drop these "
-                    "objects outside them:\n  - " + "\n  - ".join(outside))
-            present = [r["nspname"] for r in await conn.fetch(
-                "SELECT nspname FROM pg_namespace WHERE nspname = ANY($1::text[]) ORDER BY 1",
-                list(RESET_SCHEMAS))]
-            for schema in present:
-                await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
-            await conn.execute("DROP TABLE IF EXISTS public.alembic_version RESTRICT")
+        database_oid, allowed_before = await conn.fetchrow(
+            "SELECT oid, datallowconn FROM pg_database WHERE datname = current_database()")
+        control = await asyncpg.connect(_plain_dsn(database_url), database=control_database)
+        try:
+            # Serializes cooperating reset commands only; the isolation below is what keeps
+            # every other session out.
+            if not await control.fetchval("SELECT pg_try_advisory_lock($1::bigint)",
+                                          (RESET_LOCK_CLASS << 32) | database_oid):
+                raise ResetError(f"Refusing to reset '{database}': another reset of it is running.")
+            quoted = await conn.fetchval("SELECT quote_ident(current_database())")
+            await control.execute(f"ALTER DATABASE {quoted} WITH ALLOW_CONNECTIONS false")
+            try:
+                await _await_exclusive(conn, database_oid, settle)
+                if after_isolation is not None:
+                    await after_isolation(conn)
+                async with conn.transaction():
+                    await conn.execute("SET LOCAL lock_timeout = '30s'")
+                    relations = await conn.fetch("""
+                        SELECT format('%I.%I', n.nspname, c.relname) AS name
+                        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                        WHERE n.nspname = ANY($1::text[]) AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                        ORDER BY 1
+                    """, list(RESET_SCHEMAS))
+                    if relations:
+                        await conn.execute("LOCK TABLE " + ", ".join(r["name"] for r in relations)
+                                           + " IN ACCESS EXCLUSIVE MODE")
+                    await _await_exclusive(conn, database_oid, 0)
+                    outside = await boundary_violations(conn)
+                    if outside:
+                        raise ResetError(
+                            "Refusing to reset: dropping the Flussra schemas would also drop these "
+                            "objects outside them:\n  - " + "\n  - ".join(outside))
+                    present = [r["nspname"] for r in await conn.fetch(
+                        "SELECT nspname FROM pg_namespace WHERE nspname = ANY($1::text[]) ORDER BY 1",
+                        list(RESET_SCHEMAS))]
+                    for schema in present:
+                        await conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
+                    await conn.execute("DROP TABLE IF EXISTS public.alembic_version RESTRICT")
+            finally:
+                try:
+                    await control.execute(
+                        f"ALTER DATABASE {quoted} WITH ALLOW_CONNECTIONS "
+                        f"{'true' if allowed_before else 'false'}")
+                except Exception as exc:
+                    raise ResetError(f"Could not reopen '{database}' to new connections ({exc}). "
+                                     f"Reopen it with: {recovery_command(database)}") from exc
+        finally:
+            await control.close()
         return [f"schema {s}" for s in present]
     finally:
         await conn.close()
@@ -243,9 +358,14 @@ def verify(database_url: str) -> None:
         raise ResetError("The database is not the canonical demo:\n  - " + "\n  - ".join(problems))
 
 
-def reset_and_reseed(database_url: str, *, confirm: str) -> str:
-    """Reset ``database_url`` to the canonical demo. Returns the Alembic version it is at."""
-    dropped = asyncio.run(drop_application_objects(database_url, confirm=confirm))
+def reset_and_reseed(database_url: str, *, confirm: str,
+                     control_database: str = CONTROL_DATABASE) -> str:
+    """Reset ``database_url`` to the canonical demo. Returns the Alembic version it is at.
+
+    The database is open to new connections again before the upgrade and seed run.
+    """
+    dropped = asyncio.run(drop_application_objects(
+        database_url, confirm=confirm, control_database=control_database))
     print(f"[reset] dropped {', '.join(dropped) or 'nothing'}")
     version = upgrade_to_head(database_url)
     print(f"[reset] upgraded to the single Alembic head {version}")
@@ -268,6 +388,9 @@ def main() -> int:
                         help="reset the configured database, whose name must be repeated here")
     action.add_argument("--verify-only", action="store_true",
                         help="change nothing; verify the configured database is the canonical demo")
+    parser.add_argument("--control-database", default=CONTROL_DATABASE, metavar="DATABASE",
+                        help="another database on the same server, used to close and reopen the "
+                             f"reset database to new connections (default {CONTROL_DATABASE})")
     args = parser.parse_args()
     settings = get_settings()
     try:
@@ -279,7 +402,8 @@ def main() -> int:
         if not explicit_development(settings):
             raise ResetError("Resetting requires ENVIRONMENT=development to be set explicitly "
                              "in the environment or .env; the default does not count.")
-        reset_and_reseed(settings.DATABASE_URL, confirm=args.confirm)
+        reset_and_reseed(settings.DATABASE_URL, confirm=args.confirm,
+                         control_database=args.control_database)
         return 0
     except ResetError as exc:
         print(f"[reset] FAILED: {exc}", file=sys.stderr)
