@@ -22,8 +22,8 @@ locate their period's pending item through it. Every item this module creates
 (through either HTTP client) is therefore recorded by exact ID and deleted, with
 its Decisions and audit rows, when the test ends; a failed delete fails the test.
 """
-from unittest.mock import patch
 import uuid
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -934,7 +934,7 @@ class TestSelfApprovalPolicy:
                 headers=self._auth(auth_token),
             )
             assert company_roles.status_code == 200
-            base_role = next(
+            assert next(
                 role for role in company_roles.json()
                 if role["role_code"] == "PAYROLL_VIEWER_CO"
             )
@@ -977,8 +977,6 @@ class TestSelfApprovalPolicy:
             assert create_resp.status_code == 201, (
                 f"Failed to create reviewer2: {create_resp.text}"
             )
-            reviewer2_id = create_resp.json()["user_id"]
-
             # Log in as reviewer2.
             login_resp = await session_client.post("/auth/login", json={
                 "username":     "reviewer2",

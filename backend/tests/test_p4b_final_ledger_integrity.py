@@ -165,7 +165,7 @@ async def test_final_lines_and_finalized_routes_enforce_the_access_boundary(
                  f"/payroll/finalized/{period_id}/rates-used",
                  f"/payroll/finalized/{period_id}/audit"]
 
-    viewer = make_user(tenant, ["payroll.view"])
+    make_user(tenant, ["payroll.view"])
     denied = {
         "no permission": make_user(tenant, []),
         "driver self": make_driver_self_user(tenant, ["payroll.view", "ledger.view"]),

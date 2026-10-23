@@ -1036,8 +1036,7 @@ async def test_get_user_driver_info_follows_the_same_driver_to_its_new_assignmen
 
     # Create a user and link to the employee via direct_db
     uname = f"drv_usr_{sfx}"
-    user = await _create_provisioned_user(session_client, auth_token, uname, employee_id=emp_id)
-    uid = user["user_id"]
+    await _create_provisioned_user(session_client, auth_token, uname, employee_id=emp_id)
 
     # Complete a transfer for this driver
     r_t = await _create_transfer(

@@ -34,8 +34,8 @@ from unittest.mock import patch
 
 import httpx
 import pytest
-from sqlalchemy import text
 import pytest_asyncio
+from sqlalchemy import text
 
 from app.admin import audit as admin_audit
 

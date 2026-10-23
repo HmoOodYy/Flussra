@@ -1,18 +1,13 @@
 """GET /core/driver-assignments: branch-scoped DriverAssignment roster."""
 
-from datetime import timedelta
-
 import pytest
 
 from tests.builders.access import create_user_with_role_token, get_company_role_id
 from tests.builders.transfer_scenarios import (
     approved_transfer,
     auth,
-    branch_today,
-    local_boundary,
     make_branch,
     make_driver,
-    scheduled_transfer,
     sfx,
 )
 
@@ -93,7 +88,7 @@ async def test_the_assignment_roster_hides_branches_without_drivers_view_and_fol
     client, auth_token, branch_user_token, direct_db,
 ):
     branch = await make_branch(direct_db)
-    driver = await make_driver(client, auth_token, branch)
+    await make_driver(client, auth_token, branch)
 
     # PAYROLL_VIEWER scoped to HQ has no drivers.view anywhere: the target roster denies it.
     roster = await client.get("/core/driver-assignments", headers=auth(branch_user_token))
