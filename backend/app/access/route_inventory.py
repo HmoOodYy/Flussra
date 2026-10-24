@@ -137,6 +137,7 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'GET /payroll/periods/{period_id}/calculation-preview': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/periods/{period_id}/day-grid': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /payroll/periods/{period_id}/day-grid': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'GET /payroll/periods/{period_id}/entry-overview': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/periods/{period_id}/eligible-drivers': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/periods/{period_id}/entry-count': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry', 'payroll.finalize'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/periods/{period_id}/finalization-preview': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.finalize',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
