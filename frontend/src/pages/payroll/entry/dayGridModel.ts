@@ -6,14 +6,14 @@
  * that id (as a string), never by a code or a name. Code and label are display metadata
  * and have no behavior here.
  */
-import { displayedStatusText, type StatusCatalogEntry } from '../../lib/statusInput.ts';
+import { displayedStatusText, type StatusCatalogEntry } from '../../../lib/statusInput.ts';
 import type {
   DayGridColumn,
   DayGridResponse,
   DayGridRow,
   DayGridSaveRow,
   DayGridSummary,
-} from '../../types/payroll/entry';
+} from '../../../types/payroll/entry';
 
 /** The stable key for a column in value maps and save payloads. */
 export function columnKey(column: Pick<DayGridColumn, 'payroll_period_definition_id'>): string {

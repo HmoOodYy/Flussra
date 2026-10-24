@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
-import { formatMoney, formatRate } from '../../lib/money';
-import type { CalculationPreviewDriver } from '../../types/payroll/calculation';
-import type { DayGridColumn } from '../../types/payroll/entry';
+import { formatMoney, formatRate } from '../../../lib/money';
+import type { CalculationPreviewDriver } from '../../../types/payroll/calculation';
+import type { DayGridColumn } from '../../../types/payroll/entry';
 import { dayChip } from './dayEntryPageModel';
 import { payParts, ratesByColumn, type WeekBar } from './periodOverviewModel';
 import styles from './PayrollEntryPage.module.css';

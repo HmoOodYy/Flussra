@@ -5,15 +5,15 @@
  * Presentation only. Every amount shown comes from the backend; the day pay here is the exact
  * sum of preview line amounts for the selected date, never a recomputation from rates.
  */
-import { resolveStatusInput } from '../../lib/statusInput.ts';
-import { addIsoDays, compareIso, isValidIsoDate, WEEKDAY_NAMES, weekdayOfIso } from '../../lib/isoDate.ts';
-import type { CalculationPreviewDriver } from '../../types/payroll/calculation';
+import { resolveStatusInput } from '../../../lib/statusInput.ts';
+import { addIsoDays, compareIso, isValidIsoDate, WEEKDAY_NAMES, weekdayOfIso } from '../../../lib/isoDate.ts';
+import type { CalculationPreviewDriver } from '../../../types/payroll/calculation';
 import type {
   DayGridColumn,
   DayGridRow,
   DayGridSaveRow,
   DayGridStatusKey,
-} from '../../types/payroll/entry';
+} from '../../../types/payroll/entry';
 
 // ---------------------------------------------------------------------------
 // Period dates and weeks
@@ -45,7 +45,7 @@ export function weekIndexOf(weeks: readonly (readonly string[])[], date: string 
   return index < 0 ? 0 : index;
 }
 
-export interface DayChip {
+interface DayChip {
   date: string;
   weekday: string;
   dayOfMonth: number;
@@ -71,7 +71,7 @@ export function parsePeriodId(raw: string | undefined): number | null {
 // Lifecycle indicator
 // ---------------------------------------------------------------------------
 
-export interface LifecycleStage {
+interface LifecycleStage {
   key: 'entry' | 'review' | 'approved' | 'finalized';
   label: string;
   state: 'done' | 'current' | 'upcoming';
@@ -168,15 +168,6 @@ export function dayPayByDriver(
   return result;
 }
 
-/** One driver's pay for one date, or null when the preview holds no amount for it. */
-export function dayPayForDriver(
-  drivers: readonly Pick<CalculationPreviewDriver, 'lines'>[],
-  driverAssignmentId: number,
-  workDate: string,
-): string | null {
-  return dayPayByDriver(drivers, workDate).get(driverAssignmentId) ?? null;
-}
-
 /** The small line under the Day pay card: where the figure comes from, or why there is none. */
 export function dayPayNote(state: {
   periodStatus: string;
@@ -216,10 +207,10 @@ export function formatQuantity(value: string): string {
 // Cell warnings
 // ---------------------------------------------------------------------------
 
-export const WARNING_NO_APPROVED_RATE = 'No approved rate';
-export const WARNING_NUMBERS_ONLY = 'Numbers only';
-export const WARNING_NOT_NEGATIVE = "Can't be negative";
-export const WARNING_WHOLE_NUMBERS = 'Whole numbers only';
+const WARNING_NO_APPROVED_RATE = 'No approved rate';
+const WARNING_NUMBERS_ONLY = 'Numbers only';
+const WARNING_NOT_NEGATIVE = "Can't be negative";
+const WARNING_WHOLE_NUMBERS = 'Whole numbers only';
 
 const NUMERIC_TEXT = /^[+-]?(\d+\.?\d*|\.\d+)$/;
 
@@ -304,7 +295,7 @@ export function matchesDriverSearch(
 }
 
 /** Any cell the server flagged for review, or holding a value that cannot be saved. */
-export function rowNeedsAttention(
+function rowNeedsAttention(
   state: Pick<EntryRowState, 'row' | 'values'>,
   columns: readonly Pick<DayGridColumn, 'payroll_period_definition_id' | 'input_type'>[],
 ): boolean {
@@ -316,7 +307,7 @@ export function rowNeedsAttention(
 }
 
 /** No Status and no quantity entered. */
-export function rowNotEntered(state: Pick<EntryRowState, 'statusText' | 'values'>): boolean {
+function rowNotEntered(state: Pick<EntryRowState, 'statusText' | 'values'>): boolean {
   return state.statusText.trim() === ''
     && Object.values(state.values).every((value) => value.trim() === '');
 }

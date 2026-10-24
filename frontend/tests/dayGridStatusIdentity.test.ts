@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildSaveRowFromGrid, withTypedStatus } from '../src/pages/payroll/dayGridModel.ts';
+import { buildSaveRowFromGrid, withTypedStatus } from '../src/pages/payroll/entry/dayGridModel.ts';
 import type { DayGridResponse } from '../src/types/payroll/entry';
 
 function gridWithHeldStatus(): DayGridResponse {

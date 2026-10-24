@@ -1,4 +1,4 @@
-import type { DayGridColumn } from '../../types/payroll/entry';
+import type { DayGridColumn } from '../../../types/payroll/entry';
 import type { RowFilter } from './dayEntryPageModel';
 import type { EntryView } from './periodOverviewModel';
 import styles from './PayrollEntryPage.module.css';

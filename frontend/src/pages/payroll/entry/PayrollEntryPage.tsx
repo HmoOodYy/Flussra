@@ -8,9 +8,9 @@
  */
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
-import { formatMoney } from '../../lib/money';
-import { canViewPayRates } from '../../lib/permissions';
-import { useAuth } from '../../store/authStore';
+import { formatMoney } from '../../../lib/money';
+import { canViewPayRates } from '../../../lib/permissions';
+import { useAuth } from '../../../store/authStore';
 import { daySaveErrorMessage, quantityTotalViews } from './dayGridModel';
 import {
   dayPayByDriver, dayPayNote, filterEntryRows, formatQuantity, groupIntoWeeks, listPeriodDates,

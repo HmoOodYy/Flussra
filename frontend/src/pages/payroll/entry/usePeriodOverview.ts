@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getPeriodEntryOverview } from '../../lib/payrollApi';
-import type { PeriodEntryOverviewResponse } from '../../types/payroll/entry';
+import { getPeriodEntryOverview } from '../../../lib/payrollApi';
+import type { PeriodEntryOverviewResponse } from '../../../types/payroll/entry';
 
 /**
  * The saved entries of every day of the period, read beside the Day Grid for the day strip, the

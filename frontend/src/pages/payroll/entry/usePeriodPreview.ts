@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getCalculationPreview } from '../../lib/payrollApi';
-import type { CalculationPreviewResponse } from '../../types/payroll/calculation';
+import { getCalculationPreview } from '../../../lib/payrollApi';
+import type { CalculationPreviewResponse } from '../../../types/payroll/calculation';
 
 /** Period statuses whose calculation preview the backend serves. */
 const PREVIEW_STATUSES = new Set(['Open', 'Returned']);

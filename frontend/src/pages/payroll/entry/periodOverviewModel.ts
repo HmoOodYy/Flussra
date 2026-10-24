@@ -6,8 +6,8 @@
  * and everything is keyed by the period definition id and the driver assignment id, never by a
  * code, a name or a kind of pay.
  */
-import type { CalculationPreviewDriver } from '../../types/payroll/calculation';
-import type { DayGridColumn, DayGridRow, PeriodEntryOverviewDay } from '../../types/payroll/entry';
+import type { CalculationPreviewDriver } from '../../../types/payroll/calculation';
+import type { DayGridColumn, DayGridRow, PeriodEntryOverviewDay } from '../../../types/payroll/entry';
 import { dayPayByDriver, formatQuantity, isBlankOrZero, sumDecimalStrings } from './dayEntryPageModel.ts';
 
 export type EntryView = 'day' | 'week';
@@ -17,7 +17,7 @@ export type EntryView = 'day' | 'week';
 // ---------------------------------------------------------------------------
 
 /** The Status text of a saved row, or null when the day holds none. */
-export function rowStatusLabel(row: Pick<DayGridRow, 'status_key_id' | 'status_key' | 'status_label'>): string | null {
+function rowStatusLabel(row: Pick<DayGridRow, 'status_key_id' | 'status_key' | 'status_label'>): string | null {
   const label = (row.status_label ?? '').trim();
   if (label !== '') return label;
   const key = (row.status_key ?? '').trim();
@@ -35,7 +35,7 @@ function rowHasAnyQuantityText(row: Pick<DayGridRow, 'values'>): boolean {
 }
 
 /** A Status, or any quantity text: the row has been entered for the day. */
-export function rowIsEntered(row: Pick<DayGridRow, 'status_key_id' | 'status_key' | 'status_label' | 'values'>): boolean {
+function rowIsEntered(row: Pick<DayGridRow, 'status_key_id' | 'status_key' | 'status_label' | 'values'>): boolean {
   return rowStatusLabel(row) !== null || rowHasAnyQuantityText(row);
 }
 
@@ -116,7 +116,7 @@ export function rowOfDriver(
   return day.rows.find((row) => row.driver_assignment_id === driverAssignmentId);
 }
 
-export interface WeekCell {
+interface WeekCell {
   text: string;
   kind: 'status' | 'quantity' | 'pending' | 'blank';
   /** The server flagged this value for review (no approved rate). */
@@ -226,7 +226,7 @@ export function daysWorked(
   }).length;
 }
 
-export interface PayPart {
+interface PayPart {
   key: 'daily' | 'status' | 'bonus' | 'minimum' | 'maximum';
   label: string;
   amount: string;
@@ -249,7 +249,7 @@ export function payParts(
   });
 }
 
-export interface ColumnRates {
+interface ColumnRates {
   key: string;
   label: string;
   unit: string | null;

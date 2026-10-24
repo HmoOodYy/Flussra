@@ -7,7 +7,6 @@ import {
   clientCellWarning,
   dayChip,
   dayPayByDriver,
-  dayPayForDriver,
   dayPayNote,
   driverInitials,
   filterEntryRows,
@@ -23,7 +22,7 @@ import {
   unsavedChangesLabel,
   weekIndexOf,
   type EntryRowState,
-} from '../src/pages/payroll/dayEntryPageModel.ts';
+} from '../src/pages/payroll/entry/dayEntryPageModel.ts';
 import {
   dayProgress,
   daysOfWeek,
@@ -35,7 +34,7 @@ import {
   weekCell,
   weekPayByDriver,
   weekTotal,
-} from '../src/pages/payroll/periodOverviewModel.ts';
+} from '../src/pages/payroll/entry/periodOverviewModel.ts';
 import type { DayGridColumn, DayGridStatusKey, PeriodEntryOverviewDay } from '../src/types/payroll/entry.ts';
 
 // ── Period dates and weeks ──────────────────────────────────────────────────
@@ -145,7 +144,7 @@ test('a driver\'s day pay is the exact sum of that driver\'s lines dated that da
       line(1, null, '50.0000'),
     ],
   }];
-  assert.equal(dayPayForDriver(drivers, 1, '2026-09-23'), '0.3000');
+  assert.equal(dayPayByDriver(drivers, '2026-09-23').get(1), '0.3000');
 });
 
 test('lines of other drivers and other dates never enter a driver\'s day pay', () => {
@@ -156,15 +155,15 @@ test('lines of other drivers and other dates never enter a driver\'s day pay', (
   const pay = dayPayByDriver(drivers, '2026-09-23');
   assert.equal(pay.get(1), '10.0000');
   assert.equal(pay.get(2), '20.5000');
-  assert.equal(dayPayForDriver(drivers, 1, '2026-09-24'), '99.0000');
+  assert.equal(dayPayByDriver(drivers, '2026-09-24').get(1), '99.0000');
 });
 
 test('a driver with no amount for the day has no day pay', () => {
   const drivers = [{ lines: [line(1, '2026-09-24', '10.0000'), line(2, '2026-09-23', null)] }];
-  assert.equal(dayPayForDriver(drivers, 1, '2026-09-23'), null);
-  assert.equal(dayPayForDriver(drivers, 2, '2026-09-23'), null);
-  assert.equal(dayPayForDriver(drivers, 3, '2026-09-23'), null);
-  assert.equal(dayPayForDriver([], 1, '2026-09-23'), null);
+  assert.equal(dayPayByDriver(drivers, '2026-09-23').get(1), undefined);
+  assert.equal(dayPayByDriver(drivers, '2026-09-23').get(2), undefined);
+  assert.equal(dayPayByDriver(drivers, '2026-09-23').get(3), undefined);
+  assert.equal(dayPayByDriver([], '2026-09-23').get(1), undefined);
 });
 
 test('the day pay note says where the figure comes from or why there is none', () => {
@@ -204,7 +203,7 @@ test('text that is not a plain decimal is shown unchanged, and blank stays blank
 });
 
 test('quantity inputs are text fields that no wheel or arrow key can step', () => {
-  const table = readFileSync(new URL('../src/pages/payroll/DayEntryTable.tsx', import.meta.url), 'utf8');
+  const table = readFileSync(new URL('../src/pages/payroll/entry/DayEntryTable.tsx', import.meta.url), 'utf8');
   assert.doesNotMatch(table, /type="number"/);
   assert.match(table, /inputMode=\{inputProps\.inputMode\}/);
   assert.doesNotMatch(table, /onWheel|onKeyDown/);

@@ -1,5 +1,5 @@
 import { useId } from 'react';
-import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/payroll/entry';
+import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../../types/payroll/entry';
 import { columnKey, quantityInputProps, quantityTotalViews } from './dayGridModel';
 import { cellWarning, formatQuantity, quantitiesLocked, rowIsOff } from './dayEntryPageModel';
 import { DriverIdentity } from './DriverIdentity';

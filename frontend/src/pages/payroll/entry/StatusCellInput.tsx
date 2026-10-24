@@ -3,7 +3,7 @@ import {
   resolveStatusInput,
   statusInputSuggestions,
   type StatusCatalogEntry,
-} from '../../lib/statusInput';
+} from '../../../lib/statusInput';
 
 /**
  * The Day Grid Status cell: the typed name or alias of a Status (the catalog suggests both),

@@ -2,28 +2,28 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { buildSaveRowFromGrid, columnKey, quantityInputProps, quantityTotalViews } from '../src/pages/payroll/dayGridModel.ts';
+import { buildSaveRowFromGrid, columnKey, quantityInputProps, quantityTotalViews } from '../src/pages/payroll/entry/dayGridModel.ts';
 import type { DayGridColumn, DayGridResponse } from '../src/types/payroll/entry.ts';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
 // The entry page: its orchestration, tables, day selector, header and driver panel, plus its pure models and reads.
 const entryPageComponents = [
-  'src/pages/payroll/PayrollEntryPage.tsx',
-  'src/pages/payroll/DayEntryTable.tsx',
-  'src/pages/payroll/DaySelector.tsx',
-  'src/pages/payroll/PeriodEntryHeader.tsx',
-  'src/pages/payroll/WeekTable.tsx',
-  'src/pages/payroll/DriverPanel.tsx',
-  'src/pages/payroll/DriverIdentity.tsx',
-  'src/pages/payroll/EntryToolbar.tsx',
+  'src/pages/payroll/entry/PayrollEntryPage.tsx',
+  'src/pages/payroll/entry/DayEntryTable.tsx',
+  'src/pages/payroll/entry/DaySelector.tsx',
+  'src/pages/payroll/entry/PeriodEntryHeader.tsx',
+  'src/pages/payroll/entry/WeekTable.tsx',
+  'src/pages/payroll/entry/DriverPanel.tsx',
+  'src/pages/payroll/entry/DriverIdentity.tsx',
+  'src/pages/payroll/entry/EntryToolbar.tsx',
 ];
 const entryPageSources = [
   ...entryPageComponents,
-  'src/pages/payroll/dayEntryPageModel.ts',
-  'src/pages/payroll/usePeriodPreview.ts',
-  'src/pages/payroll/usePeriodOverview.ts',
-  'src/pages/payroll/periodOverviewModel.ts',
+  'src/pages/payroll/entry/dayEntryPageModel.ts',
+  'src/pages/payroll/entry/usePeriodPreview.ts',
+  'src/pages/payroll/entry/usePeriodOverview.ts',
+  'src/pages/payroll/entry/periodOverviewModel.ts',
 ];
 
 function column(id: number, overrides: Partial<DayGridColumn> = {}): DayGridColumn {
@@ -64,10 +64,10 @@ test('quantity totals are generic per definition, in column order, defaulting to
 
 test('the Day Grid has no hours, miles or pay-item semantics', () => {
   const sources = [
-    'src/pages/payroll/dayGridModel.ts',
+    'src/pages/payroll/entry/dayGridModel.ts',
     'src/pages/payroll/WorkTotals.tsx',
     ...entryPageSources,
-    'src/pages/payroll/useDailyEntryController.ts',
+    'src/pages/payroll/entry/useDailyEntryController.ts',
   ].map(read).join('\n');
   assert.doesNotMatch(sources, /pay_item_code|pay_item_id|is_time|total_hours|total_miles/);
   assert.doesNotMatch(sources, /['"`](HOURS|MILES)['"`]/);
@@ -77,14 +77,14 @@ test('the Day Grid has no hours, miles or pay-item semantics', () => {
 test('Day Grid saves are keyed by the period definition id', () => {
   const entry = entryPageComponents.map(read).join('\n');
   assert.match(entry, /columnKey\(/);
-  const feature = [entry, read('src/pages/payroll/useDailyEntryController.ts'), read('src/pages/payroll/dayGridModel.ts')].join('\n');
+  const feature = [entry, read('src/pages/payroll/entry/useDailyEntryController.ts'), read('src/pages/payroll/entry/dayGridModel.ts')].join('\n');
   assert.doesNotMatch(feature, /values\[[^\]]*definition_code/);
 });
 
 test('the payroll entry workbench carries no PayItem identity', () => {
   const types = read('src/types/payroll/entry.ts');
   assert.match(types, /payroll_period_definition_id/);
-  const detail = [...entryPageSources, 'src/pages/payroll/useDailyEntryController.ts'].map(read).join('\n');
+  const detail = [...entryPageSources, 'src/pages/payroll/entry/useDailyEntryController.ts'].map(read).join('\n');
   assert.doesNotMatch(detail, /pay_item_code|PayItem/);
 });
 

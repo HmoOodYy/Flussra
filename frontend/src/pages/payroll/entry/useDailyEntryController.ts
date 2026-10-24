@@ -1,9 +1,9 @@
 import { useCallback, useRef, useState } from 'react';
-import { getDayGrid, saveDayGrid } from '../../lib/payrollApi';
-import { canEntryPayroll } from '../../lib/permissions';
-import { formatIsoShort, weekdayOfIso } from '../../lib/isoDate';
-import type { UserProfile } from '../../store/authStore';
-import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/payroll/entry';
+import { getDayGrid, saveDayGrid } from '../../../lib/payrollApi';
+import { canEntryPayroll } from '../../../lib/permissions';
+import { formatIsoShort, weekdayOfIso } from '../../../lib/isoDate';
+import type { UserProfile } from '../../../store/authStore';
+import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../../types/payroll/entry';
 import { buildSaveRowFromGrid, statusCellText, withTypedStatus } from './dayGridModel';
 
 const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
@@ -62,9 +62,6 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
       if (read === latestRead.current) setLoading(false);
     }
   }, [periodId]);
-
-  const atStart = grid && selectedDate ? selectedDate <= grid.period.start_date : true;
-  const atEnd   = grid && selectedDate ? selectedDate >= grid.period.end_date   : true;
 
   function selectDate(date: string) { setSelectedDate(date); }
 
@@ -153,8 +150,6 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
     saving,
     saveError,
     fetchGrid,
-    atStart,
-    atEnd,
     selectDate,
     discardChanges,
     isEditable,

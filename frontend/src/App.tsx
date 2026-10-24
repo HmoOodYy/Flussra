@@ -10,7 +10,7 @@ import { SignupPage } from './pages/public/SignupPage';
 import { LoginPage } from './pages/LoginPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { PeriodsListPage } from './pages/payroll/PeriodsListPage';
-import { PayrollEntryPage } from './pages/payroll/PayrollEntryPage';
+import { PayrollEntryPage } from './pages/payroll/entry/PayrollEntryPage';
 import { LedgerPage } from './pages/payroll/LedgerPage';
 import { SettingsShell } from './pages/settings/SettingsShell';
 import { CompanyBranchesPage } from './pages/settings/company-branches/CompanyBranchesPage';

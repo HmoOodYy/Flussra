@@ -97,8 +97,7 @@ test('financial screens have no known USD-specific formatting assumptions', () =
     '../src/pages/payroll/finalizedLibrary/EvidencePresentation.tsx',
     '../src/pages/payroll/LedgerPage.tsx',
     '../src/pages/payroll/PeriodsListPage.tsx',
-    '../src/pages/payroll/grossDisplay.ts',
-    '../src/pages/payroll/useDailyEntryController.ts',
+    '../src/pages/payroll/entry/useDailyEntryController.ts',
   ];
   const payRatesFeatureFiles = [
     '../src/pages/people/pay-rates/PayRatesPage.tsx',

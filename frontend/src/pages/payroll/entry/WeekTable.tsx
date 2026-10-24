@@ -1,4 +1,4 @@
-import type { DayGridColumn, DayGridRow, PeriodEntryOverviewDay } from '../../types/payroll/entry';
+import type { DayGridColumn, DayGridRow, PeriodEntryOverviewDay } from '../../../types/payroll/entry';
 import { dayChip, formatQuantity } from './dayEntryPageModel';
 import { DriverIdentity } from './DriverIdentity';
 import { rowOfDriver, weekCell, weekTotal } from './periodOverviewModel';

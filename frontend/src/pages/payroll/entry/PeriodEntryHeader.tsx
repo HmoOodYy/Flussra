@@ -1,8 +1,8 @@
 import type { MouseEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { PeriodStatusBadge } from '../../components/StatusBadge';
-import { formatIsoLong, formatIsoRange } from '../../lib/isoDate';
-import type { DayGridPeriod } from '../../types/payroll/entry';
+import { PeriodStatusBadge } from '../../../components/StatusBadge';
+import { formatIsoLong, formatIsoRange } from '../../../lib/isoDate';
+import type { DayGridPeriod } from '../../../types/payroll/entry';
 import { periodLifecycle } from './dayEntryPageModel';
 import styles from './PayrollEntryPage.module.css';
 

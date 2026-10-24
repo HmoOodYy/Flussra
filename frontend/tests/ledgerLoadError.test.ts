@@ -43,7 +43,7 @@ function entryPageSource(): string {
     'PayrollEntryPage.tsx', 'DayEntryTable.tsx', 'DaySelector.tsx', 'PeriodEntryHeader.tsx',
     'WeekTable.tsx', 'DriverPanel.tsx', 'DriverIdentity.tsx', 'EntryToolbar.tsx',
     'dayEntryPageModel.ts', 'periodOverviewModel.ts', 'usePeriodPreview.ts', 'usePeriodOverview.ts',
-  ].map((name) => readFileSync(new URL(`../src/pages/payroll/${name}`, import.meta.url), 'utf8')).join('\n');
+  ].map((name) => readFileSync(new URL(`../src/pages/payroll/entry/${name}`, import.meta.url), 'utf8')).join('\n');
 }
 
 // The one route of the Day Grid page, which is the single place the period route may appear.

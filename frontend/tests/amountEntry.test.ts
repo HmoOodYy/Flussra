@@ -80,7 +80,6 @@ test('no money screen rounds or truncates an amount itself', () => {
     'pages/payroll/CalculationPreviewDialog.tsx',
     'pages/payroll/CurrentPayrollReportsDialog.tsx',
     'pages/payroll/FinalizationPreviewDialog.tsx',
-    'pages/payroll/grossDisplay.ts',
     'pages/payroll/LedgerPage.tsx',
     'pages/payroll/PeriodsListPage.tsx',
     'pages/people/pay-rates/DriverPayRulesTab.tsx',
