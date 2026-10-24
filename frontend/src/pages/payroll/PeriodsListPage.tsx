@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import apiClient from '../../lib/apiClient';
 import { getCurrentPayrollHub, resubmitPeriod, submitPeriod, cancelPeriod } from '../../lib/payrollApi';
 import { getReviewItem } from '../../lib/reviewApi';
@@ -23,7 +24,6 @@ import { EmptyState } from '../../components/ui/EmptyState';
 import { ErrorState } from '../../components/ui/ErrorState';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { CreatePeriodModal } from '../../components/CreatePeriodModal';
-import { PayrollEntryDialog } from './PayrollEntryDialog';
 import { DriversOffDialog } from './DriversOffDialog';
 import { BonusDialog } from './BonusDialog';
 import { CalculationPreviewDialog } from './CalculationPreviewDialog';
@@ -532,6 +532,7 @@ function WorkflowBranch({ branch }: { branch: CurrentPayrollHubBranch }) {
 
 export function PeriodsListPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
 
   const isAllBranches   = user?.scope_type === 'AllCompanyBranches';
 
@@ -545,7 +546,6 @@ export function PeriodsListPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   // Dialog state — one period ID each, null = closed
-  const [entryDialogPeriodId,      setEntryDialogPeriodId]      = useState<number | null>(null);
   const [driversOffDialogPeriodId, setDriversOffDialogPeriodId] = useState<number | null>(null);
   const [bonusDialogPeriodId,      setBonusDialogPeriodId]      = useState<number | null>(null);
   const [calculationPreviewPeriodId, setCalculationPreviewPeriodId] = useState<number | null>(null);
@@ -684,7 +684,7 @@ export function PeriodsListPage() {
         period={p}
         onViewPayroll={() => {
           setCalculationPreviewPeriodId(null);
-          setEntryDialogPeriodId(p.payroll_period_id);
+          navigate(`/payroll/periods/${p.payroll_period_id}`);
         }}
         onDriversOff={() => {
           setCalculationPreviewPeriodId(null);
@@ -840,13 +840,6 @@ export function PeriodsListPage() {
       )}
 
       {/* ── Dialogs ──────────────────────────────────────────────────── */}
-      {entryDialogPeriodId != null && (
-        <PayrollEntryDialog
-          periodId={entryDialogPeriodId}
-          onClose={() => setEntryDialogPeriodId(null)}
-        />
-      )}
-
       {driversOffDialogPeriodId != null && (() => {
         const period = findPeriod(driversOffDialogPeriodId);
         return period ? (

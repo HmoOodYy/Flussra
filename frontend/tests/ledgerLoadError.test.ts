@@ -37,6 +37,24 @@ function sourceFiles(): string[] {
   return files;
 }
 
+/** The entry page and its components: the operational Day Grid surface. */
+function entryPageSource(): string {
+  return [
+    'PayrollEntryPage.tsx', 'DayEntryTable.tsx', 'DaySelector.tsx', 'PeriodEntryHeader.tsx',
+    'WeekTable.tsx', 'DriverPanel.tsx', 'DriverIdentity.tsx', 'EntryToolbar.tsx',
+    'dayEntryPageModel.ts', 'periodOverviewModel.ts', 'usePeriodPreview.ts', 'usePeriodOverview.ts',
+  ].map((name) => readFileSync(new URL(`../src/pages/payroll/${name}`, import.meta.url), 'utf8')).join('\n');
+}
+
+// The one route of the Day Grid page, which is the single place the period route may appear.
+const DAY_VIEW_ROUTE = /path="\/payroll\/periods\/:periodId"\s+element=\{<Gate check=\{canViewCurrentPayroll\}><PayrollEntryPage \/><\/Gate>\}/;
+
+test('the period route renders only the Day view page behind the current payroll gate', () => {
+  const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  assert.match(app, DAY_VIEW_ROUTE);
+  assert.equal(app.match(/payroll\/periods\/:periodId/g)?.length, 1);
+});
+
 test('no active frontend source uses the retired duplicate Day Grid page, the raw FinalLines surface or a generic money writer', () => {
   const retired = new RegExp([
     'PeriodDetailPage',
@@ -51,19 +69,18 @@ test('no active frontend source uses the retired duplicate Day Grid page, the ra
     'rates/batch',
     'copy-rates',
   ].join('|'));
-  const offenders = sourceFiles().filter((file) => retired.test(readFileSync(file, 'utf8')));
+  const offenders = sourceFiles().filter((file) => retired.test(readFileSync(file, 'utf8').replace(DAY_VIEW_ROUTE, '')));
   assert.deepEqual(offenders, []);
 });
 
 test('the Day Grid summary carries no PTO figure the backend does not own', () => {
   const types = readFileSync(new URL('../src/types/payroll/entry.ts', import.meta.url), 'utf8');
   assert.doesNotMatch(types, /\bpto\b/);
-  const workbench = readFileSync(new URL('../src/pages/payroll/PayrollEntryDialog.tsx', import.meta.url), 'utf8');
-  assert.doesNotMatch(workbench, /PTO|summary\.pto/);
+  assert.doesNotMatch(entryPageSource(), /PTO|summary\.pto/);
 });
 
 test('the payroll entry workbench has no money authoring: no rate or amount input, only definition-keyed quantities', () => {
-  const workbench = readFileSync(new URL('../src/pages/payroll/PayrollEntryDialog.tsx', import.meta.url), 'utf8');
+  const workbench = entryPageSource();
   assert.match(workbench, /quantityInputProps\(col\)/);
   assert.doesNotMatch(workbench, /rate_|recalculate|<input[^>]*(rate|amount|money)/i);
 });

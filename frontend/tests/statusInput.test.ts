@@ -101,7 +101,8 @@ test('a failed save shows the server message whatever the shape of the error', (
 });
 
 test('the payroll entry workbench takes typed Status text through the shared cell and shows canonical names', () => {
-  const source = read('src/pages/payroll/PayrollEntryDialog.tsx');
+  const source = ['PayrollEntryPage.tsx', 'DayEntryTable.tsx']
+    .map((name) => read(`src/pages/payroll/${name}`)).join('\n');
   assert.match(source, /<StatusCellInput/);
   assert.match(source, /shownText=\{getStatusText\(row\)\}/);
   assert.match(source, /daySaveErrorMessage/);

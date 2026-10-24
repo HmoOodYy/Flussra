@@ -7,6 +7,25 @@ import type { DayGridColumn, DayGridResponse } from '../src/types/payroll/entry.
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
+// The entry page: its orchestration, tables, day selector, header and driver panel, plus its pure models and reads.
+const entryPageComponents = [
+  'src/pages/payroll/PayrollEntryPage.tsx',
+  'src/pages/payroll/DayEntryTable.tsx',
+  'src/pages/payroll/DaySelector.tsx',
+  'src/pages/payroll/PeriodEntryHeader.tsx',
+  'src/pages/payroll/WeekTable.tsx',
+  'src/pages/payroll/DriverPanel.tsx',
+  'src/pages/payroll/DriverIdentity.tsx',
+  'src/pages/payroll/EntryToolbar.tsx',
+];
+const entryPageSources = [
+  ...entryPageComponents,
+  'src/pages/payroll/dayEntryPageModel.ts',
+  'src/pages/payroll/usePeriodPreview.ts',
+  'src/pages/payroll/usePeriodOverview.ts',
+  'src/pages/payroll/periodOverviewModel.ts',
+];
+
 function column(id: number, overrides: Partial<DayGridColumn> = {}): DayGridColumn {
   return {
     payroll_period_definition_id: id,
@@ -28,8 +47,8 @@ test('a column is keyed by its period definition id, never by code or label', ()
 });
 
 test('input constraints follow the frozen InputType', () => {
-  assert.deepEqual(quantityInputProps(column(1, { input_type: 'WholeNumber' })), { step: 1, min: 0 });
-  assert.deepEqual(quantityInputProps(column(2, { input_type: 'Decimal' })), { step: 'any', min: 0 });
+  assert.deepEqual(quantityInputProps(column(1, { input_type: 'WholeNumber' })), { inputMode: 'numeric' });
+  assert.deepEqual(quantityInputProps(column(2, { input_type: 'Decimal' })), { inputMode: 'decimal' });
 });
 
 test('quantity totals are generic per definition, in column order, defaulting to zero', () => {
@@ -47,7 +66,7 @@ test('the Day Grid has no hours, miles or pay-item semantics', () => {
   const sources = [
     'src/pages/payroll/dayGridModel.ts',
     'src/pages/payroll/WorkTotals.tsx',
-    'src/pages/payroll/PayrollEntryDialog.tsx',
+    ...entryPageSources,
     'src/pages/payroll/useDailyEntryController.ts',
   ].map(read).join('\n');
   assert.doesNotMatch(sources, /pay_item_code|pay_item_id|is_time|total_hours|total_miles/);
@@ -56,7 +75,7 @@ test('the Day Grid has no hours, miles or pay-item semantics', () => {
 });
 
 test('Day Grid saves are keyed by the period definition id', () => {
-  const entry = read('src/pages/payroll/PayrollEntryDialog.tsx');
+  const entry = entryPageComponents.map(read).join('\n');
   assert.match(entry, /columnKey\(/);
   const feature = [entry, read('src/pages/payroll/useDailyEntryController.ts'), read('src/pages/payroll/dayGridModel.ts')].join('\n');
   assert.doesNotMatch(feature, /values\[[^\]]*definition_code/);
@@ -65,7 +84,7 @@ test('Day Grid saves are keyed by the period definition id', () => {
 test('the payroll entry workbench carries no PayItem identity', () => {
   const types = read('src/types/payroll/entry.ts');
   assert.match(types, /payroll_period_definition_id/);
-  const detail = [read('src/pages/payroll/PayrollEntryDialog.tsx'), read('src/pages/payroll/useDailyEntryController.ts')].join('\n');
+  const detail = [...entryPageSources, 'src/pages/payroll/useDailyEntryController.ts'].map(read).join('\n');
   assert.doesNotMatch(detail, /pay_item_code|PayItem/);
 });
 

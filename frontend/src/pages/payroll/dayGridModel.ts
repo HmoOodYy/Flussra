@@ -21,13 +21,16 @@ export function columnKey(column: Pick<DayGridColumn, 'payroll_period_definition
 }
 
 export interface QuantityInputProps {
-  step: number | 'any';
-  min: number;
+  inputMode: 'numeric' | 'decimal';
 }
 
-/** Input constraints come from the frozen InputType. The server is authoritative. */
+/**
+ * Input constraints come from the frozen InputType; the server is authoritative. A quantity is
+ * typed in a text field: a number field would let the mouse wheel and the arrow keys change a
+ * value without it being typed.
+ */
 export function quantityInputProps(column: Pick<DayGridColumn, 'input_type'>): QuantityInputProps {
-  return column.input_type === 'WholeNumber' ? { step: 1, min: 0 } : { step: 'any', min: 0 };
+  return { inputMode: column.input_type === 'WholeNumber' ? 'numeric' : 'decimal' };
 }
 
 export interface QuantityTotalView {
