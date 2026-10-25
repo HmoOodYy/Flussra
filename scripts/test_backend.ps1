@@ -25,15 +25,20 @@ Write-Host "Python executable: $PYTHON"
 Write-Host "Python version: $pythonVersion"
 Write-Host "Backend test files: $testFileCount"
 
-$pytestArgs = @("-m", "pytest", "-ra", "--tb=short") + @($args)
-Push-Location $BACKEND
+$ErrorActionPreference = "Stop"
+. (Join-Path $ROOT "scripts\validation_temp.ps1")
+$testTempState = $null
+$pytestExitCode = 1
 try {
-    & $PYTHON @pytestArgs
+    $testTempState = Enter-FlussraValidationTemp
+    & $PYTHON (Join-Path $ROOT "scripts\run_backend_tests.py") @args
     $pytestExitCode = $LASTEXITCODE
 } catch {
     Write-Host "ERROR: Failed to start pytest with $PYTHON. $($_.Exception.Message)" -ForegroundColor Red
     $pytestExitCode = 1
 } finally {
-    Pop-Location
+    if ($null -ne $testTempState) {
+        Exit-FlussraValidationTemp -State $testTempState
+    }
 }
 exit $pytestExitCode

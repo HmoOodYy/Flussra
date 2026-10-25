@@ -30,7 +30,47 @@ editable backend and `[dev]` dependencies from `backend/pyproject.toml`. The
 scripts do not create or copy `.env`; configure local environment values
 manually when needed.
 
+### Backend test commands
+
+`test_backend.ps1` defaults to the quick backend selection with two parallel
+workers. It sets process-local `TEMP`/`TMP` through the same temporary-directory
+authority as canonical validation and restores them when it exits.
+
+```powershell
+# One area, with its real fixtures and assertions
+.\scripts\test_backend.ps1 --suite focused -- tests/test_period_entry_overview.py -x
+# Everyday backend checks
+.\scripts\test_backend.ps1 --suite quick
+# Every retained backend test, with whole files kept on the same worker
+.\scripts\test_backend.ps1 --suite full
+# One of four duration-balanced CI partitions (indexes 0 through 3)
+.\scripts\test_backend.ps1 --suite full --workers 1 --shard-index 0 --shard-count 4
+```
+
+Use `--workers 1` to debug serially. On non-Windows hosts, run the worktree's
+backend Python with `scripts/run_backend_tests.py` and the same arguments.
+`--plan <path>` records selected node IDs; `--junitxml <path>` records results
+and timings. `--collect-only` verifies selection without running tests.
+File estimates in `backend/tests/runtime_weights.json` balance partitions; new
+files are included automatically with a default estimate. Each retained file
+belongs to exactly one partition, and all tests in that file stay together.
+
+The quick selection runs database-free cases plus representative auth, scope,
+entry, Status, submission, finalization and whole-period-read database suites.
+The full selection and schema-authority comparison remain required in CI.
+Pure calculations and mapping rules need no database; PostgreSQL constraints,
+real transactions, authorization and concurrency keep database-backed coverage.
+Pristine schema templates are prepared once per worker and cloned for isolated
+scenarios. Authentication/provisioning tests retain real login paths; business
+tests may seed actors and use signed tokens while checking real authorization.
+
 ## Development database reset and canonical demo
+
+Flussra's pre-production database support policy is reset/reseed. Populated
+historical database upgrades, legacy backfills and historical downgrades are
+not supported compatibility contracts. Fresh installation still executes the
+entire migration chain, and tests retain current schema integrity, canonical
+seed/reset, and equivalence of the SQL and Alembic schema authorities.
 
 The development database is disposable infrastructure. A reset replaces the
 whole database: nothing created inside it survives, so keep anything you need
@@ -143,7 +183,7 @@ root in PowerShell:
 .\scripts\validate.ps1
 ```
 
-The command runs the full backend pytest suite, Ruff, Python compileall, and an
+The command runs the full backend pytest suite with two workers, Ruff, Python compileall, and an
 assertion that Alembic has exactly one head at `0093`. It then runs every
 frontend `tests/*.test.ts` file, ESLint, and the production build. A successful
 exit means every required gate passed; the command stops and returns nonzero
@@ -156,9 +196,13 @@ During validation, the script verifies that `C:\Temp` is writable and sets
 restores the caller's original values and removes its invocation-owned
 compileall cache directory when validation ends.
 
-GitHub Actions runs this canonical validation on pull requests to `main` and
-pushes to `main`; the schema authority equivalence command runs as an independent
-check. Both use the repository-owned local authorities.
+GitHub Actions runs four duration-balanced backend partitions on pull requests
+to `main` and on manual dispatch. Each job owns its PostgreSQL cluster and its
+test files. Static/frontend validation uses `validate.ps1 -SkipBackendTests`,
+and schema authority equivalence runs independently. The existing **Canonical
+Validation** check requires all partitions, static/frontend validation and
+schema equivalence to succeed; it fails if any required job fails or is skipped.
+Local canonical validation continues to run every gate in one command.
 
 ## Database schema authority comparison
 

@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  canonical-validation:
-    name: Canonical Validation
+  quality-validation:
+    name: Static and Frontend Validation
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
@@ -84,7 +84,69 @@ jobs:
 
       - name: Run canonical validation authority
         shell: pwsh
-        run: .\scripts\validate.ps1
+        run: .\scripts\validate.ps1 -SkipBackendTests
+
+  backend-tests:
+    name: Backend Tests (${{ matrix.shard }})
+    runs-on: windows-2025
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Verify PostgreSQL binaries
+        shell: pwsh
+        run: .\scripts\setup_test_postgres.ps1
+      - name: Setup backend
+        shell: pwsh
+        env:
+          PY_PYTHON3: "3.12"
+        run: .\scripts\setup_backend.ps1
+      - name: Run owned backend files
+        shell: pwsh
+        run: |
+          $resultRoot = Join-Path $PWD ".artifacts/backend-shard-${{ matrix.shard }}"
+          New-Item -ItemType Directory -Force -Path $resultRoot | Out-Null
+          .\scripts\test_backend.ps1 --suite full --workers 1 --shard-index ${{ matrix.shard }} --shard-count 4 --plan "$resultRoot/plan.json" --junitxml "$resultRoot/results.xml"
+      - name: Report shard ownership
+        if: always()
+        shell: pwsh
+        run: |
+          $planPath = Join-Path $PWD ".artifacts/backend-shard-${{ matrix.shard }}/plan.json"
+          if (Test-Path -LiteralPath $planPath) {
+            $plan = Get-Content -Raw -LiteralPath $planPath | ConvertFrom-Json
+            Write-Host "Owned tests: $($plan.selected_count); owned files: $($plan.files.Count)"
+            $plan.files | ForEach-Object { Write-Host $_ }
+          }
+
+  canonical-validation:
+    name: Canonical Validation
+    if: always()
+    needs: [quality-validation, backend-tests, schema-authority-equivalence]
+    runs-on: windows-2025
+    steps:
+      - name: Require every validation job
+        shell: pwsh
+        env:
+          QUALITY_RESULT: ${{ needs.quality-validation.result }}
+          BACKEND_RESULT: ${{ needs.backend-tests.result }}
+          SCHEMA_RESULT: ${{ needs.schema-authority-equivalence.result }}
+        run: |
+          if ($env:QUALITY_RESULT -ne "success" -or $env:BACKEND_RESULT -ne "success" -or $env:SCHEMA_RESULT -ne "success") {
+            throw "A required quality, backend shard, or schema authority check failed or did not run."
+          }
+          Write-Host "All required validation gates passed."
 
   schema-authority-equivalence:
     name: Schema Authority Equivalence
