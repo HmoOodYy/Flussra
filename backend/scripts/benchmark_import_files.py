@@ -29,9 +29,13 @@ from uuid import uuid4
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 DEFAULT_OUTPUT = ROOT / ".artifacts" / "import-benchmark.json"
+DEFAULT_PREVIEW_OUTPUT = ROOT / ".artifacts" / "import-preview-benchmark.json"
+DEFAULT_GUARD_PROFILE_OUTPUT = ROOT / ".artifacts" / "import-preview-guard-profile.json"
+DEFAULT_NEAR_UPPER_PREVIEW_OUTPUT = ROOT / ".artifacts" / "import-preview-near-upper.json"
 BOUNDARY = "flussra-import-benchmark"
 UPLOAD_PATH_TEMPLATE = "/payroll/periods/{period_id}/imports"
 ORDINARY_GET_PATH_TEMPLATE = "/payroll/periods/{period_id}/day-grid"
+PREVIEW_ORDINARY_GET_PATH_TEMPLATE = "/payroll/periods/{period_id}"
 
 
 def _working_set() -> dict[str, int] | None:
@@ -488,6 +492,672 @@ def _multipart_body(data: bytes, filename: str) -> bytes:
     )
 
 
+def _preview_csv_file(
+    path: Path,
+    *,
+    roster: list[dict[str, Any]],
+    dates: list[str],
+    definition_codes: list[str],
+    data_rows: int,
+    invalid_rows: int = 0,
+    invalid_value: str = "not-a-number",
+) -> None:
+    """Write unique Driver/date facts with a real roster and frozen pay items."""
+    if data_rows > len(roster) * len(dates):
+        raise ValueError("Requested preview rows exceed the generated roster/date identities.")
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow([
+            "DriverNumber", "DriverName", "WorkDate",
+            *(f"Pay Item: {code}" for code in definition_codes),
+        ])
+        for index in range(data_rows):
+            driver = roster[index // len(dates)]
+            work_date = dates[index % len(dates)]
+            quantities = ([invalid_value] * len(definition_codes)
+                          if index < invalid_rows else ["1"] * len(definition_codes))
+            writer.writerow([driver["drivernumber"], driver["drivername"], work_date, *quantities])
+
+
+def _preview_xlsx_file(path: Path, *, roster: list[dict[str, Any]], dates: list[str],
+                       definition_codes: list[str], data_rows: int) -> None:
+    from openpyxl import Workbook
+
+    if data_rows > len(roster) * len(dates):
+        raise ValueError("Requested preview rows exceed the generated roster/date identities.")
+    workbook = Workbook(write_only=True)
+    worksheet = workbook.create_sheet("Payroll")
+    worksheet.append(["DriverNumber", "DriverName", "WorkDate",
+                      *(f"Pay Item: {code}" for code in definition_codes)])
+    for index in range(data_rows):
+        driver = roster[index // len(dates)]
+        work_date = dates[index % len(dates)]
+        worksheet.append([driver["drivernumber"], driver["drivername"], work_date,
+                          *([1] * len(definition_codes))])
+    workbook.save(path)
+
+
+async def _create_preview_world(client, engine, tenant, *, driver_count: int = 2_858,
+                                definition_count: int = 47) -> tuple[dict, list[dict], list[str], list[dict], dict]:
+    """Create a period whose frozen roster and active target count fit the A2 workload."""
+    import psycopg2
+    from sqlalchemy import text
+
+    from tests.compensation_api_fixtures import create_definition, grant_applicability
+    from tests.compensation_database_fixtures import make_driver
+    from tests.payroll_runtime_fixtures import assign_weekly_setup, create_period
+
+    started = time.perf_counter()
+    connection = psycopg2.connect(client_encoding="utf-8", **tenant.dsn)
+    try:
+        with connection.cursor() as cursor:
+            for index in range(driver_count):
+                assignment_id = make_driver(cursor, tenant.company_id, tenant.branch_a)
+                cursor.execute("""
+                    UPDATE core.employees e SET fullname = %s
+                    FROM core.driverassignments a
+                    WHERE a.driverassignmentid = %s AND a.employeeid = e.employeeid
+                """, (f"Import Benchmark Driver {index:04d}", assignment_id))
+            cursor.execute("""
+                UPDATE core.employees e SET fullname = 'Benchmark Driver ' || d.drivernumber
+                FROM core.drivers d
+                WHERE d.employeeid = e.employeeid AND d.companyid = %s AND e.branchid = %s
+            """, (tenant.company_id, tenant.branch_a))
+        connection.commit()
+    finally:
+        connection.close()
+    driver_setup_seconds = time.perf_counter() - started
+
+    definitions = []
+    definition_started = time.perf_counter()
+    for index in range(definition_count):
+        definition = await create_definition(
+            client, tenant,
+            definition_code=f"BM{index:03d}",
+            definition_name=f"Benchmark Quantity {index:03d}",
+        )
+        grant_applicability(tenant, definition, tenant.branch_a)
+        definitions.append(definition)
+    definition_setup_seconds = time.perf_counter() - definition_started
+
+    period_started = time.perf_counter()
+    await assign_weekly_setup(engine, tenant, tenant.branch_a)
+    period = await create_period(client, tenant, tenant.branch_a)
+    period_setup_seconds = time.perf_counter() - period_started
+
+    async with engine.connect() as connection:
+        dates = [value.isoformat() for value in (await connection.execute(text("""
+            SELECT workdate FROM payroll.payrollperioddays
+            WHERE payrollperiodid = :pid ORDER BY workdate
+        """), {"pid": period["payroll_period_id"]})).scalars()]
+        roster = [dict(row) for row in (await connection.execute(text("""
+            SELECT d.drivernumber, p.drivernamesnapshot AS drivername, a.driverassignmentid
+            FROM payroll.payrollperioddrivereligibility p
+            JOIN core.driverassignments a
+              ON a.driverassignmentid = p.driverassignmentid AND a.companyid = p.companyid
+            JOIN core.drivers d ON d.driverid = a.driverid AND d.companyid = a.companyid
+            WHERE p.companyid = :cid AND p.payrollperiodid = :pid AND p.iseligibleforperiod
+            ORDER BY d.drivernumber
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})).mappings()]
+    if len(roster) < driver_count:
+        raise RuntimeError(f"Generated {len(roster)} eligible drivers; expected at least {driver_count}.")
+    if len(dates) != 7:
+        raise RuntimeError(f"Generated a {len(dates)}-day period; benchmark requires seven work dates.")
+    if len(definitions) != definition_count:
+        raise RuntimeError(f"Generated {len(definitions)} definitions; expected {definition_count}.")
+    return period, roster, dates, definitions, {
+        "driver_count": len(roster), "frozen_definition_count": len(definitions),
+        "period_days": len(dates), "driver_setup_seconds": round(driver_setup_seconds, 6),
+        "definition_setup_seconds": round(definition_setup_seconds, 6),
+        "period_setup_seconds": round(period_setup_seconds, 6),
+    }
+
+
+def _enable_guard_function_tracking(dsn: dict) -> None:
+    import psycopg2
+    from psycopg2.extensions import quote_ident
+
+    connection = psycopg2.connect(client_encoding="utf-8", **dsn)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            database = quote_ident(dsn["database"], cursor)
+            cursor.execute(f"ALTER DATABASE {database} SET track_functions = 'pl'")
+    finally:
+        connection.close()
+
+
+async def _guard_function_stats(engine, *, reset: bool = False) -> dict[str, Any]:
+    from sqlalchemy import text
+
+    async with engine.begin() as connection:
+        tracking = await connection.scalar(text("SELECT current_setting('track_functions')"))
+        flush_supported = await connection.scalar(text(
+            "SELECT to_regprocedure('pg_catalog.pg_stat_force_next_flush()') IS NOT NULL"
+        ))
+        reset_supported = await connection.scalar(text(
+            "SELECT to_regprocedure('pg_catalog.pg_stat_reset_single_function_counters(oid)') IS NOT NULL"
+        ))
+        function_id = await connection.scalar(text(
+            "SELECT to_regprocedure('import.fn_guard_payroll_work_detail()')::oid"
+        ))
+        if reset and reset_supported and function_id is not None:
+            await connection.execute(
+                text("SELECT pg_stat_reset_single_function_counters(:function_id)"),
+                {"function_id": function_id},
+            )
+        if flush_supported:
+            await connection.execute(text("SELECT pg_stat_force_next_flush()"))
+        await connection.execute(text("SELECT pg_stat_clear_snapshot()"))
+        row = (await connection.execute(text("""
+            SELECT calls, total_time, self_time FROM pg_stat_user_functions
+            WHERE schemaname = 'import' AND funcname = 'fn_guard_payroll_work_detail'
+        """))).mappings().first()
+        values = dict(row) if row else {"calls": 0, "total_time": 0.0, "self_time": 0.0}
+    return {
+        "track_functions": tracking,
+        "flush_supported": bool(flush_supported),
+        "reset_supported": bool(reset_supported),
+        "function_found": function_id is not None,
+        "values": values,
+    }
+
+
+async def _foreign_key_delete_probe(engine, *, company_id: int, import_id: int) -> dict[str, Any]:
+    """Measure parent-delete FK probes after removing children, then roll back."""
+    from sqlalchemy import text
+
+    statements = {
+        "driver_matches": """
+            EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+            DELETE FROM import.payrollworkdrivermatches
+            WHERE importid = :iid AND companyid = :cid
+        """,
+        "source_records": """
+            EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+            DELETE FROM import.importsourcerecords
+            WHERE importid = :iid AND companyid = :cid
+        """,
+    }
+    children = (
+        "payrollworkcells", "payrollworkrecordidentifiers", "importissues",
+        "filesourcerecords", "payrollworkrecords",
+    )
+    parameters = {"iid": import_id, "cid": company_id}
+    evidence: dict[str, Any] = {"rolled_back": True, "children_removed_before_probe": list(children)}
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        try:
+            await connection.execute(
+                text("SELECT set_config('flussra.import_purge_id', :iid, TRUE)"),
+                {"iid": str(import_id)},
+            )
+            for table in children:
+                await connection.execute(text(
+                    f"DELETE FROM import.{table} WHERE importid = :iid AND companyid = :cid"
+                ), parameters)
+            for label, statement in statements.items():
+                raw_plan = (await connection.execute(text(statement), parameters)).scalar_one()
+                plan = raw_plan[0] if isinstance(raw_plan, list) else raw_plan
+                evidence[label] = {
+                    "plan": plan.get("Plan"),
+                    "triggers": plan.get("Triggers", []),
+                    "execution_time_ms": plan.get("Planning Time", 0) + plan.get("Execution Time", 0),
+                }
+            indexes = (await connection.execute(text("""
+                SELECT tablename, indexname, indexdef
+                FROM pg_indexes
+                WHERE schemaname = 'import'
+                  AND tablename IN ('importissues', 'payrollworkrecordidentifiers')
+                ORDER BY tablename, indexname
+            """))).mappings().all()
+            evidence["relevant_child_indexes"] = [dict(row) for row in indexes]
+        finally:
+            await transaction.rollback()
+    return evidence
+
+
+async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
+                                          profile_only: bool = False,
+                                          near_upper_csv_only: bool = False) -> dict[str, Any]:
+    import httpx
+    from httpx import ASGITransport
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.config import get_settings
+    from app.dependencies import get_db
+    from app.imports import preview_service
+    from app.imports.retention import purge_payroll_work_import_details
+    from app.main import create_app
+    from tests.payroll_runtime_fixtures import build_payroll_tenant, force_status
+
+    if profile_only:
+        _enable_guard_function_tracking(dsn)
+
+    database_url = (
+        f"postgresql+asyncpg://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']}"
+    )
+    os.environ["DATABASE_URL"] = database_url
+    os.environ["SECRET_KEY"] = "c2-import-benchmark-test-secret-not-for-production-000000000000"
+    os.environ["ENVIRONMENT"] = "test"
+    get_settings.cache_clear()
+    engine = create_async_engine(database_url, echo=False)
+    app = create_app()
+    app.state.engine = engine
+
+    async def override_get_db():
+        async with engine.begin() as connection:
+            yield connection
+
+    app.dependency_overrides[get_db] = override_get_db
+    tenant = build_payroll_tenant(dsn)
+    try:
+        async with httpx.AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://benchmark.test"
+        ) as client:
+            period, roster, dates, definitions, setup = await _create_preview_world(
+                client, engine, tenant
+            )
+            directory.mkdir(parents=True, exist_ok=True)
+            small_path = directory / "preview-representative-1000x10.csv"
+            _preview_csv_file(
+                small_path, roster=roster, dates=dates,
+                definition_codes=[item["definition_code"] for item in definitions[:7]],
+                data_rows=999,
+            )
+            full_path = directory / "preview-near-upper-19999x50.csv"
+            _preview_csv_file(
+                full_path, roster=roster, dates=dates,
+                definition_codes=[item["definition_code"] for item in definitions],
+                data_rows=19_999, invalid_rows=5,
+            )
+            full_xlsx_path = directory / "preview-near-upper-19999x50.xlsx"
+            _preview_xlsx_file(
+                full_xlsx_path, roster=roster, dates=dates,
+                definition_codes=[item["definition_code"] for item in definitions],
+                data_rows=19_999,
+            )
+            page_cap_path = directory / "preview-page-cap-10x50.csv"
+            _preview_csv_file(
+                page_cap_path, roster=roster, dates=dates,
+                definition_codes=[item["definition_code"] for item in definitions],
+                data_rows=10, invalid_rows=10, invalid_value="x" * 8_000,
+            )
+            issue_volume_path = directory / "preview-issue-volume-1000x50.csv"
+            _preview_csv_file(
+                issue_volume_path, roster=roster, dates=dates,
+                definition_codes=[item["definition_code"] for item in definitions],
+                data_rows=1_000, invalid_rows=1_000,
+            )
+            generated = []
+            for path, row_count, column_count, definition_slice in (
+                (small_path, 1_000, 10, definitions[:7]),
+                (full_path, 20_000, 50, definitions),
+                (full_xlsx_path, 20_000, 50, definitions),
+                (page_cap_path, 11, 50, definitions),
+                (issue_volume_path, 1_001, 50, definitions),
+            ):
+                is_xlsx = path.suffix == ".xlsx"
+                generated.append({
+                    **_file_facts(path, rows=row_count, columns=column_count,
+                                  file_type="xlsx" if is_xlsx else "csv"),
+                    "kind": (
+                        "representative_1000x10" if path == small_path else
+                        "near_upper_19999x50_xlsx" if is_xlsx else
+                        "page_cap_10x50_8000_text" if path == page_cap_path else
+                        "issue_volume_1000x50_47000_errors" if path == issue_volume_path else
+                        "near_upper_19999x50_csv"
+                    ),
+                    "data_rows": row_count - 1,
+                    "mapped_definition_count": len(definition_slice),
+                    "definitions": definition_slice,
+                    "path": path,
+                })
+                if (path.stat().st_size > 10_000_000
+                        or generated[-1]["actual_decompressed_bytes"] > 50_000_000):
+                    raise RuntimeError(f"Generated benchmark input exceeds an accepted file cap: {path.name}.")
+            if profile_only:
+                generated = [case for case in generated
+                             if case["kind"] == "issue_volume_1000x50_47000_errors"]
+            elif near_upper_csv_only:
+                generated = [case for case in generated
+                             if case["kind"] == "near_upper_19999x50_csv"]
+
+            result: dict[str, Any] = {
+                "setup": setup,
+                "guard_profile_only": profile_only,
+                "ordinary_get_path": PREVIEW_ORDINARY_GET_PATH_TEMPLATE.format(
+                    period_id=period["payroll_period_id"]
+                ),
+                "scenarios": [],
+            }
+            ordinary_get_path = result["ordinary_get_path"]
+            observers: list[dict[str, float]] = []
+            app.state.import_preview_observer = lambda timings: observers.append(dict(timings))
+
+            for case in generated:
+                data = Path(case["path"]).read_bytes()
+                endpoint = UPLOAD_PATH_TEMPLATE.format(period_id=period["payroll_period_id"])
+                upload_headers = {
+                    **tenant.admin,
+                    "Content-Type": f"multipart/form-data; boundary={BOUNDARY}",
+                    "Idempotency-Key": str(uuid4()),
+                }
+                before_temp = _temp_snapshot()
+                before_memory = _working_set()
+                upload_started = time.perf_counter()
+                uploaded = await client.post(
+                    endpoint, content=_multipart_body(data, Path(case["path"]).name),
+                    headers=upload_headers,
+                )
+                upload_seconds = time.perf_counter() - upload_started
+                if uploaded.status_code != 200:
+                    raise RuntimeError(f"Preview benchmark upload failed: {uploaded.status_code} {uploaded.text}")
+                import_id = uploaded.json()["import_id"]
+                metadata = await client.get(f"/payroll/imports/{import_id}", headers=tenant.admin)
+                if metadata.status_code != 200:
+                    raise RuntimeError(f"Preview benchmark metadata read failed: {metadata.status_code} {metadata.text}")
+                mapping_targets = {
+                    item["code"]: item["target"] for item in metadata.json()["mapping_targets"]
+                    if item["target"].startswith("Definition:")
+                }
+                mapping = {"1": "DriverNumber", "2": "DriverName", "3": "WorkDate"}
+                for offset, definition in enumerate(case["definitions"], start=4):
+                    mapping[str(offset)] = mapping_targets[definition["definition_code"]]
+
+                started = threading.Event()
+                completed = threading.Event()
+                phase_events = {
+                    name: (threading.Event(), threading.Event())
+                    for name in ("materialization", "compute", "persistence")
+                }
+                original_materialize = preview_service.materialize
+                original_build_preview = preview_service.build_preview
+                original_persist_preview = preview_service.persist_preview
+
+                def measured_materialize(*args, **kwargs):
+                    started.set()
+                    phase_events["materialization"][0].set()
+                    try:
+                        return original_materialize(*args, **kwargs)
+                    finally:
+                        completed.set()
+
+                def measured_build_preview(*args, **kwargs):
+                    phase_events["compute"][0].set()
+                    try:
+                        return original_build_preview(*args, **kwargs)
+                    finally:
+                        phase_events["compute"][1].set()
+
+                async def measured_persist_preview(*args, **kwargs):
+                    phase_events["persistence"][0].set()
+                    try:
+                        return await original_persist_preview(*args, **kwargs)
+                    finally:
+                        phase_events["persistence"][1].set()
+
+                preview_service.materialize = measured_materialize
+                preview_service.build_preview = measured_build_preview
+                preview_service.persist_preview = measured_persist_preview
+                observers.clear()
+                guard_before = (await _guard_function_stats(engine, reset=True)
+                                if profile_only else None)
+                mapping_start = time.perf_counter()
+                mapping_task = asyncio.create_task(client.put(
+                    f"/payroll/imports/{import_id}/mapping",
+                    json={"expected_revision": 1, "column_mapping": mapping},
+                    headers=tenant.admin,
+                ))
+                async def get_during_phase(name: str) -> dict[str, Any]:
+                    phase_started, phase_completed = phase_events[name]
+                    await asyncio.wait_for(asyncio.to_thread(phase_started.wait, 180), timeout=185)
+                    active_at_start = not phase_completed.is_set()
+                    get_started = time.perf_counter()
+                    response = await client.get(ordinary_get_path, headers=tenant.admin)
+                    elapsed = time.perf_counter() - get_started
+                    return {
+                        "phase": name, "status": response.status_code,
+                        "response_bytes": len(response.content), "seconds": round(elapsed, 6),
+                        "phase_active_at_request_start": active_at_start,
+                        "phase_active_at_response": not phase_completed.is_set(),
+                    }
+
+                get_tasks = [asyncio.create_task(get_during_phase(name)) for name in phase_events]
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(started.wait, 180), timeout=185)
+                    mapped = await mapping_task
+                    phase_gets = await asyncio.gather(*get_tasks)
+                finally:
+                    preview_service.materialize = original_materialize
+                    preview_service.build_preview = original_build_preview
+                    preview_service.persist_preview = original_persist_preview
+                mapping_seconds = time.perf_counter() - mapping_start
+                guard_after = await _guard_function_stats(engine) if profile_only else None
+                if mapped.status_code != 200:
+                    raise RuntimeError(f"Preview benchmark mapping failed: {mapped.status_code} {mapped.text}")
+                if not observers:
+                    raise RuntimeError("The preview timing observer did not report this mapping operation.")
+                if any(item["status"] != 200 for item in phase_gets):
+                    raise RuntimeError(f"A concurrent phase GET failed: {phase_gets!r}")
+                plan = mapped.json()["fingerprints"]["plan"]
+                revision = mapped.json()["revision"]
+                rows_page = await client.get(
+                    f"/payroll/imports/{import_id}/rows",
+                    params={"expected_revision": revision, "plan_fingerprint": plan, "limit": 100},
+                    headers=tenant.admin,
+                )
+                issues_page = await client.get(
+                    f"/payroll/imports/{import_id}/issues",
+                    params={"expected_revision": revision, "plan_fingerprint": plan,
+                            "limit": 200, "severity": "Error"},
+                    headers=tenant.admin,
+                )
+                if rows_page.status_code != 200 or issues_page.status_code != 200:
+                    raise RuntimeError(
+                        f"Preview page failed: rows={rows_page.status_code}, issues={issues_page.status_code}"
+                    )
+                case_result = {
+                    "kind": case["kind"], "file_bytes": len(data),
+                    "upload_seconds": round(upload_seconds, 6), "upload_status": uploaded.status_code,
+                    "mapping_seconds": round(mapping_seconds, 6), "mapping_status": mapped.status_code,
+                    "mapping_phase_seconds": observers[-1],
+                    "concurrent_ordinary_authorized_gets": phase_gets,
+                    "row_page": {
+                        "status": rows_page.status_code, "requested_limit": 100,
+                        "returned_items": len(rows_page.json()["items"]),
+                        "response_bytes": len(rows_page.content),
+                        "next_offset": rows_page.json()["next_offset"],
+                    },
+                    "error_issue_page": {
+                        "status": issues_page.status_code, "requested_limit": 200,
+                        "filtered_count": issues_page.json()["filtered_count"],
+                        "returned_items": len(issues_page.json()["items"]),
+                        "response_bytes": len(issues_page.content),
+                        "next_offset": issues_page.json()["next_offset"],
+                    },
+                    "summary": mapped.json()["summary"],
+                    "working_set_before": before_memory,
+                    "working_set_after": _working_set(),
+                    "temp_files_created": sorted(_temp_snapshot() - before_temp),
+                    "import_id": import_id,
+                    "revision": revision,
+                    "mapping_fingerprint": mapped.json()["fingerprints"]["mapping"],
+                    "content_fingerprint": mapped.json()["fingerprints"]["content"],
+                    "plan_fingerprint": plan,
+                }
+                if profile_only:
+                    before_values = guard_before["values"]
+                    after_values = guard_after["values"]
+                    case_result["detail_guard_profile"] = {
+                        "before": guard_before,
+                        "after": guard_after,
+                        "delta": {
+                            key: after_values[key] - before_values[key]
+                            for key in ("calls", "total_time", "self_time")
+                        },
+                    }
+                    if guard_after["track_functions"] != "pl" or not guard_after["function_found"]:
+                        raise RuntimeError(f"PostgreSQL did not expose the detail guard function stats: {guard_after!r}")
+                    if case_result["detail_guard_profile"]["delta"]["calls"] <= 0:
+                        raise RuntimeError("The detail guard did not report calls for the mapped source workload.")
+                if case_result["error_issue_page"]["returned_items"] > 200:
+                    raise RuntimeError("Issue response exceeded the documented 200-item page limit.")
+                if case["kind"] == "page_cap_10x50_8000_text":
+                    row_pages = []
+                    issue_pages = []
+                    for page_kind, path, limit, destination in (
+                        ("rows", f"/payroll/imports/{import_id}/rows", 100, row_pages),
+                        ("issues", f"/payroll/imports/{import_id}/issues", 200, issue_pages),
+                    ):
+                        offset = 0
+                        seen = 0
+                        while True:
+                            page_response = await client.get(
+                                path,
+                                params={"expected_revision": revision, "plan_fingerprint": plan,
+                                        "offset": offset, "limit": limit,
+                                        **({"severity": "Error"} if page_kind == "issues" else {})},
+                                headers=tenant.admin,
+                            )
+                            if page_response.status_code != 200:
+                                raise RuntimeError(
+                                    f"Page-cap {page_kind} traversal failed: "
+                                    f"{page_response.status_code} {page_response.text}"
+                                )
+                            body = page_response.json()
+                            returned = len(body["items"])
+                            if returned == 0 and body["next_offset"] is not None:
+                                raise RuntimeError(f"Page-cap {page_kind} traversal made no progress.")
+                            seen += returned
+                            destination.append({
+                                "offset": offset, "requested_limit": limit,
+                                "returned_items": returned, "response_bytes": len(page_response.content),
+                                "next_offset": body["next_offset"],
+                            })
+                            if body["next_offset"] is None:
+                                if seen != body["filtered_count"]:
+                                    raise RuntimeError(
+                                        f"Page-cap {page_kind} traversal lost items: "
+                                        f"seen={seen}, total={body['filtered_count']}"
+                                    )
+                                break
+                            if body["next_offset"] <= offset:
+                                raise RuntimeError(f"Page-cap {page_kind} traversal offset did not advance.")
+                            offset = body["next_offset"]
+                    case_result["page_cap_traversal"] = {
+                        "rows": row_pages, "issues": issue_pages,
+                        "row_total_seen": sum(item["returned_items"] for item in row_pages),
+                        "issue_total_seen": sum(item["returned_items"] for item in issue_pages),
+                        "row_byte_short_page_observed": any(
+                            item["returned_items"] < item["requested_limit"] and item["next_offset"] is not None
+                            for item in row_pages
+                        ),
+                    }
+                    if not case_result["page_cap_traversal"]["row_byte_short_page_observed"]:
+                        raise RuntimeError("The generated long-cell source did not exercise the row response byte cap.")
+                result["scenarios"].append(case_result)
+                case["import_id"] = import_id
+
+            # The near-upper scenario intentionally creates five invalid rows
+            # so that the actual 200-item Error page is exercised with data.
+            period_id = period["payroll_period_id"]
+            force_status(tenant, period_id, "Locked")
+            fk_delete_probe = None
+            if profile_only:
+                profiled_import = next(
+                    case["import_id"] for case in generated
+                    if case["kind"] == "issue_volume_1000x50_47000_errors"
+                )
+                fk_delete_probe = await _foreign_key_delete_probe(
+                    engine, company_id=tenant.company_id, import_id=profiled_import,
+                )
+            purge_guard_before = await _guard_function_stats(engine, reset=True) if profile_only else None
+            purge_started = time.perf_counter()
+            async with engine.begin() as connection:
+                await purge_payroll_work_import_details(
+                    connection, company_id=tenant.company_id, period_id=period_id,
+                    actor_id=tenant.owner,
+                )
+            purge_seconds = time.perf_counter() - purge_started
+            purge_guard_after = await _guard_function_stats(engine) if profile_only else None
+            imports = []
+            detail_tables = (
+                "importsourcerecords", "filesourcerecords", "importissues", "payrollworkrecords",
+                "payrollworkdrivermatches", "payrollworkrecordidentifiers", "payrollworkcells",
+            )
+            async with engine.connect() as connection:
+                for case in generated:
+                    import_id = case["import_id"]
+                    counts = {}
+                    for table in detail_tables:
+                        counts[table] = await connection.scalar(text(
+                            f"SELECT count(*) FROM import.{table} WHERE companyid = :cid AND importid = :iid"
+                        ), {"cid": tenant.company_id, "iid": import_id})
+                    durable = (await connection.execute(text("""
+                        SELECT i.status, i.revision, f.filecontent IS NULL AS content_purged,
+                            f.inspectionmetadata IS NULL AS inspection_purged,
+                            f.contentpurgedatutc IS NOT NULL AS purge_marked,
+                            w.mappingfingerprint, w.contentfingerprint, w.planfingerprint
+                        FROM import.imports i
+                        JOIN import.filesources f USING (importid, companyid)
+                        JOIN import.payrollworkimports w USING (importid, companyid)
+                        WHERE i.companyid = :cid AND i.importid = :iid
+                    """), {"cid": tenant.company_id, "iid": import_id})).mappings().one()
+                    imports.append({"import_id": import_id, "detail_counts_after_purge": counts,
+                                    "durable_metadata_after_purge": dict(durable)})
+            result["purge"] = {
+                "seconds": round(purge_seconds, 6), "period_status": "Locked",
+                "imports": imports,
+            }
+            if profile_only:
+                result["purge"]["foreign_key_delete_probe"] = fk_delete_probe
+                before_values = purge_guard_before["values"]
+                after_values = purge_guard_after["values"]
+                result["purge"]["detail_guard_profile"] = {
+                    "before": purge_guard_before,
+                    "after": purge_guard_after,
+                    "delta": {
+                        key: after_values[key] - before_values[key]
+                        for key in ("calls", "total_time", "self_time")
+                    },
+                }
+                if result["purge"]["detail_guard_profile"]["delta"]["calls"] <= 0:
+                    raise RuntimeError("The detail guard did not report calls for purge deletes.")
+            return result
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
+
+
+def _run_preview_only(output_path: Path, *, profile_only: bool = False,
+                      near_upper_csv_only: bool = False) -> dict[str, Any]:
+    import openpyxl
+    import starlette
+
+    evidence: dict[str, Any] = {
+        "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "environment": {
+            "python": sys.version, "platform": platform.platform(),
+            "starlette": starlette.__version__, "openpyxl": openpyxl.__version__,
+            "temp_directory": tempfile.gettempdir(),
+        },
+        "scope": "A2 real PayrollWork mapping, persistence, bounded pages, ordinary reads and retention purge",
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="flussra-import-preview-benchmark-") as directory:
+        with _private_database() as dsn:
+            evidence["application"] = asyncio.run(
+                _preview_application_benchmarks(
+                    dsn, Path(directory), profile_only=profile_only,
+                    near_upper_csv_only=near_upper_csv_only,
+                )
+            )
+    output_path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return evidence
+
+
 def _run(output_path: Path) -> dict[str, Any]:
     import openpyxl
     import starlette
@@ -559,16 +1229,32 @@ def _run(output_path: Path) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--preview-only", action="store_true",
+                        help="Measure real PayrollWork preview staging, pages and retention only.")
+    parser.add_argument("--guard-profile-only", action="store_true",
+                        help="Profile the detail trigger around a generated 47k-issue mapping and purge.")
+    parser.add_argument("--near-upper-csv-only", action="store_true",
+                        help="Measure only the 19,999-row by 50-column CSV preview and retention case.")
     parser.add_argument("--inspect-child", nargs=2, metavar=("PATH", "FILENAME"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.inspect_child:
         result = _measure_inspection_child(Path(args.inspect_child[0]), args.inspect_child[1])
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
-    evidence = _run(args.output.resolve())
+    preview_only = args.preview_only or args.guard_profile_only or args.near_upper_csv_only
+    output_path = args.output or (
+        DEFAULT_GUARD_PROFILE_OUTPUT if args.guard_profile_only else
+        DEFAULT_NEAR_UPPER_PREVIEW_OUTPUT if args.near_upper_csv_only else
+        DEFAULT_PREVIEW_OUTPUT if preview_only else DEFAULT_OUTPUT
+    )
+    evidence = (_run_preview_only(
+        output_path.resolve(), profile_only=args.guard_profile_only,
+        near_upper_csv_only=args.near_upper_csv_only,
+    ) if preview_only
+                else _run(output_path.resolve()))
     print(json.dumps(evidence, indent=2, ensure_ascii=False))
-    print(f"Raw benchmark evidence: {args.output.resolve()}")
+    print(f"Raw benchmark evidence: {output_path.resolve()}")
     return 0
 
 

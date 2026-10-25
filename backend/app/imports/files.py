@@ -10,7 +10,7 @@ import re
 import zipfile
 from collections.abc import Iterable
 from copy import copy
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from xml.etree.ElementTree import ParseError
 
@@ -189,6 +189,125 @@ def _csv_row_at(data: bytes, encoding: str, delimiter: str, row_number: int) -> 
     except csv.Error as exc:
         raise _failure("IMPORT_CSV_MALFORMED", "CSV structure is malformed.") from exc
     return []
+
+
+def read_mapped_file(data: bytes, filename: str, columns: Iterable[int], **settings) -> dict:
+    """Reuse File validation and its readers; retain only selected source cells.
+
+    This is the File contract's materialization mode, not a second parser. All
+    archive, XML, text and rectangular limits run before any row is returned.
+    Formula text is never retained or evaluated; its cached value and type are.
+    """
+    inspection = inspect_file(data, filename, **settings)
+    selected = sorted(set(columns))
+    rows: list[dict] = []
+    nonempty: set[int] = set()
+    header = inspection["header_row_number"]
+
+    def retain(number, values, formulas=None, errors=None, native_dates=None):
+        if number < header:
+            return
+        for index, value in enumerate(values, 1):
+            if value is not None and str(value).strip() or formulas and index in formulas:
+                nonempty.add(index)
+        if number <= header:
+            return
+        cells = {}
+        for index in selected:
+            value = values[index - 1] if index <= len(values) else None
+            if native_dates and index in native_dates:
+                value = native_dates[index]
+            formula = bool(formulas and index in formulas)
+            kind = ("error" if errors and index in errors else
+                    "date" if isinstance(value, (date, datetime)) or native_dates and index in native_dates else
+                    "time" if isinstance(value, time) else
+                    "duration" if isinstance(value, timedelta) else
+                    "boolean" if isinstance(value, bool) else
+                    "number" if isinstance(value, (int, float)) else "text")
+            cells[str(index)] = {"value": value.isoformat() if isinstance(value, (date, datetime, time)) else
+                                 str(value) if kind in ("number", "duration") else value,
+                                 "kind": kind, "formula": formula,
+                                 "missing_cache": formula and value is None}
+        rows.append({"source_row": number, "cells": cells})
+
+    if inspection["file_type"] == "csv":
+        reader = csv.reader(io.StringIO(data.decode(inspection["encoding"]), newline=""),
+                            delimiter=inspection["delimiter"], strict=True)
+        for number, values in enumerate(reader, 1):
+            retain(number, values)
+    else:
+        values_book = load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
+        try:
+            markers = _selected_cell_metadata(data, inspection)
+            try:
+                value_ws = values_book[inspection["selected_sheet"]]
+                value_ws.reset_dimensions()
+                bounds = {"min_row": 1, "max_row": inspection["row_count"],
+                          "min_col": 1, "max_col": inspection["column_count"]}
+                if inspection["row_count"] and inspection["column_count"]:
+                    marker_row, marker = next(markers, (None, {}))
+                    for number, values in enumerate(value_ws.iter_rows(**bounds), 1):
+                        while marker_row is not None and marker_row < number:
+                            marker_row, marker = next(markers, (None, {}))
+                        row_metadata = marker if marker_row == number else {}
+                        retain(number, [cell.value for cell in values],
+                               {index for index, cell in row_metadata.items() if cell["formula"]},
+                               {index for index, cell in enumerate(values, 1) if cell.data_type == "e"},
+                               {index: cell["date"] for index, cell in row_metadata.items() if cell["date"] is not None})
+                # Exhaust the validated part even when openpyxl stops at the
+                # rectangular max row: a trailing duplicate/decreasing row
+                # must not disappear outside that iterator's numeric bounds.
+                for _remaining in markers:
+                    pass
+            finally:
+                markers.close()
+        finally:
+            values_book.close()
+    return {"inspection": inspection, "nonempty_columns": sorted(nonempty), "rows": rows}
+
+
+def _selected_cell_metadata(data, inspection):
+    """Stream formula markers and raw ISO date values using File's XML reader.
+
+    openpyxl silently removes offsets from native OOXML date cells. Preserve
+    that text for the target validator instead of relying on the coerced date.
+    Only one sheet row's metadata is retained, including unmapped formula
+    markers so a missing cache cannot make a source column disappear.
+    """
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        path = _sheet_paths(archive, archive.namelist())[inspection["selected_sheet"]]
+        with archive.open(path) as source:
+            row_number, previous_row, column = 0, 0, 0
+            row, cell = {}, {}
+            seen_columns = set()
+            for event, element in _xml_events(source):
+                tag = _local_name(element.tag)
+                if event == "start" and tag == "row":
+                    row_number = int(element.attrib.get("r", previous_row + 1))
+                    if row_number <= previous_row:
+                        raise _failure("IMPORT_XLSX_INVALID", "Workbook rows must have unique increasing coordinates.")
+                    row = {}
+                    seen_columns = set()
+                elif event == "start" and tag == "c":
+                    match = _CELL_REF.fullmatch(element.attrib.get("r", ""))
+                    if match is None or int(match[2]) != row_number:
+                        raise _failure("IMPORT_XLSX_INVALID", "Workbook row and cell coordinates disagree.")
+                    column = _column_number(match[1])
+                    if column in seen_columns:
+                        raise _failure("IMPORT_XLSX_INVALID", "Workbook contains duplicate cell coordinates.")
+                    seen_columns.add(column)
+                    cell = {"formula": False, "date": None, "native_date": element.attrib.get("t") == "d"}
+                elif event == "start" and tag == "f":
+                    cell["formula"] = True
+                elif event == "end" and tag == "v" and cell.get("native_date"):
+                    cell["date"] = element.text
+                elif event == "end" and tag == "c":
+                    if cell.get("formula") or cell.get("native_date"):
+                        row[column] = cell
+                    cell = {}
+                elif event == "end" and tag == "row":
+                    yield row_number, row
+                    previous_row = row_number
 
 
 def _sniff_delimiter(text: str) -> str:

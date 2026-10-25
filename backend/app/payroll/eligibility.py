@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.permissions import check_any_permission
 from app.access.policy import require_non_driver_subject
-from app.db.sql import build_in_clause
 from app.payroll.period_read import get_period_by_id
 from app.payroll.schemas import SOURCE_ENTRY_STATUSES
 from app.payroll.workflow_lock import acquire_branch_workflow_lock
@@ -30,6 +29,19 @@ async def _lifecycle_eligible_assignment_ids(
     driver_assignment_ids: list[int],
     db: AsyncConnection,
 ) -> set[int]:
+    return {assignment_id for assignment_id, _ in await lifecycle_eligible_assignment_days(
+        period_id, company_id, branch_id, work_date, driver_assignment_ids, db,
+    )}
+
+
+async def lifecycle_eligible_assignment_days(
+    period_id: int,
+    company_id: int,
+    branch_id: int,
+    work_date: date | None,
+    driver_assignment_ids: list[int],
+    db: AsyncConnection,
+) -> set[tuple[int, date]]:
     """Return DriverAssignments whose live window and Driver state still allow new source.
 
     An assignment is lifecycle-eligible when it has ended (it then carries an
@@ -37,9 +49,8 @@ async def _lifecycle_eligible_assignment_ids(
     """
     if not driver_assignment_ids:
         return set()
-    in_clause, in_params = build_in_clause(driver_assignment_ids, "lifecycle_assignment")
     result = await db.execute(
-        text(f"""
+        text("""
             WITH eligible_days AS MATERIALIZED (
                 SELECT pde.DriverAssignmentID, pde.BranchTimeZoneIdSnapshot,
                        unnest(CASE WHEN CAST(:work_date AS DATE) IS NULL
@@ -60,7 +71,7 @@ async def _lifecycle_eligible_assignment_ids(
                        ) AS WorkWindow
                 FROM distinct_zone_days z
             )
-            SELECT DISTINCT a.DriverAssignmentID
+            SELECT DISTINCT a.DriverAssignmentID, ed.WorkDate
             FROM core.DriverAssignments a
             JOIN core.Drivers dr ON dr.DriverID = a.DriverID
             JOIN core.Employees e ON e.EmployeeID = a.EmployeeID
@@ -74,7 +85,7 @@ async def _lifecycle_eligible_assignment_ids(
              AND w.WorkDate = ed.WorkDate
             WHERE a.CompanyID = :company_id
               AND a.BranchID = :branch_id
-              AND a.DriverAssignmentID IN ({in_clause})
+              AND a.DriverAssignmentID = ANY(CAST(:assignment_ids AS INTEGER[]))
               AND core.fn_DriverEffectiveRange(a.EffectiveFromAt, a.EffectiveToAt) && w.WorkWindow
               AND (a.EndReason IS NOT NULL OR dr.DriverStatus = 'Active')
               AND (e.EmploymentStatus = 'Active'
@@ -89,10 +100,10 @@ async def _lifecycle_eligible_assignment_ids(
             "company_id": company_id,
             "branch_id": branch_id,
             "work_date": work_date,
-            **in_params,
+            "assignment_ids": driver_assignment_ids,
         },
     )
-    return {row["driverassignmentid"] for row in result.mappings().all()}
+    return {(row["driverassignmentid"], row["workdate"]) for row in result.mappings().all()}
 
 
 # ── CP-2E: Canonical Eligibility Snapshot helpers ────────────────────────────

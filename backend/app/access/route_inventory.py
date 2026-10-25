@@ -16,6 +16,10 @@ class RouteAuthorization:
 
 
 ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
+    'GET /payroll/periods/{period_id}/imports/template.xlsx': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'POST /payroll/imports/{import_id}/refresh': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'GET /payroll/imports/{import_id}/rows': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'GET /payroll/imports/{import_id}/issues': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /payroll/periods/{period_id}/imports': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/imports/{import_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'PUT /payroll/imports/{import_id}/mapping': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),

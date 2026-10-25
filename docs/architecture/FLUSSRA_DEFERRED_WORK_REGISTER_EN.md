@@ -860,9 +860,18 @@ Durable Driver Stage 1 identity design.
 The meaning of an external driver identity depends on the import contract. Keeping an undefined column or an unused alias table would preserve ambiguity.
 
 **Current State:**  
-Neither structure exists after Stage 1. Migration `0094` retires the dormant `import.ImportRows.MatchedDriverID` predecessor along with its unused import/integration tables, refusing populated predecessors. The replacement PayrollWork schema has company-scoped Driver matches and multiple identifier associations per source record; A1 stages files only. A2/Slice B still own matching and confirmation behavior. No saved alias or external-ID system is built.
+Neither structure exists after Stage 1. Merged A1 migration `0094` retired the dormant `import.ImportRows.MatchedDriverID` predecessor along with its unused import/integration tables, refusing populated predecessors. The replacement PayrollWork schema has company-scoped Driver matches and multiple identifier associations per source record. Local A2 implements exact Company/period-roster `DriverNumber` and `EmployeeKey` resolution to a permanent Driver and canonical date-effective assignment. Exact unique roster names are unconfirmed proposals; ambiguous/unknown identifiers and disagreement remain visible errors. Per-import matches have no user confirmations or decisions. A2 validation/workload acceptance and independent review remain pending. Slice B owns choices/confirmations, and saved cross-import source-system aliases remain unimplemented.
 
 Update 2026-10-25: C2 A1 implementation establishes safe staging and the replacement persistence foundation. This entry remains unresolved; schema availability does not implement its matching/alias capability or constitute acceptance of A1.
+
+Update 2026-10-25 (preview): A1 is accepted and merged through PR #74. Local A2
+provides per-import stable-identifier resolution and unconfirmed name proposals,
+with focused identity/eligibility, no-payroll-write and retention checks passing.
+Its synchronous workload gate is blocked by measured bulk staging cost; the
+measured FK lookup fix is forward migration `0095`, preserving `0094` and all
+guards. Independent A2 review and all Slice B confirmations remain downstream.
+Saved aliases across imports have not been delivered, so this entry stays
+`NOT YET`.
 
 **Issue Resolved?:** NOT YET
 

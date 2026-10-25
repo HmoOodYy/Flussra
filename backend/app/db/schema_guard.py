@@ -420,6 +420,22 @@ _IMPORT_TABLES = (
 
 def _check_import_foundation(cur) -> list[str]:
     errors: list[str] = []
+    for table, index, columns in (
+        ("importissues", "ix_importissues_sourcerecordscope", ["sourcerecordid", "importid", "companyid"]),
+        ("payrollworkrecordidentifiers", "ix_payrollworkrecordidentifiers_matchscope", ["drivermatchid", "importid", "companyid"]),
+    ):
+        cur.execute("""
+            SELECT 1 FROM pg_index i JOIN pg_class ix ON ix.oid = i.indexrelid
+            JOIN pg_am am ON am.oid = ix.relam
+            WHERE i.indrelid = to_regclass(%s) AND i.indexrelid = to_regclass(%s)
+                AND i.indisvalid AND i.indisready AND NOT i.indisunique
+                AND i.indpred IS NULL AND i.indexprs IS NULL AND am.amname = 'btree'
+                AND ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(num, pos)
+                    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.num
+                    WHERE k.pos <= i.indnkeyatts ORDER BY k.pos) = %s::text[]
+        """, (f"import.{table}", f"import.{index}", columns))
+        if cur.fetchone() is None:
+            errors.append(f"Missing or drifted Import detail lookup index import.{index} (0095).")
     for table in _IMPORT_TABLES:
         cur.execute("SELECT to_regclass(%s)", (f"import.{table}",))
         if cur.fetchone()[0] is None:

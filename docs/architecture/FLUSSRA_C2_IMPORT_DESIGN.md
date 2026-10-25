@@ -1,6 +1,6 @@
 # FLUSSRA C2 IMPORT DESIGN — PAYROLL WORK DATA, VERSION 1
 
-**Status:** Implementation design, with the agreed Slice A mission contract finalized on 2026-10-25. Implements [the C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md); point IDs (R, S, O, L, F, N, D) refer to that plan. A1 is implemented locally and awaiting review acceptance; A2, A3 and Slice B are not implemented.<br>
+**Status:** Implementation design, with the agreed Slice A mission contract finalized on 2026-10-25. Implements [the C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md); point IDs (R, S, O, L, F, N, D) refer to that plan. A1 is accepted and merged through PR #74 (`337e3f7`). A2 is implemented locally, with focused verification passing; workload acceptance is blocked by the measured staging/retention cost (§2.1), and independent review remains pending. A3 and Slice B have not started.<br>
 **Scope:** importing ordinary work quantities from an `.xlsx` or `.csv` file into one Draft (Prepared), Open or Returned payroll period. Status, Bonus, People and Rate imports are out of scope (O1–O3); the engine and tables below are shaped so they can be added without a second engine (F1, F2, F7).<br>
 **Prerequisite:** the Day Grid workspace (`GET /payroll/periods/{id}/entry-overview`, `frontend/src/pages/payroll/entry/`) is merged to `main` before Slice A starts. Facts in §1 marked † come from that work.
 
@@ -26,9 +26,9 @@
 | A request is one transaction that rolls back entirely on error | `app/dependencies.get_db` | A failed commit cannot persist a `Failed` status; it leaves the import in review (§3.2). |
 | Unique Company-scoped identifiers: `Drivers.DriverNumber`, `Employees.EmployeeKey`; names and CDL numbers are not unique; one Driver may hold several non-overlapping DriverAssignments in one Branch period | `ux_drivers_company_drivernumber`, `ux_employees_company_employeekey`, `excl_DriverAssignments_Driver_Window` | Drivers are matched to the permanent Driver, then to the assignment of each row's date (§5.2). |
 | † `GET /payroll/periods/{id}/entry-overview` returns every date's rows and configured days off | `day_grid.get_period_entry_overview` | Used by the screens; the import diff uses a lean set-based reader instead (§6). |
-| `python-multipart` is installed; no Excel library; no endpoint accepts files | `backend/pyproject.toml` | Add `openpyxl` and `defusedxml`; first `UploadFile` endpoint. |
+| A1 supplies bounded synchronous CSV/XLSX File ingress with openpyxl/defusedxml and strict multipart transport | `app.imports.files`, `transport`, `service`; `backend/pyproject.toml` | A2 reuses this File contract's mapped-materialization mode; no second spreadsheet parser. |
 | No import permission exists | `sec.Permissions` | Import uses `payroll.entry` (it is bulk typing). |
-| The `import` schema (7 tables), the `integration` schema (2 tables) and the view `app.vw_ImportBatchSummary` predate the current architecture; all tables are empty; no runtime code uses them; `integration.IntegrationSyncRuns` and the view depend on `import.ImportBatches` | catalog; `0001_initial_schema.sql`; repository search (`tests/test_durable_driver_schema.py` is the only reference) | Retired and replaced (§3.1). |
+| A1 migration `0094` retired the seven dormant Import tables, two integration tables and `app.vw_ImportBatchSummary` through a fail-closed preflight | `0094_import_foundation.sql` | The replacement envelope/File/PayrollWork tables are the merged foundation; A2 does not rewrite `0094`. |
 
 ## 2. Architecture
 
@@ -76,10 +76,120 @@ Real application staging through HTTPX ASGITransport returned 200: dense XLSX up
 
 The internal package-member ceiling is **4,096**, over 400 times the 9–10 members observed in these ordinary, dense and text-heavy generated workbooks. The boundary package was measured as above; 4,096 is accepted and 4,097 is refused by focused tests. Ordinary generated workbook parts reached XML depth **9** (in `xl/theme/theme1.xml`), independent of dense row count; the **256-element** depth ceiling leaves over 28 times that observed hierarchy depth. Exact depth 256 was accepted and 257 refused with `IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED`, as measured above. These generous internal resource ceilings supplement the whole-archive 50 MB actual-byte counter and are separate from the seven product limits. XML classification includes Content Types defaults/overrides and sheet relationship targets, so non-`.xml` filenames cannot bypass checks for XML parts. Before openpyxl can perform whole-member reads, bounded stored/deflate member reads check actual inflated lengths and CRCs, rejecting understated ZIP lengths that ordinary size-clipped ZIP reads can hide. Parsing clears completed XML children as well as their text and retains only a bounded header candidate. File inspection JSON is capped at **4,000,000 UTF-8 bytes** and contains sheet/header/shape/cache counts, never all source rows.
 
+#### Measured mapping/preview workload — Python 3.12 (2026-10-25)
+
+`backend/scripts/benchmark_import_files.py --preview-only` extends the same
+private-database harness through real authenticated mapping and bounded reads.
+The measured period held **2,860 eligible assignments, 47 frozen definitions and
+7 dates**. It created five separate staged imports, retained all `0094` detail
+guards and made no payroll-source writes. This five-import baseline used the
+merged `0094` schema before the measured lookup fix below. Environment: Windows 11, Python
+3.12.10, openpyxl 3.1.5, Starlette 1.10.0; HTTPX ASGITransport excludes real
+network/proxy latency. Raw evidence:
+`backend/.artifacts/validation/a2-preview-benchmark-final.json`; stdout/stderr:
+`backend/.artifacts/validation/a2-preview-benchmark-final.log` (ignored artifacts).
+
+| Input | Upload/inspection | Mapping request | File materialization | Context read | Validation/comparison | Staging/persistence |
+|---|---:|---:|---:|---:|---:|---:|
+| Representative CSV: 999 data rows, 7 mapped definitions | — | 4.28 s | included | included | included | included |
+| Near-upper CSV: 19,999 data rows × 50 source columns, 939,953 mapped quantity cells; 2.92 MB | 0.48 s in initial run | 122.95 s | 1.39 s | 1.17 s | 19.28 s | 100.64 s |
+| Same near-upper shape as XLSX; 2.29 MB compressed | 18.66 s | 166.38 s | 41.88 s | 0.20 s | 19.97 s | 103.79 s |
+| Invalid-quantity CSV: 1,000 data rows × 47 definitions, 47,000 issues | included separately | 11.81 s | included | included | included | 9.80 s |
+
+Peak application/harness working set reached approximately **1.30 GB**
+(absolute process peak, not incremental per-request memory). No parser-owned
+temporary files were observed. Authenticated period-summary GETs completed
+with 200/572 bytes during materialization, computation and persistence. During
+the upper XLSX case they took **0.057 s / 1.555 s / 0.005 s**, respectively, and
+each phase was still active at request completion. Offload protects ordinary
+reads; it does not shorten the caller's synchronous operation or period lock.
+
+A separate 3.76 MB supported CSV used 10 source rows × 47 mapped fields of
+8,000-byte text. Real row responses stopped at **1,946,983 bytes / 5 rows**,
+returning both pages and all 10 rows exactly once. Its 470 error issues
+traversed as 200/200/70. The ordinary near-upper 100-row page was approximately
+1.31 MB. These measured shapes and the shared byte-boundary tests support the
+numeric paging contract in §6.1, independently of workload acceptance.
+
+The actual retention hook purged all five imports in **230.81 seconds**.
+All seven transient-detail tables were empty afterward; accepted mapping and
+content fingerprints survived, while File bytes/inspection and plan state were
+cleared. That is combined retention cost for these five workloads, not a
+per-file figure. Per-detail guards remained enabled throughout; total staging
+time must not be misreported as isolated trigger time.
+
+**A2 workload acceptance is blocked.** Near-upper staging occupies the period's
+write transaction for roughly 101–104 seconds in the baseline. This does not satisfy the intended short-write
+synchronous contract. Functional previews, responsiveness and bounded output do
+not close that gate. Limits, guard semantics and synchronous architecture are
+unchanged; no queue, truncation or partial result substitutes for acceptance.
+An explicit performance/design amendment is required before A2 acceptance or
+A3 begins. Deployment/proxy timeout and memory budgets also remain external
+verification gaps. Upper timings precede the final semantic-hash and typed-array
+eligibility refinements and `0095`; unchanged guarded staging work establishes
+the blocker. Post-index timings must be distinguished from that baseline.
+
+**Current `0095` upper verification:** a fresh single-import CSV run at the
+same 19,999 × 50 source shape (939,953 quantity cells, 2,923,224 file bytes)
+took **0.527 s** to upload and **122.872 s** to map: materialization **1.453 s**,
+context **1.191 s**, validation/comparison **19.039 s**, staging/persistence
+**100.747 s**. Peak process working set was **1,247,842,304 bytes**, with no
+temporary files observed. Authenticated 200/572-byte period-summary reads
+completed during the three active work phases in **0.482 / 1.340 / 0.218 s**.
+The 100-row response was **1,312,290 bytes**; the 200-error response was
+**41,306 bytes**. Its real single-import purge took **24.846 s**; all seven
+detail tables were empty and durable identities survived. Raw evidence:
+`backend/.artifacts/validation/a2-preview-upper-csv-0095.json` and matching `.log`.
+This verifies current-code upper behavior without repeating unrelated parser
+cases. It confirms that the index fix does not close the synchronous workload
+gate. The previous 230.81 s figure is explicitly a pre-index, five-import cost,
+not this current single-import purge result.
+
 ## 3. Data model
 
 ### 3.1 Retirement of the dormant schemas (migration `0094`)
 A fail-closed preflight (pattern of `0071`) raises if any of `integration.IntegrationSyncRuns`, `integration.IntegrationConnections` or the seven `import.*` tables holds a row, or if any object other than `app.vw_ImportBatchSummary` and `integration.IntegrationSyncRuns` depends on them. Then, without CASCADE: drop the view, the two integration tables and the seven import tables. Integrations get their own design when built (N5). The new tables follow. Alembic head becomes `0094`; `scripts/validate.ps1`, `scripts/compare_schema_authorities.py` (`EXPECTED_HEAD`), `README.md`, the schema guard and `tests/test_durable_driver_schema.py` follow, and a test asserts the view and old tables are gone.
+
+#### Detail lookup indexes (migration `0095`)
+
+A2 profiling established a concrete child-FK lookup deficiency in merged `0094`.
+In a rollback probe after deleting 47,000 issues, deleting 1,000 source records
+spent **1,190.286 ms** in the issue foreign-key trigger versus **19.447 ms** in
+the source-record writable guard. `ImportIssues` had only its issue-ID primary
+key. The corresponding Driver-match parent probe also found no child index on
+`DriverMatchID`. These are measured parent-retirement lookups, not a reason to
+weaken or bypass any guard.
+
+Forward migration **`0095`** adds only two non-unique B-tree indexes:
+
+- `ix_ImportIssues_SourceRecordScope` on `(SourceRecordID, ImportID, CompanyID)`;
+- `ix_PayrollWorkRecordIdentifiers_MatchScope` on `(DriverMatchID, ImportID, CompanyID)`.
+
+`0094`, every ownership FK and every lifecycle/retention trigger remain intact.
+The schema guard checks each index's target, leading keys, validity and full
+non-unique B-tree shape. Current single-head, SQL/Alembic equivalence and
+canonical reset/seed checks advance to `0095`. The indexes address a measured
+retention cost; they do not authorize an async design or close A2's synchronous
+workload gate.
+
+The same 1,000-row/47,000-issue profile after `0095` reduced source-parent
+deletion **1,262.275 → 60.731 ms**, and its issue RI trigger
+**1,190.286 → 14.811 ms** over 1,000 calls. The writable guard remained enabled
+(**19.447 → 23.047 ms** in that probe). Driver-match deletion fell
+**17.159 → 10.355 ms**; its identifier RI trigger fell **11.036 → 3.572 ms** over
+286 calls. Actual same-shape purge fell **3.730 → 2.315 s**. The rollback probes
+left no persistent detail changes; the subsequent real purge was verified.
+
+With `track_functions=pl` enabled only on the private profiling connections,
+mapping observed **99,291** detail-guard calls / **2,806.634 ms**, and purge
+**99,288** calls / **2,029.041 ms**. These attributable function counters are
+distinct from the full **9.802 s** persistence phase and **2.315 s** purge.
+Neither index removes a guard invocation. Before/after raw evidence:
+`backend/.artifacts/validation/a2-preview-guard-profile.json` and
+`backend/.artifacts/validation/a2-preview-guard-profile-0095.json`, with matching
+`.log` files. Both are Python 3.12 private-database runs. The current 1,000-row
+profile mapped in **12.998 s**; this smaller issue-heavy case does not substitute
+for the near-upper measurement in §2.1.
 
 ### 3.2 Tables (schema `import`)
 Company-scoped composite foreign keys throughout, including actor and Branch ownership where applicable. Generic core columns must not require a PayrollPeriod, Driver, spreadsheet row/column, sheet, header or file. The generic lifecycle remains `NeedsMapping`, `NeedsReview`, `Completed` and `Cancelled`; completed/cancelled envelopes and details are immutable except for narrowly controlled target retention and its revision/purge metadata. No mandatory payroll-finalized lifecycle state is added to the core.
@@ -105,7 +215,7 @@ A cell carries its own `WorkDate`, so the cell model is independent of the file'
 
 Nothing references `payroll.PayrollPeriodDriverEligibility` rows by key: they are deleted and rebuilt.
 
-A1 creates this A2/B-ready schema with nullable/defaulted downstream state. It writes only the envelope, File source and PayrollWork target association/versions. A2 creates source records, File provenance, PayrollWork matching/record/cell/issue and fingerprint state. Slice B alone writes decisions, confirmations, applied evidence/removals and completed summaries. A1 inspection is not a mapper or preview. Do not build future People/Rate/Status persistence, a universal matcher or a generic ETL system.
+A1 created this A2/B-ready schema with nullable/defaulted downstream state and wrote only the envelope, File source and PayrollWork target association/versions. A2 now creates source records, File provenance, PayrollWork matching/record/cell/issue and fingerprint state. Slice B alone will write decisions, confirmations, applied evidence/removals and completed summaries. File inspection remains independent of the PayrollWork mapper/preview. No future People/Rate/Status persistence, universal matcher or generic ETL system is implemented.
 
 ### 3.2.1 Resource revision, creation identity and persisted versions
 
@@ -241,6 +351,105 @@ The import detail response carries bounded metadata, interpretation, whole-impor
 
 A2 chooses concrete page parameters, default sizes, hard maximum sizes and serialized-response bounds using existing API conventions and measured behavior. Record those numeric bounds in the API contract and verification before A2 is accepted; omitted or excessive page-size values cannot create an unlimited response. Use deterministic ordering and associate every page with the same preview fingerprint/version; a refresh must not silently combine old and new pages. Count and fingerprint the complete import on the server, not just the displayed subset. Verify that traversing pages/filter results loses or duplicates no rows/issues, and that every page is company/Branch scoped. No processing-status polling API is added.
 
+#### Implemented preview contract
+
+`GET /payroll/imports/{id}` returns durable interpretation and accepted mapping,
+exact mapping suggestions/targets, whole-import `summary`, contract versions,
+`fingerprints` (`mapping`, `content`, `plan`), `revision`, `period_status`,
+`source_editable`, and at most one `completed_import_notice`. It returns no row
+dump. The notice identifies the most recent matching Completed import of the
+same Company/period, its completion time/actor, and `byte_match`/`semantic_match`.
+It does not bypass mapping, refresh or current-value comparison.
+
+| Read | Default `limit` | Maximum `limit` | Ordering |
+|---|---:|---:|---|
+| `GET /payroll/imports/{id}/rows` | 25 | 100 | source row ascending |
+| `GET /payroll/imports/{id}/issues` | 50 | 200 | source row, source column (null first), issue code, persisted tie-breaker |
+
+Both page endpoints require positive `expected_revision` and the 64-character
+`plan_fingerprint`, accept `offset` (default 0, range 0–2,147,483,647) and optional
+`severity=Error|Warning|Conflict`, and reject invalid/excessive sizes with 422.
+Missing or changed preview identity returns 409 `IMPORT_PREVIEW_STALE`; clients
+must obtain current metadata before continuing. Each read uses one repeatable,
+read-only database snapshot, so an overlapping refresh cannot mix a metadata
+revision with another revision's detail.
+
+Pages carry `revision`, `plan_fingerprint`, the mapped interpretation,
+whole-import `summary`, `filter`, `offset`, requested `limit`, `filtered_count`,
+`items`, and `next_offset`. Rows carry File sheet/row coordinates, row fingerprint,
+skipped flag, identifier resolutions/proposals and cells with source column,
+resolved target, raw/parsed incoming quantity, blank flag, outcome, current
+quantity and held-Status/day-off discovery. Issues carry sheet/row, neutral
+locator (source column/value), severity, code and reason. Decimal quantities
+are exact canonical strings, not JSON floating-point numbers.
+
+Every serialized rows/issues response is bounded to **2,000,000 UTF-8 bytes**.
+The server may return fewer items than `limit` to meet that bound and sets
+`next_offset` to the first unreturned item; nothing is truncated or counted as
+returned. A single item exceeding the bound fails with
+`IMPORT_PREVIEW_ROW_TOO_LARGE`. Existing Flussra lists use offset/limit with
+50-item defaults and 500-item maxima; Import rows can each carry up to 48
+quantity fields with 8 KB source values, so its row count ceiling is lower and
+its byte ceiling is authoritative. Issue pages have a separate bound because
+they carry one affected source field rather than a full row. Measured payload
+and traversal evidence is required alongside the workload measurements in §2.1.
+
+Summary `rows`/`skipped` count source rows. `new`, `unchanged`, `invalid`,
+`unresolved`, `conflict_cells` count non-blank quantity cells; `errors`,
+`warnings`, `conflicts` count issues; `error_rows`, `warning_rows`,
+`conflict_rows` count distinct affected source rows. Filtered/page counts never
+replace these whole-import counts. Decision fields, confirmation fields and
+row/cell exclusions remain unset.
+
+#### Implemented canonicalization version 1
+
+Hashes are SHA-256 over compact UTF-8 JSON with sorted keys, explicit
+`version=1` and a domain `kind`; no generated staging IDs, timestamps, page
+parameters or filters enter them. Stable period/Driver/assignment/definition
+identities remain business target identities. Text identifiers are trimmed and
+case-sensitive; names use NFKC, collapsed whitespace and case-folding. Blank
+optional identifier columns do not create an identifier; an input row still
+needs at least one supplied identifier. Numeric identifiers retain their
+shortest stored numeric representation and issue a warning, without padding.
+
+`MappingFingerprint` covers the period, accepted sheet/header/effective date
+order/CSV decoding context, column roles and operational frozen definitions.
+Selection-versus-detection display state is not semantic identity.
+`RowFingerprint` covers that mapping identity, normalized identifiers, canonical
+date and per-definition quantities; invalid input retains its typed source
+value, blank has an explicit flag, and zero remains explicit. Exact finite
+Decimals normalize trailing zeroes (`4.0000` = `4`) without floating arithmetic.
+`ContentFingerprint` covers the mapping and sorted row fingerprints, preserving
+duplicate multiplicity. Reordering source rows does not change content identity;
+changing interpretation/mapping context does. The File SHA remains independent.
+
+`PlanFingerprint` covers mapping/content, sorted per-row plan hashes (resolved
+identities, quantities, current values, outcomes, skipped state and exception discovery),
+sorted issue identities and explicit unresolved decision/confirmation state.
+Relevant payroll/eligibility changes enter through those resolved results;
+unrelated period rows do not change this semantic identity. A separate complete
+read-context hash conservatively guards the computation-to-publication race.
+Raw numeric spelling does not
+make equivalent valid quantities different plans. Each source row is hashed
+separately to avoid allocating another million-cell copy solely for hashing.
+The context uses frozen definitions/day rows/roster, one shared canonical
+lifecycle date-matrix query and set-based active ordinary/entry-state reads on
+mapped WorkDates. It never invokes the Day Grid screen model or pay calculator.
+
+Missing roster markers return the canonical `ELIGIBILITY_SNAPSHOT_MISSING`.
+A missing period-day snapshot returns 409 `IMPORT_PERIOD_DAYS_MISSING`, requiring
+rebuilding the invalid period. Current period creation always captures days;
+although the entry validator retains a bounds-only no-day-row fallback, merged
+`0094` detail has a mandatory `(period, WorkDate)` day FK. Import must neither
+invent day rows nor write payroll to accommodate that invalid structure.
+
+Parsing and computation run outside database transactions. Before publishing,
+the short-write path reauthorizes and locks period before Import, rechecks the
+revision and reloads/hashes the canonical context. A change returns 409
+`IMPORT_PREVIEW_CONTEXT_CHANGED` atomically, requiring retry; no stale preview
+or payroll write is persisted. Bulk detail insertion and finalization purge
+retain every `0094` row guard; their transaction duration is measured in §2.1.
+
 ## 7. Commit
 
 ### 7.1 Transaction
@@ -272,6 +481,8 @@ A new payroll function applies an import plan to a pre-authorized, locked period
 | `GET /payroll/periods/{period_id}/imports/template.xlsx` | `payroll.view` or `payroll.entry` | A2: the period's bounded template |
 | `GET /payroll/periods/{period_id}/imports` | `payroll.view` or `payroll.entry` | Slice B: period import-history presentation; A3 does not implement history |
 | `GET /payroll/imports/{import_id}` | `payroll.view` or `payroll.entry` | A1: bounded staging/interpretation metadata; A2: bounded preview pages and issue access (§6.1); Slice B: receipt |
+| `GET /payroll/imports/{import_id}/rows` | `payroll.view` or `payroll.entry` | A2: bounded deterministic row pages, with whole-preview identity |
+| `GET /payroll/imports/{import_id}/issues` | `payroll.view` or `payroll.entry` | A2: bounded issue pages and severity filters |
 | `PUT /payroll/imports/{import_id}/mapping` | `payroll.entry` | A1: interpretation-only fields (sheet, header, date-order selection). A2 extends it with column mapping and preview computation |
 | `PUT /payroll/imports/{import_id}/decisions` | `payroll.entry` | Slice B only: Driver confirmations/choices, conflict decisions, Status/day-off decisions and exclusions |
 | `POST /payroll/imports/{import_id}/refresh` | `payroll.entry` | A2: re-run preview against current payroll; no decisions or writes to payroll |
@@ -283,6 +494,50 @@ Every route resolves the import's period through `get_period_by_id` (Company and
 The shared mapping resource has an explicit staged contract: A1 accepts and persists interpretation fields only, and reports unsupported column-mapping/decision input rather than ignoring it. It does not depend on A2 validation to inspect a file. A2 adds the mapping/preview portion after A1 review. Inspection metadata and samples are bounded in A1; A2 fixes the detailed preview/issue paging contract in §6.1. Neither mission exposes Slice B decision/commit endpoints or makes a batch `Completed`. Cancellation is whole-batch lifecycle behavior, not a shortcut for excluding problematic rows.
 
 A1's JSON interpretation body uses `expected_revision`, optional `sheet_name`, optional `header_row_number` and optional `date_order` (`DMY`/`MDY`/`YMD`, or null for unresolved order). Omitted interpretation fields retain their accepted values; explicit null re-runs detection/clears order selection. ISO dates remain unambiguous without an explicit `YMD` selection; date-column inference and business validation belong to A2. Cancel accepts `expected_revision` only. Unknown fields are refused. Upload requires the `Idempotency-Key` UUID header (§3.2.1); all reads include the current `revision`, contract versions, durable File metadata and interpretation (including CSV encoding/delimiter), never File bytes or staged row dumps. After finalization, the same accepted interpretation remains readable with null inspection data. Upload/interpretation overload returns 429 `IMPORT_BUSY` with `Retry-After: 1`; a parser failure is an actionable 422 and creates no partial Import.
+
+A2 extends that body with optional `column_mapping`: an object from canonical
+one-based column-index strings (`"1"` through `"50"`) to `DriverNumber`,
+`EmployeeKey`, `DriverName`, `WorkDate`, `Ignore`, or `Definition:<frozen-period-definition-id>`.
+The body admits at most 50 entries. Supplying a mapping validates completeness,
+ownership and unique targets, materializes mapped columns and atomically
+publishes the preview as `NeedsReview`, advancing revision once. Omitting or
+nulling `column_mapping` keeps the interpretation-only behavior: accepted
+reinterpretation clears mapping/derived state and returns to `NeedsMapping`.
+No automatic suggestion is a user confirmation; clients submit the accepted
+mapping explicitly, including Ignore for every unwanted non-empty column.
+
+Durable `ColumnMapping` is `{version: 1, columns: [...]}`. Each entry stores
+`source_column` and `target`; definition entries also retain
+`payroll_period_definition_id`, `pay_definition_id` and `rate_definition_id`.
+`POST .../{id}/refresh` accepts only `expected_revision`, reuses this mapping
+and File interpretation, re-resolves/revalidates/recompares current facts, and
+advances revision once. Unsupported persisted versions fail closed. Both
+mutations return the same bounded metadata contract as the detail read.
+
+An inferred date order is persisted in durable File `DateOrder` and exposed as
+`detected` in editable inspection/preview interpretation. Refresh infers it
+again from the mapped column; an explicitly selected order remains selected.
+Changing File interpretation invalidates column-dependent inference as well as
+mapping/preview state. Retention preserves the effective accepted order while
+purging inspection samples. File materialization streams raw native OOXML date
+text beside cached values because openpyxl otherwise strips `Z`/offsets; those
+values remain validation errors. Formula text is never evaluated or retained
+as a substitute for its required cached result.
+
+Template generation uses the frozen operational targets and eligible roster/day
+slots. All text cells are explicitly strings, including names/numbers beginning
+with formula characters. It validates its generated file through the same File
+contract, refuses unsupported full output without truncation, and refuses an
+empty operational target set or an ambiguous multi-assignment Driver/date.
+Before writing it verifies that every generated header has exactly the intended
+automatic mapping. Legal case-distinct codes or a frozen name colliding with
+another target/template header can otherwise be ambiguous under strict
+case-folded matching. Such layouts return 422
+`IMPORT_TEMPLATE_HEADERS_AMBIGUOUS`, directing the user to explicit mapping of
+their own file. They do not receive an ambiguously mapped template; no alias,
+priority rule or hidden stamp is invented to force a match.
+Non-editable periods cannot generate a new PayrollWork template. No hidden
+period stamp is emitted.
 
 ## 9. Frontend
 Under `frontend/src/pages/payroll/entry/import/`. **A3 connects only Upload → Mapping → Preview**, using A1/A2 APIs: file selection/template download; selected sheet/header/date interpretation; column mapping; bounded preview rows, summaries and issue filters; refresh, recoverable request errors and correction/re-upload. Do not render a successful upload as an applied import, or offer nonfunctional confirm/overwrite/exclude/apply controls. Display unresolved name proposals, conflicts, full-day-off Status cases and normal-day-off cases with their reasons; their decision actions remain unavailable in Slice A. No payroll value or Status is changed.

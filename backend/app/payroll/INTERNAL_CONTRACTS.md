@@ -12,6 +12,15 @@ This guide records cross-module helper contracts verified in the current backend
 
 ## Payroll-package shared helpers
 
+`app.payroll.eligibility.lifecycle_eligible_assignment_days` is the set-based date
+projection of the same canonical lifecycle query used by
+`_lifecycle_eligible_assignment_ids`. It returns `(DriverAssignmentID, WorkDate)`
+pairs over captured eligible dates (`work_date=None`) or one requested date.
+Import uses these pairs with `_is_snapshot_row_eligible_for_workdate`; it does
+not infer lifecycle eligibility from an assignment being valid on some other day.
+Existing-source rescue remains a separate exact-date rule and never grants
+new ordinary source where an entry writer would refuse it.
+
 | Owner | Supported helpers | Verified consumers | Invariant to preserve |
 |---|---|---|---|
 | `app.payroll.eligibility` | `require_period_eligibility_snapshot`, `_is_snapshot_row_eligible_for_workdate`, `_assert_driver_eligible_for_workdate_via_snapshot`, `_assert_driver_eligible_for_period_via_snapshot`, `_create_period_driver_eligibility_rows`, `_regenerate_period_driver_eligibility_rows`, `append_driver_assignment_to_editable_periods`, `_driver_has_existing_daily_source_on_date`, `_lifecycle_eligible_assignment_ids` | Period creation/lifecycle, workforce writes, bonus, Day Grid, draft-line mutation, hub/off-driver/finalized-library reads, Status calculation; `test_cp2e_eligibility_snapshot.py` | Every operational period requires a tenant-scoped marker; missing marker fails closed with HTTP 409 and never falls back to a live roster. A valid empty snapshot is an intentional empty roster. Captured Branch-local eligible WorkDates are frozen; live assignment range and employment lifecycle may further restrict new input using the captured Branch zone. Existing-source rescue is exact-date only. `IncludedByExistingData` never grants new period-level Bonus authority. Draft-to-Open regeneration replaces provisional rows and freezes the snapshot. Workforce appends only the newly created DriverAssignment to editable marked periods; transfer cancel/reschedule may re-capture only the named assignment in overlapping Draft/Open/Returned periods under the boundary locks. |

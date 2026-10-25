@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import io
+import json
 import zipfile
+from datetime import time, timedelta
 
 import pytest
 from openpyxl import Workbook
 
 from app.imports import ImportFailure, inspect_file
-from app.imports.files import MAX_XLSX_MEMBERS, MAX_XLSX_XML_DEPTH
+from app.imports.files import MAX_XLSX_MEMBERS, MAX_XLSX_XML_DEPTH, read_mapped_file
+from app.imports.mapping import parse_date
 
 
 def _workbook_bytes(rows: list[list[object]], *, sheet_name: str = "Data") -> bytes:
@@ -204,6 +207,80 @@ def test_inspect_xlsx_preserves_formula_cache_distinctions_without_evaluation() 
     assert result["formula_missing_cache_count"] == 1
     assert result["formula_cached_value_count"] == 0
     assert result["header_cells"] == ["Work Date", "Formula", ""]
+
+
+@pytest.mark.parametrize(
+    ("iso_date", "expected_date"),
+    [
+        ("2026-10-20", "2026-10-20"),
+        ("2026-10-20T08:30:00Z", None),
+        ("2026-10-20T08:30:00+02:00", None),
+    ],
+)
+def test_materialized_native_xlsx_dates_preserve_raw_offsets(iso_date: str, expected_date: str | None) -> None:
+    data = _workbook_bytes([["Work Date"], ["placeholder"]])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        worksheet = archive.read("xl/worksheets/sheet1.xml")
+    worksheet = worksheet.replace(
+        b'<c r="A2" t="inlineStr"><is><t>placeholder</t></is></c>',
+        f'<c r="A2" t="d"><v>{iso_date}</v></c>'.encode(),
+    )
+
+    materialized = read_mapped_file(_rewrite_xlsx(data, {"xl/worksheets/sheet1.xml": worksheet}),
+                                    "native-date.xlsx", [1])
+    cell = materialized["rows"][0]["cells"]["1"]
+
+    assert cell["kind"] == "date"
+    assert cell["value"] == iso_date
+    parsed_date = parse_date(cell, None)
+    assert (parsed_date.isoformat() if parsed_date else None) == expected_date
+
+
+def test_materialized_xlsx_time_duration_and_formula_cache_are_json_safe() -> None:
+    data = _workbook_bytes([
+        ["Time", "Duration", "Cached formula", "Missing formula", "Ignored formula"],
+        [time(8, 30), timedelta(hours=2), "=1+1", "=3+4", "=5+6"],
+    ])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        worksheet = archive.read("xl/worksheets/sheet1.xml")
+    worksheet = worksheet.replace(b"<f>1+1</f><v />", b"<f>1+1</f><v>2</v>")
+    worksheet = worksheet.replace(b"<f>3+4</f><v />", b"<f>3+4</f>")
+    data = _rewrite_xlsx(data, {"xl/worksheets/sheet1.xml": worksheet})
+
+    materialized = read_mapped_file(data, "typed-cells.xlsx", [1, 2, 3, 4])
+    row = materialized["rows"][0]
+    cells = row["cells"]
+
+    assert cells["1"] == {"value": "08:30:00", "kind": "time", "formula": False,
+                          "missing_cache": False}
+    assert cells["2"]["kind"] == "duration"
+    assert cells["2"]["value"] == "2:00:00"
+    assert cells["3"]["kind"] == "number" and cells["3"]["value"] == "2"
+    assert cells["3"]["formula"] is True and cells["3"]["missing_cache"] is False
+    assert cells["4"]["value"] is None and cells["4"]["formula"] is True
+    assert cells["4"]["missing_cache"] is True
+    assert 5 in materialized["nonempty_columns"]
+    assert json.loads(json.dumps(materialized))["rows"][0]["cells"]["2"]["value"] == "2:00:00"
+
+
+@pytest.mark.parametrize("malformation", ["duplicate_cell", "duplicate_row_coordinate"])
+def test_materialization_rejects_duplicate_xlsx_coordinates(malformation: str) -> None:
+    data = _workbook_bytes([["Work Date"], ["2026-10-20"], ["2026-10-21"]])
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        worksheet = archive.read("xl/worksheets/sheet1.xml")
+    if malformation == "duplicate_cell":
+        cell = b'<c r="A2" t="inlineStr"><is><t>2026-10-20</t></is></c>'
+        row_end = worksheet.index(b"</row>", worksheet.index(b'<row r="2">'))
+        worksheet = worksheet[:row_end] + cell + worksheet[row_end:]
+    else:
+        worksheet = worksheet.replace(b'<row r="3">', b'<row r="2">')
+        worksheet = worksheet.replace(b'r="A3"', b'r="A2"')
+    malformed = _rewrite_xlsx(data, {"xl/worksheets/sheet1.xml": worksheet})
+
+    with pytest.raises(ImportFailure) as exc_info:
+        read_mapped_file(malformed, "duplicate-coordinate.xlsx", [1])
+
+    assert exc_info.value.code == "IMPORT_XLSX_INVALID"
 
 
 def test_inspect_xlsx_accepts_selected_header_and_optional_definition_labels() -> None:

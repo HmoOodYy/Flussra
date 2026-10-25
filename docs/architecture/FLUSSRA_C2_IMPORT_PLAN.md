@@ -1,6 +1,6 @@
 # FLUSSRA C2 IMPORT PLAN
 
-**Status:** Agreed product direction (2026-10-24), with Slice A delivery and operational decisions finalized on 2026-10-25. A1 is implemented locally and awaiting review acceptance; A2, A3 and Slice B have not started. The [implementation design](FLUSSRA_C2_IMPORT_DESIGN.md) specifies the sequential mission gates and must satisfy the C2 gate in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` §10.<br>
+**Status:** Agreed product direction (2026-10-24), with Slice A delivery and operational decisions finalized on 2026-10-25. A1 is accepted and merged through PR #74 (`337e3f7`). A2 is implemented locally with focused verification passing, but its workload gate is blocked by measured staging/retention cost; independent review remains pending. A3 and Slice B have not started. The [implementation design](FLUSSRA_C2_IMPORT_DESIGN.md) specifies the sequential mission gates and must satisfy the C2 gate in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` §10.<br>
 **Scope:** what Flussra Import is, where it starts, the rules it never breaks, what the first version contains, and what follows.<br>
 **Terms:** *Pay Items* are the company's PayDefinitions as shown in the UI. A period's *frozen Pay Items* are the definitions frozen into that period at creation. *Daily entries* are the period's Daily Grid source rows.
 
@@ -84,6 +84,16 @@ These are inclusive limits using decimal bytes (1 MB = 1,000,000 bytes; 1 KB = 1
 Slice A remains synchronous: each request finishes its bounded processing before returning. Blocking parsing uses bounded in-process thread offload while that request remains pending; it must not block the asyncio event loop. No queues, background import workers/jobs, polling/status APIs or asynchronous-request architecture are added. A1 benchmarks representative files, including near the supported upper workload, and records time/resources plus ordinary-request responsiveness. A2 measures the added preview work. Unsuitable evidence requires an explicit design amendment before background processing; it does not authorize speculative infrastructure or silently reduced limits. C2 v1 limits are operating/security policy, not the shared engine's permanent architectural capacity.
 
 Preview responses contain summary counts and bounded, paginated rows/issues, with filters for errors, warnings and conflicts. Never return the entire workbook or all staged rows/issues in one response. A2 selects and records numeric default/max page sizes and response bounds from existing API conventions and measurements before its review gate. The user sees the selected sheet, selected/detected header and relevant date interpretation before relying on validation. Identifiers remain text where practical. Formula results use existing cached values only; Flussra does not evaluate or recalculate formulas, and missing required cached results remain validation errors.
+
+The local A2 contract uses offset/limit paging: **25 rows by default, at most
+100; 50 issues by default, at most 200; at most 2,000,000 serialized UTF-8 bytes
+per rows/issues response**. Byte-limited pages can be shorter and return the
+first unreturned `next_offset`; clients never infer completion from page length.
+Every page requires revision plus whole-preview fingerprint and uses one
+consistent read snapshot. Whole-import summaries remain separate from filtered
+and returned counts. [Design §6.1](FLUSSRA_C2_IMPORT_DESIGN.md#61-bounded-preview-api-d11)
+specifies the API, canonical identities and measured payload rationale; workload
+evidence remains part of A2 acceptance under D10.
 
 ## 4. Version 1 — excluded (O)
 
@@ -176,6 +186,21 @@ Slice A remains one feature milestone, split into **three sequential, independen
 
 A1 owns the existing D7 finalization cleanup before any upload is exposed as an available product workflow. Detailed data from never-completed or cancelled imports must be purged too. A2/A3 reuse and verify that lifecycle; Slice B adds completed-import provenance verification without moving apply into Slice A. Retained metadata must not fabricate completion or applied changes.
 
+A2's Python 3.12 workload gate remains **blocked**: the current `0095` supported
+near-upper 939,953-cell CSV preview took **122.872 seconds**, including
+**100.747 seconds of staging/persistence**, with a **24.846-second** single-import
+purge. Before the measured child-FK index fix, the XLSX equivalent took
+**166 seconds** and purging five measured imports together took **231 seconds**.
+The lookup fix improves retirement without weakening guards; ordinary
+authenticated reads remained responsive and output/retention checks passed.
+These facts do not
+satisfy the intended short-write synchronous contract. See
+[design §2.1](FLUSSRA_C2_IMPORT_DESIGN.md#21-synchronous-processing-contract-d10)
+for exact shapes, environment, raw evidence and limitations. No limits were
+lowered and no asynchronous architecture or weakened guard was introduced.
+An explicit performance/design amendment and A2 acceptance are required before
+A3 can start; A2 code availability alone does not pass its mission gate.
+
 [DWR-023](FLUSSRA_DEFERRED_WORK_REGISTER_EN.md#dwr-023--external-driver-identifiers-and-aliases-are-deferred-to-c2-import) is a design input for A2's company-scoped stable-identifier → permanent Driver → effective Branch/date assignment resolution. Name-only cases remain proposals until Slice B confirmation. The retired dormant import tables are not the new matching authority. L3 still defers saved source-system aliases across imports; this mission split neither creates a generic alias framework nor marks that deferred implementation complete.
 
 ## 11. Decisions (D)
@@ -207,4 +232,10 @@ D1–D7 were decided on 2026-10-24. D8–D20 record the settled delivery, operat
 
 ## 12. Existing import tables
 
-The dormant `import.*` tables predate the current architecture. The reviewed implementation design has evaluated them: [design §3.1](FLUSSRA_C2_IMPORT_DESIGN.md#31-retirement-of-the-dormant-schemas-migration-0094) assigns their fail-closed retirement/replacement, and the dependent dormant integration objects, to A1 migration `0094`. The tables still exist until that implementation lands; their current presence is not a second matching authority or a reason to preserve an obsolete model.
+The dormant `import.*` tables predated the current architecture. Merged A1
+migration `0094` retired/replaced them and their dependent dormant integration
+objects through the fail-closed preflight in
+[design §3.1](FLUSSRA_C2_IMPORT_DESIGN.md#31-retirement-of-the-dormant-schemas-migration-0094).
+The replacement envelope/File/PayrollWork schema is the current foundation.
+A2 populates its transient preview model and durable mapping/content identity;
+it does not rewrite the merged migration or resurrect the predecessor matcher.

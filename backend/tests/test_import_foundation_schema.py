@@ -105,6 +105,23 @@ def test_schema_guard_detects_disabled_detail_protection(foundation):
             )
 
 
+@pytest.mark.parametrize("table,index,columns", [
+    ("importissues", "ix_importissues_sourcerecordscope", "importid, companyid"),
+    ("payrollworkrecordidentifiers", "ix_payrollworkrecordidentifiers_matchscope", "importid, companyid"),
+])
+@pytest.mark.parametrize("drift", ["missing", "wrong_columns"])
+def test_schema_guard_detects_missing_or_drifted_detail_lookup_indexes(foundation, table, index, columns, drift):
+    with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
+        assert _check_import_foundation(cur) == []
+        try:
+            cur.execute(f"DROP INDEX import.{index}")
+            if drift == "wrong_columns":
+                cur.execute(f"CREATE INDEX {index} ON import.{table} ({columns})")
+            assert any(index in error for error in _check_import_foundation(cur))
+        finally:
+            conn.rollback()
+
+
 def test_schema_guard_detects_missing_company_scoped_driver_relationship(foundation):
     with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
         cur.execute("""SELECT conname FROM pg_constraint WHERE conrelid = 'import.payrollworkdrivermatches'::regclass

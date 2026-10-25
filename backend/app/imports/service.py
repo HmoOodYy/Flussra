@@ -34,6 +34,7 @@ class InterpretationRequest(RevisionRequest):
     sheet_name: str | None = Field(default=None, max_length=31)
     header_row_number: int | None = Field(default=None, strict=True, ge=1, le=20_000)
     date_order: Literal["DMY", "MDY", "YMD"] | None = None
+    column_mapping: dict[str, str] | None = Field(default=None, max_length=50)
 
 
 def failure(code: str, message: str, status: int = 409) -> ImportFailure:
@@ -75,7 +76,8 @@ _METADATA = """
     SELECT i.*, f.contractversion AS file_version, f.originalfilename, f.filetype,
         f.filesizebytes, f.filehashsha256, f.contentpurgedatutc,
         f.sheetname, f.headerrownumber, f.dateorder, f.encoding, f.delimiter, f.inspectionmetadata,
-        w.payrollperiodid, w.contractversion AS target_version, w.canonicalizationversion
+        w.payrollperiodid, w.contractversion AS target_version, w.canonicalizationversion,
+        w.columnmapping, w.mappingfingerprint, w.contentfingerprint, w.planfingerprint, w.previewcounts
     FROM import.imports i
     JOIN import.filesources f ON f.importid = i.importid AND f.companyid = i.companyid
     JOIN import.payrollworkimports w ON w.importid = i.importid AND w.companyid = i.companyid
@@ -115,6 +117,10 @@ def metadata(row) -> dict:
         "interpretation": {"sheet_name": row["sheetname"], "header_row_number": row["headerrownumber"],
                            "date_order": row["dateorder"], "encoding": row["encoding"],
                            "delimiter": row["delimiter"], "inspection": row["inspectionmetadata"]},
+        "mapping": row["columnmapping"],
+        "fingerprints": {"mapping": row["mappingfingerprint"], "content": row["contentfingerprint"],
+                         "plan": row["planfingerprint"]},
+        "summary": row["previewcounts"],
     }
 
 
@@ -135,15 +141,19 @@ async def existing_key(db: AsyncConnection, cid: int, key: UUID):
 
 
 async def retry_metadata(db: AsyncConnection, cid: int, uid: int, existing, fingerprint: str):
+    from app.imports.preview_service import enrich_metadata
+
     if existing["creationfingerprint"] != fingerprint:
         raise failure("IMPORT_IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used for a different upload.")
     row = await load(db, cid, existing["importid"])
     await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
-    return metadata(row)
+    return await enrich_metadata(db, cid, row)
 
 
 async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: int,
                         pid: int, key: UUID) -> dict:
+    from app.imports.preview_service import enrich_metadata
+
     async with engine.begin() as db:
         period = await authorize(db, cid, uid, pid, mutate=True)
         existing = await existing_key(db, cid, key)
@@ -194,14 +204,17 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
                    "sheet": inspection["selected_sheet"], "header": inspection["header_row_number"],
                    "date": inspection["date_order"], "encoding": inspection["encoding"],
                    "delimiter": inspection["delimiter"], "inspection": json.dumps(inspection)})
-            return metadata(await load(db, cid, iid))
+            return await enrich_metadata(db, cid, await load(db, cid, iid))
 
 
 async def read_import(engine: AsyncEngine, cid: int, uid: int, iid: int) -> dict:
+    from app.imports.preview_service import enrich_metadata
+
     async with engine.begin() as db:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         row = await load(db, cid, iid)
         await authorize(db, cid, uid, row["payrollperiodid"], mutate=False)
-        return metadata(row)
+        return await enrich_metadata(db, cid, row)
 
 
 async def lock_mutable(db: AsyncConnection, cid: int, uid: int, iid: int, expected: int,
@@ -223,6 +236,10 @@ async def lock_mutable(db: AsyncConnection, cid: int, uid: int, iid: int, expect
 
 async def reinterpret_import(request: Request, engine: AsyncEngine, cid: int, uid: int,
                              iid: int, body: InterpretationRequest) -> dict:
+    if body.column_mapping is not None:
+        from app.imports.preview_service import map_or_refresh
+
+        return await map_or_refresh(request, engine, cid, uid, iid, body)
     # No lock or connection survives into the parser. The final transaction
     # checks the same expected revision again, after serialization with Payroll.
     async with admission(request):
@@ -238,7 +255,9 @@ async def reinterpret_import(request: Request, engine: AsyncEngine, cid: int, ui
                                         {"iid": iid, "cid": cid})).scalar_one()
             labels = await header_labels(db, cid, row["payrollperiodid"])
             settings = {"sheet_name": row["sheetname"], "header_row_number": row["headerrownumber"], "date_order": row["dateorder"]}
-            settings.update(body.model_dump(exclude_unset=True, exclude={"expected_revision"}))
+            if (row["inspectionmetadata"] or {}).get("date_order_state") == "detected":
+                settings["date_order"] = None
+            settings.update(body.model_dump(exclude_unset=True, exclude={"expected_revision", "column_mapping"}))
         inspection = await anyio.to_thread.run_sync(partial(
             inspect_file, bytes(content), row["originalfilename"], header_labels=labels, **settings))
         async with engine.begin() as db:
