@@ -7,6 +7,10 @@ Owns one REST resource end to end, GET and POST on
   - get_day_grid       read model: assembles the columns, status keys, driver rows,
                        canonical entry-state values and the summary tallies into a
                        DayGridResponse. Strictly read-only.
+  - get_period_entry_overview
+                       read model: the same rows and summary for every work date of the
+                       period (GET /payroll/periods/{period_id}/entry-overview), built by
+                       the same per-date code as get_day_grid. Strictly read-only.
   - save_day_grid      batch write orchestrator: validates the whole payload before
                        any DML (all-or-nothing), then acquires locks, drives source-line
                        upserts canonical entry state, and returns get_day_grid's refreshed
@@ -28,7 +32,8 @@ Transaction ownership is above this module: app.dependencies.get_db opens
 `async with engine.begin()`, so every write here shares the caller's ambient
 transaction; a failure anywhere unwinds the whole request.
 """
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -58,7 +63,11 @@ from app.payroll.eligibility import (
     _lifecycle_eligible_assignment_ids,
     require_period_eligibility_snapshot,
 )
-from app.payroll.financial_authority import frozen_source_lines, resolve_financial_authority
+from app.payroll.financial_authority import (
+    FinancialAuthority,
+    frozen_source_lines,
+    resolve_financial_authority,
+)
 from app.payroll.live_source_calculation import load_live_source_lines
 from app.payroll.mutation_lock import _lock_period_for_mutation
 from app.payroll.period_day_calendar import _validate_period_work_date, resolve_period_work_date
@@ -77,6 +86,9 @@ from app.payroll.schemas import (
     DayGridSummary,
     DraftLineCreate,
     DraftLineUpdate,
+    PeriodEntryOverviewDay,
+    PeriodEntryOverviewResponse,
+    PeriodSummary,
 )
 from app.payroll.status_work_conflict import FinalDayState, assert_no_off_status_work_conflicts
 from app.settings.status_keys import get_status_by_id, resolve_status_input
@@ -111,45 +123,42 @@ def _parse_quantity(raw: str | None, label: str) -> "Decimal | None":
         )
 
 
-async def get_day_grid(
-    period_id: int,
-    company_id: int,
-    user_id: int,
-    work_date: date | None,
-    db: AsyncConnection,
-) -> DayGridResponse:
+def _grid_period(period: PeriodSummary) -> DayGridPeriod:
+    return DayGridPeriod(
+        period_id=period.payroll_period_id,
+        period_name=period.period_name,
+        start_date=period.start_date,
+        end_date=period.end_date,
+        pay_date=period.pay_date,
+        status=period.status,
+        branch_id=period.branch_id,
+        branch_name=period.branch_name,
+    )
+
+
+@dataclass
+class _PeriodGridContext:
+    """Period-level read inputs shared by every work date of the grid."""
+    period: PeriodSummary
+    columns: list[DayGridColumn]
+    status_keys: list[DayGridStatusKey]
+    status_key_id_map: dict[int, DayGridStatusKey]
+    snapshot_rows: list[Any]
+    authority: FinancialAuthority
+    is_finalized: bool
+    status_evidence_entries: list[dict[str, Any]] | None
+    status_evidence_state: dict[str, str | None] | None
+    status_evidence_unavailable: bool
+
+
+async def _load_period_grid_context(
+    period: PeriodSummary, company_id: int, db: AsyncConnection,
+) -> _PeriodGridContext:
+    """Load everything of the grid that does not depend on the work date (read-only).
+
+    The caller has already authorized the read of the period.
     """
-    Return the full daily entry grid for a single work_date within a period.
-
-    If work_date is omitted (None), the backend resolves it:
-      - today's date if today falls within the period
-      - period.start_date otherwise
-
-    - Columns: active Daily-scope pay items for the branch.
-    - Status keys: the Company's active Statuses (names and aliases), shared by every Branch.
-    - Rows: all eligible active drivers; populated with existing draft lines.
-    """
-    await require_non_driver_subject(company_id, user_id, db)
-
-    # ── Load and access-check the period ─────────────────────────────────── #
-    period = await get_period_by_id(company_id, user_id, period_id, db)
-
-    # ── P1 #1: resolve work_date when omitted ────────────────────────────── #
-    work_date = await resolve_period_work_date(
-        company_id, period.branch_id, period.start_date, period.end_date, work_date, db,
-    )
-
-    # ── work_date bounds check (CP-2B: snapshot-aware) ───────────────────── #
-    await _validate_period_work_date(
-        period.payroll_period_id, work_date,
-        period.start_date, period.end_date, db,
-    )
-
-    # ── Permission: payroll.view OR payroll.entry ─────────────────────────── #
-    await check_any_permission(
-        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
-    )
-
+    period_id = period.payroll_period_id
     branch_id = period.branch_id
 
     # ── Columns: the period's ACTIVE definitions, in their frozen order ───── #
@@ -184,7 +193,6 @@ async def get_day_grid(
         {"cid": company_id},
     )
     status_keys: list[DayGridStatusKey] = []
-    status_key_map: dict[str, DayGridStatusKey] = {}  # statuscode -> key
     for row in sk_result.mappings().all():
         sk = DayGridStatusKey(
             status_key_id=row["statuskeyid"],
@@ -195,7 +203,9 @@ async def get_day_grid(
             aliases=list(row["aliases"]),
         )
         status_keys.append(sk)
-        status_key_map[row["statuscode"]] = sk
+
+    # Reverse lookup: StatusKeyID → DayGridStatusKey (for editable canonical path).
+    status_key_id_map: dict[int, DayGridStatusKey] = {sk.status_key_id: sk for sk in status_keys}
 
     # ── Load eligible drivers from the required canonical snapshot ───────── #
     await require_period_eligibility_snapshot(period_id, company_id, branch_id, db)
@@ -221,6 +231,66 @@ async def get_day_grid(
         {"pid": period_id, "cid": company_id, "bid": branch_id},
     )
     snap_rows_all = list(snap_rows_result.mappings().all())
+
+    # ── Financial authority of the period ────────────────────────────────── #
+    # Open/Returned money is live; InReview/Approved/Locked/Archived money comes only from the
+    # verified frozen snapshot of the period; a frozen authority that cannot be resolved or does
+    # not verify withholds the money (never a live fallback) and keeps the entry data.
+    authority = await resolve_financial_authority(
+        db, period_id=period.payroll_period_id, company_id=company_id, branch_id=branch_id,
+        withhold=True,
+    )
+
+    # ── Immutable Status evidence for Locked/Archived ─────────────────────── #
+    # After Submit, the verified snapshot's Status evidence is the historical authority for
+    # finalized periods. Locked/Archived rows below must not use the EntryState freeze columns
+    # (StatusCodeSnapshot/StatusLabelSnapshot/StatusIsOffReasonSnapshot/FinalizedAtUtc),
+    # current mutable PayrollStatusKeys, or legacy DraftLine Status codes to determine
+    # historical Status meaning. Other period statuses are unaffected.
+    _is_finalized_period = period.status in ("Locked", "Archived")
+    status_evidence_entries: list[dict[str, Any]] | None = None
+    status_evidence_state: dict[str, str | None] | None = None
+    # Set once evidence resolution below concludes UNAVAILABLE -- guards the
+    # worked/off tally of every date (see the tally comment for why EMPTY
+    # does not need the same guard).
+    status_evidence_unavailable = False
+    if _is_finalized_period:
+        status_evidence_entries, status_evidence_state = status_evidence.status_evidence_of(authority)
+        status_evidence_unavailable = status_evidence_state["state"] == "UNAVAILABLE"
+
+    return _PeriodGridContext(
+        period=period,
+        columns=columns,
+        status_keys=status_keys,
+        status_key_id_map=status_key_id_map,
+        snapshot_rows=snap_rows_all,
+        authority=authority,
+        is_finalized=_is_finalized_period,
+        status_evidence_entries=status_evidence_entries,
+        status_evidence_state=status_evidence_state,
+        status_evidence_unavailable=status_evidence_unavailable,
+    )
+
+
+async def _build_day_grid(
+    ctx: _PeriodGridContext, company_id: int, work_date: date, db: AsyncConnection,
+) -> tuple[list[DayGridRow], DayGridSummary]:
+    """Build the rows and summary of one work date from the shared period context (read-only)."""
+    period = ctx.period
+    period_id = period.payroll_period_id
+    branch_id = period.branch_id
+    columns = ctx.columns
+    snap_rows_all = ctx.snapshot_rows
+    status_key_id_map = ctx.status_key_id_map
+    authority = ctx.authority
+    _is_finalized_period = ctx.is_finalized
+    _status_evidence_unavailable = ctx.status_evidence_unavailable
+    _status_evidence_by_driver: dict[int, dict[str, Any]] = {
+        entry["driver_assignment_id"]: entry
+        for entry in ctx.status_evidence_entries or []
+        if entry["work_date"] == work_date
+    }
+
     snapshot_driver_assignment_ids = [r["driverassignmentid"] for r in snap_rows_all]
     lifecycle_eligible_ids = await _lifecycle_eligible_assignment_ids(
         period_id, company_id, branch_id, work_date, snapshot_driver_assignment_ids, db,
@@ -318,9 +388,6 @@ async def get_day_grid(
         for row in ces_result.mappings().all():
             canonical_by_driver[row["driverassignmentid"]] = dict(row)
 
-    # Reverse lookup: StatusKeyID → DayGridStatusKey (for editable canonical path).
-    status_key_id_map: dict[int, DayGridStatusKey] = {sk.status_key_id: sk for sk in status_keys}
-
     # Pre-load any deactivated keys referenced in canonical rows for editable periods.
     # (Deactivated keys are absent from status_key_id_map; fetch them in one batch.)
     deactivated_key_map: dict[int, dict] = {}
@@ -343,39 +410,6 @@ async def get_day_grid(
         )
         for row in dk_result.mappings().all():
             deactivated_key_map[row["statuskeyid"]] = dict(row)
-
-    # ── Financial authority of the period ────────────────────────────────── #
-    # Open/Returned money is live; InReview/Approved/Locked/Archived money comes only from the
-    # verified frozen snapshot of the period; a frozen authority that cannot be resolved or does
-    # not verify withholds the money (never a live fallback) and keeps the entry data.
-    authority = await resolve_financial_authority(
-        db, period_id=period.payroll_period_id, company_id=company_id, branch_id=branch_id,
-        withhold=True,
-    )
-
-    # ── Immutable Status evidence for Locked/Archived ─────────────────────── #
-    # After Submit, the verified snapshot's Status evidence is the historical authority for
-    # finalized periods. Locked/Archived rows below must not use the EntryState freeze columns
-    # (StatusCodeSnapshot/StatusLabelSnapshot/StatusIsOffReasonSnapshot/FinalizedAtUtc),
-    # current mutable PayrollStatusKeys, or legacy DraftLine Status codes to determine
-    # historical Status meaning. Other period statuses are unaffected.
-    _is_finalized_period = period.status in ("Locked", "Archived")
-    _status_evidence_by_driver: dict[int, dict[str, Any]] = {}
-    _status_evidence_state: dict[str, str | None] | None = None
-    # Set once evidence resolution below concludes UNAVAILABLE -- guards the
-    # worked/off tally further down so an unreadable historical Status never
-    # gets silently counted as "worked" (see the tally comment for why EMPTY
-    # does not need the same guard).
-    _status_evidence_unavailable = False
-    if _is_finalized_period:
-        _fin_status_entries, _status_evidence_state = status_evidence.status_evidence_of(authority)
-        if _fin_status_entries is not None:
-            _status_evidence_by_driver = {
-                entry["driver_assignment_id"]: entry
-                for entry in _fin_status_entries
-                if entry["work_date"] == work_date
-            }
-        _status_evidence_unavailable = _status_evidence_state["state"] == "UNAVAILABLE"
 
     # ── Money for the ordinary lines of this date, from the period's authority ─── #
     column_ids = {c.payroll_period_definition_id for c in columns}
@@ -548,26 +582,126 @@ async def get_day_grid(
         financial_authority_reason=authority.financial_authority_reason,
     )
 
-    grid_period = DayGridPeriod(
-        period_id=period.payroll_period_id,
-        period_name=period.period_name,
-        start_date=period.start_date,
-        end_date=period.end_date,
-        pay_date=period.pay_date,
-        status=period.status,
-        branch_id=period.branch_id,
-        branch_name=period.branch_name,
+    return rows, summary
+
+
+async def get_day_grid(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    work_date: date | None,
+    db: AsyncConnection,
+) -> DayGridResponse:
+    """
+    Return the full daily entry grid for a single work_date within a period.
+
+    If work_date is omitted (None), the backend resolves it:
+      - today's date if today falls within the period
+      - period.start_date otherwise
+
+    - Columns: active Daily-scope pay items for the branch.
+    - Status keys: the Company's active Statuses (names and aliases), shared by every Branch.
+    - Rows: all eligible active drivers; populated with existing draft lines.
+    """
+    await require_non_driver_subject(company_id, user_id, db)
+
+    # ── Load and access-check the period ─────────────────────────────────── #
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # ── P1 #1: resolve work_date when omitted ────────────────────────────── #
+    work_date = await resolve_period_work_date(
+        company_id, period.branch_id, period.start_date, period.end_date, work_date, db,
     )
 
+    # ── work_date bounds check (CP-2B: snapshot-aware) ───────────────────── #
+    await _validate_period_work_date(
+        period.payroll_period_id, work_date,
+        period.start_date, period.end_date, db,
+    )
+
+    # ── Permission: payroll.view OR payroll.entry ─────────────────────────── #
+    await check_any_permission(
+        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
+    )
+
+    context = await _load_period_grid_context(period, company_id, db)
+    rows, summary = await _build_day_grid(context, company_id, work_date, db)
+
     return DayGridResponse(
-        period=grid_period,
+        period=_grid_period(period),
         work_date=work_date,
-        columns=columns,
-        status_keys=status_keys,
+        columns=context.columns,
+        status_keys=context.status_keys,
         rows=rows,
         summary=summary,
-        status_evidence=_status_evidence_state,
+        status_evidence=context.status_evidence_state,
     )
+
+
+async def get_period_entry_overview(
+    period_id: int,
+    company_id: int,
+    user_id: int,
+    db: AsyncConnection,
+) -> PeriodEntryOverviewResponse:
+    """
+    Return the day grid of every work date of a period in one read.
+
+    Authorization is the one of get_day_grid. Each day carries exactly the rows and summary
+    get_day_grid returns for that date, plus whether the frozen period day is a configured
+    (normal) day off. The dates are the period's frozen days when it has them, otherwise every
+    date from start_date to end_date. Strictly read-only.
+    """
+    await require_non_driver_subject(company_id, user_id, db)
+
+    # ── Load and access-check the period ─────────────────────────────────── #
+    period = await get_period_by_id(company_id, user_id, period_id, db)
+
+    # ── Permission: payroll.view OR payroll.entry ─────────────────────────── #
+    await check_any_permission(
+        company_id, user_id, period.branch_id, ["payroll.view", "payroll.entry"], db
+    )
+
+    # ── The valid work dates (CP-2B: snapshot-aware) ──────────────────────── #
+    day_rows = (await db.execute(
+        text("""
+            SELECT workdate, isconfiguredoffday
+            FROM   payroll.PayrollPeriodDays
+            WHERE  payrollperiodid = :pid
+            ORDER BY workdate
+        """),
+        {"pid": period.payroll_period_id},
+    )).all()
+    if day_rows:
+        calendar = [
+            (r.workdate, bool(r.isconfiguredoffday)) for r in day_rows
+            if period.start_date <= r.workdate <= period.end_date
+        ]
+    else:
+        calendar = [
+            (period.start_date + timedelta(days=offset), False)
+            for offset in range((period.end_date - period.start_date).days + 1)
+        ]
+
+    context = await _load_period_grid_context(period, company_id, db)
+    days: list[PeriodEntryOverviewDay] = []
+    for work_date, is_configured_off_day in calendar:
+        rows, summary = await _build_day_grid(context, company_id, work_date, db)
+        days.append(PeriodEntryOverviewDay(
+            work_date=work_date,
+            is_configured_off_day=is_configured_off_day,
+            rows=rows,
+            summary=summary,
+        ))
+
+    return PeriodEntryOverviewResponse(
+        period=_grid_period(period),
+        columns=context.columns,
+        status_keys=context.status_keys,
+        days=days,
+        status_evidence=context.status_evidence_state,
+    )
+
 
 
 async def save_day_grid(

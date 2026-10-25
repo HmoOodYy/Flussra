@@ -1,14 +1,15 @@
-import { useCallback, useState } from 'react';
-import { getDayGrid, saveDayGrid } from '../../lib/payrollApi';
-import { canEntryPayroll } from '../../lib/permissions';
-import { addIsoDays, formatIsoShort, weekdayOfIso } from '../../lib/isoDate';
-import type { UserProfile } from '../../store/authStore';
-import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../types/payroll/entry';
+import { useCallback, useRef, useState } from 'react';
+import { getDayGrid, saveDayGrid } from '../../../lib/payrollApi';
+import { canEntryPayroll } from '../../../lib/permissions';
+import { formatIsoShort, weekdayOfIso } from '../../../lib/isoDate';
+import type { UserProfile } from '../../../store/authStore';
+import type { DayGridResponse, DayGridRow, DayGridSaveRow } from '../../../types/payroll/entry';
 import { buildSaveRowFromGrid, statusCellText, withTypedStatus } from './dayGridModel';
 
 const EDITABLE_STATUSES = new Set(['Draft', 'Open', 'Returned']);
 
-// Grid state and actions of the payroll entry workbench; the surface owns its read trigger and save-error presentation.
+// Grid state and actions of the payroll entry page; the surface owns its read trigger, its
+// unsaved-changes guard and its save-error presentation.
 
 export function formatDayLabel(d: string): string {
   const weekday = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'][weekdayOfIso(d)];
@@ -31,18 +32,22 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const [notesOpenDriverAssignmentId, setNotesOpenDriverAssignmentId] = useState<number | null>(null);
+  // Only the latest read may land, so a slow answer for a day left behind never replaces the current one.
+  const latestRead = useRef(0);
 
   const fetchGrid = useCallback(async (date: string | null) => {
+    const read = ++latestRead.current;
     setLoading(true);
     setError(null);
     setDirtyRows(new Map());
     setSaveError(null);
     try {
       const data = await getDayGrid(periodId, date ?? undefined);
+      if (read !== latestRead.current) return;
       setGrid(data);
       setSelectedDate(data.work_date);
     } catch (e: unknown) {
+      if (read !== latestRead.current) return;
       const detail = (e as {
         response?: { data?: { detail?: string | { message?: unknown } } };
       })?.response?.data?.detail;
@@ -54,21 +59,24 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
             : 'Failed to load grid.';
       setError(msg);
     } finally {
-      setLoading(false);
+      if (read === latestRead.current) setLoading(false);
     }
   }, [periodId]);
 
-  const atStart = grid && selectedDate ? selectedDate <= grid.period.start_date : true;
-  const atEnd   = grid && selectedDate ? selectedDate >= grid.period.end_date   : true;
+  function selectDate(date: string) { setSelectedDate(date); }
 
-  function prevDay() { setSelectedDate((d) => d ? addIsoDays(d, -1) : d); }
-  function nextDay() { setSelectedDate((d) => d ? addIsoDays(d, 1) : d); }
+  /** Drop every unsaved edit. */
+  function discardChanges() {
+    setDirtyRows(new Map());
+    setSaveError(null);
+  }
 
   const isEditable = grid ? EDITABLE_STATUSES.has(grid.period.status) : false;
   const canEdit    = isEditable && grid !== null && user !== null && canEntryPayroll(user, grid.period.branch_id);
 
-  async function handleSave() {
-    if (dirtyRows.size === 0 || !grid || !selectedDate) return;
+  /** Resolves true when the server accepted the save. */
+  async function handleSave(): Promise<boolean> {
+    if (dirtyRows.size === 0 || !grid || !selectedDate) return false;
 
     setSaving(true);
     setSaveError(null);
@@ -79,9 +87,11 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
       });
       setGrid(resp);
       setDirtyRows(new Map());
+      return true;
     } catch (e: unknown) {
       const msg = formatSaveError(e);
       setSaveError(msg);
+      return false;
     } finally {
       setSaving(false);
     }
@@ -139,13 +149,9 @@ export function useDailyEntryController({ periodId, user, formatSaveError }: Dai
     dirtyRows,
     saving,
     saveError,
-    notesOpenDriverAssignmentId,
-    setNotesOpenDriverAssignmentId,
     fetchGrid,
-    atStart,
-    atEnd,
-    prevDay,
-    nextDay,
+    selectDate,
+    discardChanges,
     isEditable,
     canEdit,
     handleSave,
