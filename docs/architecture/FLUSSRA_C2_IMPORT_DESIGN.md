@@ -58,6 +58,22 @@ A1 must measure representative bounded files, including a valid file near the su
 
 If the supported limits are unsuitable for synchronous processing, report the evidence and stop the affected mission's acceptance. An explicit design amendment is required before introducing background processing. Do not silently lower limits, truncate input, return partial results as a complete preview or build speculative asynchronous infrastructure.
 
+#### Measured File staging workload (2026-10-25)
+
+Reproduce from the repository root with `backend/.venv/Scripts/python.exe backend/scripts/benchmark_import_files.py` (on Windows, process `TEMP`/`TMP` set to `C:\Temp`, as in the validation scripts). It uses generated supported-format inputs, fresh parser processes and an invocation-owned disposable PostgreSQL database. These are bounded workload measurements, not customer-file observations or a production latency guarantee. Environment: Windows 11 build 26200, Python 3.14.4 AMD64, Starlette 1.10.0, openpyxl 3.1.5. Peak working set below is the absolute parser-process peak, including its runtime, not incremental memory.
+
+| Generated input | File bytes / actual decompressed bytes / ZIP members | Parser time | Peak working set |
+|---|---|---:|---:|
+| Representative XLSX, 1,000 × 10 | 32,019 / 381,492 / 9 | 0.192 s | 40.49 MB |
+| Dense XLSX, 20,000 × 50, 1,000,000 cells | 2,666,820 / 33,291,342 / 9 | 23.522 s | 45.28 MB |
+| Dense CSV, 20,000 × 50 | 2,260,478 / n/a / n/a | 0.371 s | 53.13 MB |
+| XLSX with a hidden unselected sheet containing 5,900 cells of 8,000 text bytes each | 81,408 / 47,488,536 / 10 | 0.237 s | 40.82 MB |
+| XLSX package-member boundary | 585,249 / 16,783 / 4,096 | 0.055 s | 45.62 MB |
+
+Real application staging through HTTPX ASGITransport returned 200: dense XLSX upload/inspection/persistence took **28.817 s**, and an authenticated Day Grid GET completed in **0.475 s while parsing was active**; text-heavy upload took **0.448 s**, concurrent GET **0.030 s**, also 200 during parsing. No parser-owned temp files appeared in isolated measurements. This transport exercises the application but excludes real network/proxy latency and production hardware. Earlier dense runs on this host took roughly 29–36 s end to end; the supported upper dense shape has substantial synchronous request cost. Deployment timeout/capacity suitability remains a review concern; these measurements do not approve acceptance or authorize background processing or reduced product limits. A2 adds its own validation/comparison cost and must remeasure.
+
+The internal package-member ceiling is **4,096**, over 400 times the 9–10 members observed in these ordinary, dense and text-heavy generated workbooks. The boundary package was measured as above; 4,096 is accepted and 4,097 is refused by focused tests. This generous resource ceiling supplements the whole-archive 50 MB actual-byte counter; it is separate from the seven product limits. Before openpyxl can perform whole-member reads, bounded stored/deflate member reads check actual inflated lengths and CRCs, rejecting understated ZIP lengths that ordinary size-clipped ZIP reads can hide. Parsing clears completed XML children as well as their text and retains only a bounded header candidate. File inspection JSON is capped at **4,000,000 UTF-8 bytes** and contains sheet/header/shape/cache counts, never all source rows.
+
 ## 3. Data model
 
 ### 3.1 Retirement of the dormant schemas (migration `0094`)
@@ -262,6 +278,8 @@ Every route resolves the import's period through `get_period_by_id` (Company and
 
 The shared mapping resource has an explicit staged contract: A1 accepts and persists interpretation fields only, and reports unsupported column-mapping/decision input rather than ignoring it. It does not depend on A2 validation to inspect a file. A2 adds the mapping/preview portion after A1 review. Inspection metadata and samples are bounded in A1; A2 fixes the detailed preview/issue paging contract in §6.1. Neither mission exposes Slice B decision/commit endpoints or makes a batch `Completed`. Cancellation is whole-batch lifecycle behavior, not a shortcut for excluding problematic rows.
 
+A1's JSON interpretation body uses `expected_revision`, optional `sheet_name`, optional `header_row_number` and optional `date_order` (`DMY`/`MDY`, or null for unresolved regional order). Omitted interpretation fields retain their accepted values; explicit null re-runs detection/clears regional selection. ISO dates remain unambiguous without a regional choice; date-column inference and business validation belong to A2. Cancel accepts `expected_revision` only. Unknown fields are refused. Upload requires the `Idempotency-Key` UUID header (§3.2.1); all reads include the current `revision`, contract versions, durable File metadata and bounded interpretation metadata, never File bytes or staged row dumps. Upload/interpretation overload returns 429 `IMPORT_BUSY` with `Retry-After: 1`; a parser failure is an actionable 422 and creates no partial Import.
+
 ## 9. Frontend
 Under `frontend/src/pages/payroll/entry/import/`. **A3 connects only Upload → Mapping → Preview**, using A1/A2 APIs: file selection/template download; selected sheet/header/date interpretation; column mapping; bounded preview rows, summaries and issue filters; refresh, recoverable request errors and correction/re-upload. Do not render a successful upload as an applied import, or offer nonfunctional confirm/overwrite/exclude/apply controls. Display unresolved name proposals, conflicts, full-day-off Status cases and normal-day-off cases with their reasons; their decision actions remain unavailable in Slice A. No payroll value or Status is changed.
 
@@ -356,4 +374,4 @@ The original implementation decisions D4–D7 are recorded in `FLUSSRA_C2_IMPORT
 - **D6** — work on a normal day off is accepted as a reviewed exception or excluded; unanswered blocks (§5.5).
 - **D7** — detailed provenance and the original file are kept until finalization, then purged; the durable import record stays (§3.3).
 
-The 2026-10-25 delivery/operational decisions are recorded as D8–D13 in the product plan §11: sequential A1/A2/A3 delivery (§10); hard limits and actual-content checks (§4.1); synchronous processing with measured evidence (§2.1); bounded preview pagination (§6.1); visible spreadsheet interpretation/cached-value semantics (§4.2); and the Slice B decision/apply boundary plus A1 retention responsibility (§§3.3, 9–10).
+The 2026-10-25 delivery/operational decisions are recorded as D8–D20 in the product plan §11: sequential A1/A2/A3 delivery (§10); hard limits and actual-content checks (§4.1); synchronous processing with measured evidence (§2.1); bounded preview pagination (§6.1); visible spreadsheet interpretation/cached-value semantics (§4.2); Slice B decision/apply boundaries; neutral core and specialized source/target ownership; revision/idempotency/version contracts; and Import-owned target retention (§§2–3, 9–10).

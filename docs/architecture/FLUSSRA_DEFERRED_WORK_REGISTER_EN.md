@@ -860,15 +860,15 @@ Durable Driver Stage 1 identity design.
 The meaning of an external driver identity depends on the import contract. Keeping an undefined column or an unused alias table would preserve ambiguity.
 
 **Current State:**  
-Neither structure exists after Stage 1. `import.ImportRows.MatchedDriverID` refers to the permanent Driver. No generic alias or external-ID system is built.
+Neither structure exists after Stage 1. Migration `0094` retires the dormant `import.ImportRows.MatchedDriverID` predecessor along with its unused import/integration tables, refusing populated predecessors. The replacement PayrollWork schema has company-scoped Driver matches and multiple identifier associations per source record; A1 stages files only. A2/Slice B still own matching and confirmation behavior. No saved alias or external-ID system is built.
 
-Update 2026-10-23: P8c closed the refoundation and the Unified Plan §10 C2 gate is met, so C2 is the next program; it has not started and this entry remains its design input.
+Update 2026-10-25: C2 A1 implementation establishes safe staging and the replacement persistence foundation. This entry remains unresolved; schema availability does not implement its matching/alias capability or constitute acceptance of A1.
 
 **Issue Resolved?:** NOT YET
 
 **Resolved In:** —  
 **Resolution Evidence:** —  
-**Last Updated:** 2026-10-23
+**Last Updated:** 2026-10-25
 
 \---
 

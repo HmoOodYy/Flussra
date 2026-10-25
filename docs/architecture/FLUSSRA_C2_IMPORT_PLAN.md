@@ -180,7 +180,7 @@ A1 owns the existing D7 finalization cleanup before any upload is exposed as an 
 
 ## 11. Decisions (D)
 
-D1–D7 were decided on 2026-10-24. D8–D13 record the settled delivery and operational decisions of 2026-10-25.
+D1–D7 were decided on 2026-10-24. D8–D20 record the settled delivery, operational and foundation decisions of 2026-10-25.
 
 | ID | Decision |
 |---|---|
