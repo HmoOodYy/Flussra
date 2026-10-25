@@ -21,7 +21,7 @@ def current_database(schema_databases):
 
 def test_fresh_schema_has_target_compensation_and_governance(current_database):
     _, dsn = current_database
-    assert _version(dsn) == "0093"
+    assert _version(dsn) == "0094"
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         for table in TARGET_TABLES:
             cursor.execute("SELECT to_regclass(%s)", (f"payroll.{table}",))

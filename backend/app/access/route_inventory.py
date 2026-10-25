@@ -16,6 +16,10 @@ class RouteAuthorization:
 
 
 ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
+    'POST /payroll/periods/{period_id}/imports': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'GET /payroll/imports/{import_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'PUT /payroll/imports/{import_id}/mapping': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'POST /payroll/imports/{import_id}/cancel': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /admin/company-owner/transfer': RouteAuthorization('AUTHENTICATED', 'SPECIAL_POLICY', (), 'app.admin.owner_transfer.transfer_company_owner', 'COMPANY', 'DENY', None, None),
     'GET /admin/company-roles': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.view', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),
     'POST /admin/company-roles': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('roles.edit', 'settings.manage', 'setup.manage'), None, 'COMPANY', 'DENY', None, None),

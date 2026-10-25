@@ -143,7 +143,7 @@ def _seed_0086_company(cursor, code: str) -> tuple[int, int]:
 
 def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0093",)
+    assert cur.fetchone() == ("0094",)
 
     def columns(table: str, schema: str = "core") -> set[str]:
         cur.execute("""
@@ -231,10 +231,12 @@ def test_driver_reference_columns_are_classified_with_no_unvalidated_driver_fore
     cur.execute("""
         SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
         WHERE contype = 'f' AND confrelid = 'core.drivers'::regclass
-          AND conrelid = 'import.importrows'::regclass
+          AND conrelid = 'import.payrollworkdrivermatches'::regclass
     """)
     rows = cur.fetchall()
-    assert len(rows) == 1 and "(matcheddriverid)" in rows[0][1] and "core.drivers(driverid)" in rows[0][1]
+    assert len(rows) == 1
+    assert "(driverid, companyid)" in rows[0][1]
+    assert "core.drivers(driverid, companyid)" in rows[0][1]
 
 
 def test_no_function_or_view_still_reads_the_profile_meaning_of_driverid(cur):

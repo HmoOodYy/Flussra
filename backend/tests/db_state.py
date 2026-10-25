@@ -44,6 +44,9 @@ class TriggerIdentity:
 FINAL_LINE_IMMUTABLE_TRIGGER = TriggerIdentity(
     "payroll", "payrollfinallines", "trg_final_line_immutable"
 )
+IMPORT_FILE_DETAIL_WRITABLE_TRIGGER = TriggerIdentity(
+    "import", "filesources", "trg_importdetail_writable"
+)
 PERIOD_STATUS_REVERT_TRIGGER = TriggerIdentity(
     "payroll", "payrollperiods", "trg_period_status_revert"
 )
@@ -408,6 +411,70 @@ async def suspended_test_triggers(
                 raise AssertionError(
                     f"trigger restoration mismatch for {identity}: "
                     f"expected enabled state {before[identity]!r}, got {observed!r}"
+                )
+        except BaseException as exc:
+            restoration_errors.append(exc)
+    _raise_with_restoration_errors(body_error, restoration_errors)
+
+
+@contextmanager
+def suspended_test_triggers_sync(
+    cursor,
+    triggers: Iterable[TriggerIdentity],
+) -> Iterator[None]:
+    """Synchronous psycopg2 form of ``suspended_test_triggers``.
+
+    Disable exact named triggers for the body; restore their exact modes and
+    verify restoration before returning, including when the body raises.
+    """
+    identities = tuple(triggers)
+    if not identities:
+        raise ValueError("at least one exact trigger identity is required")
+    if len(set(identities)) != len(identities):
+        raise ValueError("duplicate trigger identities are not allowed")
+
+    before: dict[TriggerIdentity, str] = {}
+    for identity in identities:
+        cursor.execute(
+            """SELECT t.tgenabled::text
+               FROM pg_catalog.pg_trigger AS t
+               JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid
+               JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+               WHERE n.nspname = %s AND c.relname = %s AND t.tgname = %s
+                 AND NOT t.tgisinternal""",
+            (identity.schema, identity.table, identity.name),
+        )
+        state = cursor.fetchone()
+        if state is None:
+            raise AssertionError(f"requested test trigger does not exist: {identity}")
+        before[identity] = state[0]
+
+    body_error: BaseException | None = None
+    restoration_errors: list[BaseException] = []
+    try:
+        for identity in identities:
+            cursor.execute(_trigger_ddl(identity, "D"))
+        yield
+    except BaseException as exc:
+        body_error = exc
+    for identity in reversed(identities):
+        try:
+            cursor.execute(_trigger_ddl(identity, before[identity]))
+            cursor.execute(
+                """SELECT t.tgenabled::text
+                   FROM pg_catalog.pg_trigger AS t
+                   JOIN pg_catalog.pg_class AS c ON c.oid = t.tgrelid
+                   JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+                   WHERE n.nspname = %s AND c.relname = %s AND t.tgname = %s
+                     AND NOT t.tgisinternal""",
+                (identity.schema, identity.table, identity.name),
+            )
+            observed = cursor.fetchone()
+            if observed is None or observed[0] != before[identity]:
+                raise AssertionError(
+                    f"trigger restoration mismatch for {identity}: "
+                    f"expected enabled state {before[identity]!r}, "
+                    f"got {None if observed is None else observed[0]!r}"
                 )
         except BaseException as exc:
             restoration_errors.append(exc)
