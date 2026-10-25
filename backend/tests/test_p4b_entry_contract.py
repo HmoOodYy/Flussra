@@ -230,9 +230,12 @@ async def test_a_retroactively_ended_driver_keeps_editable_source_and_can_always
     set_employment(tenant, tenant.driver_a, termination_date=setup_anchor() + timedelta(days=1),
                    employment_status="Terminated")
     url = f"{_lines(period)}/{line['draft_line_id']}"
-    assert (await p3c_client.patch(url, json={"quantity": "6"}, headers=tenant.admin)
-            ).status_code in (200, 422)
-    assert (await p3c_client.delete(url, headers=tenant.admin)).status_code in (200, 204)
+    patched = await p3c_client.patch(url, json={"quantity": "6"}, headers=tenant.admin)
+    assert patched.status_code == 200, patched.text
+    assert query(tenant, "SELECT quantity FROM payroll.payrolldraftlines "
+                         "WHERE draftlineid = %s", (line["draft_line_id"],)) == [(6,)]
+    voided = await p3c_client.delete(url, headers=tenant.admin)
+    assert voided.status_code == 204, voided.text
     assert query(tenant, "SELECT status FROM payroll.payrolldraftlines "
                          "WHERE draftlineid = %s", (line["draft_line_id"],)) == [("Void",)]
     # A driver who joined the Branch after the period was frozen is not on its roster.

@@ -1,23 +1,20 @@
-"""Migration 0087 and the database-level durable Driver contract.
+"""Current database-level durable Driver contract.
 
 A permanent ``core.Drivers`` row is the person-driver identity; every branch
 tenure is a ``core.DriverAssignments`` row with a half-open instant window.
-These tests exercise the schema only, directly against a migrated database.
+These tests exercise the current schema on an isolated fresh Alembic database.
 """
+
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from contextlib import contextmanager
-from pathlib import Path
 from uuid import uuid4
 
 import psycopg2
 import pytest
 from psycopg2 import errors, sql
 
-_ROOT = Path(__file__).resolve().parents[2]
+from tests.schema_helpers import _schema_database
 
 PAST_START = "2020-01-01 00:00+00"
 PAST_MID = "2020-06-01 00:00+00"
@@ -26,47 +23,10 @@ FUTURE_START = "2099-01-01 00:00+00"
 FUTURE_LATER = "2099-02-01 00:00+00"
 
 
-def _alembic(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-B", "-m", "alembic", *args],
-        cwd=_ROOT, env=env, capture_output=True, text=True, check=False,
-    )
-
-
-@contextmanager
-def _disposable_database(pg_instance, prefix: str):
-    dsn = pg_instance.dsn()
-    name = f"{prefix}_{uuid4().hex[:12]}"
-    admin = psycopg2.connect(**dsn)
-    admin.autocommit = True
-    with admin.cursor() as cursor:
-        cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    env = os.environ.copy()
-    env["DATABASE_URL"] = f"postgresql+asyncpg://{dsn['user']}@{dsn['host']}:{dsn['port']}/{name}"
-    env["SECRET_KEY"] = "durable-driver-disposable-migration-test"
-    try:
-        yield env, {**dsn, "database": name}
-    finally:
-        with admin.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
-        admin.close()
-
-
-@pytest.fixture
-def pre_0087_database(pg_instance):
-    """A disposable database upgraded to 0086, the last profile-based schema."""
-    with _disposable_database(pg_instance, "dd87pre") as (env, dsn):
-        assert _alembic(env, "upgrade", "0086").returncode == 0
-        yield env, dsn
-
-
 @pytest.fixture(scope="module")
-def head_database(pg_instance):
-    with _disposable_database(pg_instance, "dd87head") as (env, dsn):
-        result = _alembic(env, "upgrade", "head")
-        assert result.returncode == 0, result.stderr
-        yield env, dsn
+def head_database(schema_databases):
+    with _schema_database(schema_databases, "durable_driver") as database:
+        yield database
 
 
 @pytest.fixture
@@ -102,6 +62,7 @@ def _clear_op(cursor) -> None:
 # ---------------------------------------------------------------------------
 # Seed helpers (head schema)
 # ---------------------------------------------------------------------------
+
 
 def _company(cursor, *, branches: int = 2) -> tuple[int, list[int]]:
     code = "DD" + uuid4().hex[:8]
@@ -166,6 +127,7 @@ def _settle_exclusion(cursor) -> None:
 # Preflight and fresh upgrade
 # ---------------------------------------------------------------------------
 
+
 def _seed_0086_company(cursor, code: str) -> tuple[int, int]:
     cursor.execute("""
         INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended, currencycode)
@@ -177,88 +139,6 @@ def _seed_0086_company(cursor, code: str) -> tuple[int, int]:
         VALUES (%s, %s, %s, 'Active', TRUE, 'UTC') RETURNING branchid
     """, (company_id, code, code))
     return company_id, cursor.fetchone()[0]
-
-
-@pytest.mark.parametrize("dirty_table", ["driver", "transfer", "period"])
-def test_0087_refuses_existing_driver_transfer_or_payroll_rows_atomically(
-    pre_0087_database, dirty_table,
-):
-    env, dsn = pre_0087_database
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        company_id, branch_id = _seed_0086_company(cursor, "DD87" + dirty_table[:3].upper())
-        if dirty_table == "period":
-            cursor.execute("""
-                INSERT INTO payroll.payrollperiods
-                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
-                VALUES (%s, %s, 'Open', 'P87', 'dd87', 'Week', '2030-01-07', '2030-01-13')
-            """, (company_id, branch_id))
-        else:
-            cursor.execute("""
-                INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
-                VALUES (%s, %s, 'DD87 Driver', 'Active') RETURNING employeeid
-            """, (company_id, branch_id))
-            employee_id = cursor.fetchone()[0]
-            cursor.execute("""
-                INSERT INTO core.drivers (companyid, branchid, employeeid, drivercode, driverstatus)
-                VALUES (%s, %s, %s, 'D87', 'Active') RETURNING driverid
-            """, (company_id, branch_id, employee_id))
-            driver_id = cursor.fetchone()[0]
-            if dirty_table == "transfer":
-                cursor.execute("""
-                    INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault, timezoneid)
-                    VALUES (%s, 'DD87T', 'target', 'Active', FALSE, 'UTC') RETURNING branchid
-                """, (company_id,))
-                target_branch_id = cursor.fetchone()[0]
-                cursor.execute("""
-                    INSERT INTO sec.users (companyid, username, displayname)
-                    VALUES (%s, %s, 'dd87') RETURNING userid
-                """, (company_id, "dd87_" + uuid4().hex[:8]))
-                user_id = cursor.fetchone()[0]
-                cursor.execute("""
-                    INSERT INTO core.drivertransferrequests
-                        (companyid, driverid, sourcebranchid, targetbranchid,
-                         requestedbyuserid, initiatedby, status)
-                    VALUES (%s, %s, %s, %s, %s, 'SourceBranch', 'PendingSourceApproval')
-                """, (company_id, driver_id, branch_id, target_branch_id, user_id))
-
-    result = _alembic(env, "upgrade", "head")
-    assert result.returncode != 0
-    assert "DURABLE_DRIVER_REBUILD_REQUIRED" in (result.stderr + result.stdout)
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        cursor.execute("SELECT version_num FROM public.alembic_version")
-        assert cursor.fetchone() == ("0086",)
-        cursor.execute("SELECT to_regclass('core.driverassignments')")
-        assert cursor.fetchone()[0] is None
-        cursor.execute("SELECT to_regclass('core.driveraliases')")
-        assert cursor.fetchone()[0] == "core.driveraliases"
-        cursor.execute("""
-            SELECT count(*) FROM information_schema.columns
-            WHERE table_schema = 'core' AND table_name = 'drivers' AND column_name = 'drivercode'
-        """)
-        assert cursor.fetchone() == (1,)
-
-
-def test_0087_applies_over_clean_rosters_without_drivers(pre_0087_database):
-    env, dsn = pre_0087_database
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        company_id, branch_id = _seed_0086_company(cursor, "DD87CLEAN")
-        cursor.execute("""
-            INSERT INTO core.employees (companyid, branchid, fullname, employmentstatus)
-            VALUES (%s, %s, 'Office Staff', 'Active')
-        """, (company_id, branch_id))
-    assert _alembic(env, "upgrade", "0087").returncode == 0
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        cursor.execute("SELECT version_num FROM public.alembic_version")
-        assert cursor.fetchone() == ("0087",)
-        cursor.execute("SELECT count(*) FROM core.employees WHERE companyid = %s", (company_id,))
-        assert cursor.fetchone() == (1,)
-
-
-def test_0087_is_irreversible(head_database):
-    env, _ = head_database
-    result = _alembic(env, "downgrade", "0086")
-    assert result.returncode != 0
-    assert "irreversible" in (result.stderr + result.stdout)
 
 
 def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
@@ -388,6 +268,7 @@ def test_no_function_or_view_still_reads_the_profile_meaning_of_driverid(cur):
 # core.Drivers
 # ---------------------------------------------------------------------------
 
+
 def test_an_employee_has_at_most_one_driver(cur):
     person = _person(cur)
     with rejected(cur, errors.UniqueViolation):
@@ -446,6 +327,7 @@ def test_driver_company_and_employee_are_immutable_but_number_and_cdl_edit(cur):
 # ---------------------------------------------------------------------------
 # Assignment windows
 # ---------------------------------------------------------------------------
+
 
 def test_assignment_windows_of_one_driver_cannot_overlap_but_adjacent_half_open_windows_can(cur):
     p = _person(cur)
@@ -554,6 +436,7 @@ def test_assignment_identity_columns_are_immutable(cur):
 # ---------------------------------------------------------------------------
 # History protection
 # ---------------------------------------------------------------------------
+
 
 def test_an_ended_assignment_window_reason_and_lineage_are_immutable(cur):
     p = _person(cur)
@@ -830,6 +713,7 @@ def test_a_driver_with_assignments_cannot_be_deleted(cur):
 # Resolvers
 # ---------------------------------------------------------------------------
 
+
 def test_effective_driver_assignment_switches_exactly_at_the_boundary_instant(cur):
     p = _person(cur)
     first = _assignment(cur, p["company"], p["branches"][0], p["employee"], p["driver"],
@@ -909,6 +793,7 @@ def test_transfer_status_reads_scheduled_as_completed_from_its_effective_instant
 # ---------------------------------------------------------------------------
 # Transfer requests
 # ---------------------------------------------------------------------------
+
 
 def _request_world(cursor) -> dict:
     p = _person(cursor, branches=3)
@@ -1002,8 +887,11 @@ def test_transfer_request_status_set_and_completion_shape(cur):
 # ---------------------------------------------------------------------------
 
 EVIDENCE_TABLES = [
-    "payrollfinallines", "payrollcalculationdrivertotals", "payrollcalculationsnapshotbonusevents",
-    "payrollcalculationsnapshotstatusentries", "payrollcalculationsnapshotusedratedefinitions",
+    "payrollfinallines",
+    "payrollcalculationdrivertotals",
+    "payrollcalculationsnapshotbonusevents",
+    "payrollcalculationsnapshotstatusentries",
+    "payrollcalculationsnapshotusedratedefinitions",
     "payrollperiodauditevidenceevents",
 ]
 
@@ -1082,6 +970,7 @@ def test_eligibility_ownership_trigger_checks_the_assignment_branch(cur):
 # ---------------------------------------------------------------------------
 # Correction pass: termination authority, wall-clock decisions, Cancelled shape
 # ---------------------------------------------------------------------------
+
 
 def test_a_terminated_employees_assignment_is_never_reopened_even_under_transfer_cancel(cur):
     p = _person(cur)

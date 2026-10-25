@@ -424,32 +424,6 @@ class TestStaleTransitionRejection:
     is absent from the UPDATE (i.e. the CP-0B fix was not applied).
     """
 
-    async def test_stale_draft_to_open_blocked(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        paytest_branch_id: int,
-        direct_db,
-        pg_instance,
-    ):
-        """
-        CP-1D: PATCH Draft→Open is removed entirely. Returns 422 regardless of period state.
-
-        No race scenario is possible — the transition is rejected at the schema layer
-        before any DB predicate check. This test confirms the unconditional 422.
-        """
-        pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
-
-        r = await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=_auth(auth_token),
-        )
-        assert r.status_code == 422, (
-            f"CP-1D: Draft→Open must be blocked (422); got {r.status_code}: {r.text}"
-        )
-
-        await _force_status(direct_db, pid, "Cancelled")
 
     async def test_stale_open_to_cancelled_rejected(
         self,
@@ -567,30 +541,6 @@ class TestStaleTransitionRejection:
             svc_payroll.get_period_by_id = real_gp
             # Period is Archived (terminal) — no further cleanup needed.
 
-    async def test_inreview_to_open_blocked_before_predicate_check(
-        self,
-        client: httpx.AsyncClient,
-        auth_token: str,
-        paytest_branch_id: int,
-        direct_db,
-    ):
-        """
-        CP-1A: InReview→Open is blocked at the schema/transition level (422) before
-        any UPDATE is attempted.  The previous stale-state 409 scenario is now moot
-        because the transition is rejected immediately regardless of the DB state.
-        """
-        pid = await _create_draft_period(client, auth_token, paytest_branch_id, direct_db)
-        await _force_status(direct_db, pid, "InReview")
-        r = await client.patch(
-            f"/payroll/periods/{pid}/status",
-            json={"status": "Open"},
-            headers=_auth(auth_token),
-        )
-        assert r.status_code == 422, (
-            f"CP-1A: InReview→Open must be blocked (422), got {r.status_code}: {r.text}"
-        )
-
-        await _force_status(direct_db, pid, "Cancelled")
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 
 from app.compensation import resolver
@@ -71,9 +72,9 @@ async def _world(client, admin, db) -> World:
         admin=admin, driver_id=driver["driver_id"], employee_id=driver["employee_id"],
         source=driver["assignment_id"], old_branch=old_branch, new_branch=new_branch,
         other_branch=other_branch,
-        old_manager=await _manager(client, admin, role_id, old_branch),
-        new_manager=await _manager(client, admin, role_id, new_branch),
-        other_manager=await _manager(client, admin, role_id, other_branch),
+        old_manager=await _manager(client, admin, role_id, old_branch, db=db),
+        new_manager=await _manager(client, admin, role_id, new_branch, db=db),
+        other_manager=await _manager(client, admin, role_id, other_branch, db=db),
     )
 
 
@@ -280,6 +281,12 @@ async def _visibility_world(client, auth_token, db):
     return w, (in_old, in_new, pending_def), (old_schedule, new_schedule, pending_schedule), tomorrow
 
 
+@pytest_asyncio.fixture(scope="module")
+async def visibility_world(session_client, auth_token, session_db_conn):
+    """Share one immutable transferred-Driver scenario across visibility checks."""
+    return await _visibility_world(session_client, auth_token, session_db_conn)
+
+
 async def _summary_definitions(client, token, driver_id) -> set[int]:
     response = await client.get(
         f"/compensation/drivers/{driver_id}/rate-schedules/summary", headers=auth(token))
@@ -288,10 +295,9 @@ async def _summary_definitions(client, token, driver_id) -> set[int]:
 
 
 async def test_a_past_branch_sees_only_overlapping_rows_read_only_and_never_a_pending_one(
-    client, auth_token, direct_db,
+    client, auth_token, visibility_world,
 ):
-    w, (in_old, in_new, pending_def), (old_s, new_s, pending_s), tomorrow = \
-        await _visibility_world(client, auth_token, direct_db)
+    w, (in_old, in_new, pending_def), (old_s, new_s, pending_s), tomorrow = visibility_world
     token = w.old_manager
 
     assert (await client.get(f"{SCHEDULES}/{old_s}", headers=auth(token))).status_code == 200
@@ -324,12 +330,11 @@ async def test_a_past_branch_sees_only_overlapping_rows_read_only_and_never_a_pe
 
 
 async def test_authority_branches_and_company_wide_readers_see_the_full_history(
-    client, auth_token, direct_db,
+    client, visibility_world,
 ):
-    w, definitions, (old_s, new_s, pending_s), _ = \
-        await _visibility_world(client, auth_token, direct_db)
+    w, definitions, (old_s, new_s, pending_s), _ = visibility_world
     every_definition = {d["rate_definition_id"] for d in definitions}
-    for token in (w.new_manager, auth_token):
+    for token in (w.new_manager, w.admin):
         for schedule_id in (old_s, new_s, pending_s):
             response = await client.get(f"{SCHEDULES}/{schedule_id}", headers=auth(token))
             assert response.status_code == 200, (token, schedule_id, response.text)
@@ -340,9 +345,8 @@ async def test_authority_branches_and_company_wide_readers_see_the_full_history(
         assert [row["driver_rate_schedule_id"] for row in history] == [new_s]
 
 
-async def test_an_unrelated_branch_manager_sees_nothing(client, auth_token, direct_db):
-    w, definitions, (old_s, _, pending_s), _ = \
-        await _visibility_world(client, auth_token, direct_db)
+async def test_an_unrelated_branch_manager_sees_nothing(client, visibility_world):
+    w, definitions, (old_s, _, pending_s), _ = visibility_world
     token = w.other_manager
     for path in (
         f"{SCHEDULES}/{old_s}", f"{SCHEDULES}/{pending_s}",

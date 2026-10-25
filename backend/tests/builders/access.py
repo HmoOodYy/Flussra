@@ -1,8 +1,34 @@
 """Shared Access setup builders for authenticated HTTP integration tests."""
 
 import httpx
+from sqlalchemy import text
 
+from app.auth.security import create_access_token
 from tests.builders.workforce import create_driver_employee_record
+
+
+async def seed_branch_actor_token(db, username: str, role_id: int, branch_id: int) -> str:
+    """Seed a business-test actor on an autocommit connection, without password work.
+
+    Requests still resolve the real active user, CompanyRole, permissions and
+    Branch scope. Authentication/provisioning suites use the HTTP builders below.
+    """
+    role = (await db.execute(text(
+        "SELECT companyid, rolecode FROM sec.companyroles WHERE companyroleid = :id"
+    ), {"id": role_id})).mappings().one()
+    if role["rolecode"] == "DRIVER":
+        raise ValueError("Branch actors must not use the DRIVER/Self role")
+    company_id = role["companyid"]
+    user_id = (await db.execute(text("""
+        INSERT INTO sec.users (companyid, username, displayname, passwordhash, isactive, canlogin)
+        VALUES (:cid, :name, :name, 'unused-test-login', TRUE, TRUE) RETURNING userid
+    """), {"cid": company_id, "name": username})).scalar_one()
+    await db.execute(text("""
+        INSERT INTO sec.userbranchroles
+            (userid, companyid, branchid, companyroleid, scopetype, isactive)
+        VALUES (:uid, :cid, :bid, :rid, 'SpecificBranch', TRUE)
+    """), {"uid": user_id, "cid": company_id, "bid": branch_id, "rid": role_id})
+    return create_access_token(user_id, company_id)
 
 
 def _require_status(response: httpx.Response, expected: int, operation: str) -> None:

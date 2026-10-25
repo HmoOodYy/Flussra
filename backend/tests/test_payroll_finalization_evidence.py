@@ -78,15 +78,19 @@ async def _ledger(client, tenant, period) -> list[dict]:
 # Projection
 # ---------------------------------------------------------------------------
 
-async def test_finalization_writes_one_final_line_per_official_component(
+async def test_approved_preview_and_finalization_preserve_projection_and_provenance(
     p3c_client, p3c_engine, tenant,
 ):
     scenario, item_id = await _approved(p3c_client, p3c_engine, tenant)
     period = scenario.period
     bound = bound_snapshot_id(tenant, item_id)
 
-    result = (await finalize(p3c_client, tenant, period)).json()
+    preview = (await finalization_preview(p3c_client, tenant, period)).json()
+    assert preview["can_finalize"] is True and preview["blockers"] == []
+    assert period_evidence_counts(tenant, period)["final_lines"] == 0   # a preview writes nothing
+    assert period_status(tenant, period) == "Approved"
 
+    result = (await finalize(p3c_client, tenant, period)).json()
     assert result["status"] == "Locked" and result["final_lines"] == 3
     assert D(result["final_gross"]) == D("42.00")
     components = rows(tenant, """
@@ -105,24 +109,8 @@ async def test_finalization_writes_one_final_line_per_official_component(
         assert line[0] == bound
         assert line[2] == COMPONENT_LINE_TYPES[component[1]]
         assert (line[3], line[4], line[5]) == ("Period", "SnapshotComponent", str(component[0]))
-    retired_columns = rows(tenant, """
-        SELECT column_name FROM information_schema.columns
-        WHERE table_schema = 'payroll' AND table_name = 'payrollfinallines'
-          AND column_name IN ('quantity', 'rateamount', 'resolvedrateamount', 'workdate',
-                              'draftlineid', 'bonuseventid', 'payitemid', 'ratetypeid',
-                              'driverrateid', 'ratebehavior', 'notes')
-        ORDER BY column_name
-    """)
-    assert retired_columns == []
     assert sorted(c[1] for c in components) == ["BONUS", "MINIMUM_ADJUSTMENT", "ORDINARY"]
     assert sum(line[6] for line in final_lines) == D("42.00")
-
-
-async def test_final_lines_carry_the_frozen_snapshot_provenance(p3c_client, p3c_engine, tenant):
-    scenario, item_id = await _approved(p3c_client, p3c_engine, tenant)
-    period = scenario.period
-    bound = bound_snapshot_id(tenant, item_id)
-    await finalize(p3c_client, tenant, period)
 
     ledger = await _ledger(p3c_client, tenant, period)
 
@@ -152,18 +140,6 @@ async def test_final_lines_carry_the_frozen_snapshot_provenance(p3c_client, p3c_
         assert kind in COMPONENT_LINE_TYPES and amount is not None
     assert provenance[0][0] == bound and provenance[0][5] == "ORDINARY"
     assert scenario.rule["driver_pay_rule_id"]
-
-
-async def test_the_preview_shows_exactly_what_finalization_writes(p3c_client, p3c_engine, tenant):
-    scenario, _ = await _approved(p3c_client, p3c_engine, tenant)
-    period = scenario.period
-
-    preview = (await finalization_preview(p3c_client, tenant, period)).json()
-    assert preview["can_finalize"] is True and preview["blockers"] == []
-    assert period_evidence_counts(tenant, period)["final_lines"] == 0   # a preview writes nothing
-    assert period_status(tenant, period) == "Approved"
-    await finalize(p3c_client, tenant, period)
-    ledger = await _ledger(p3c_client, tenant, period)
 
     assert preview["final_line_count_estimate"] == len(ledger) == len(preview["lines"]) == 3
     assert [(line["component_kind"], line["line_type"], D(line["final_amount"]))

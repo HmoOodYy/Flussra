@@ -9,8 +9,7 @@ Product contract verified here:
   - Full loser rollback for both deterministic scenarios:
       a) Open submit blocked by B2 while Returned exists (RETURNED_BACKLOG_BLOCKS_SUBMIT).
       b) Open submit blocked by InReview slot after Returned resubmits.
-  - Migration preflight refuses duplicate InReview periods.
-  - Downgrade drops only the 0049 index; 0048 Returned index survives.
+  - The current-schema partial index is unique and scoped to InReview periods.
 
 Dates: 2094-* — isolated year.  Run from backend/:
     python -m pytest tests/test_cp1b_inreview_slot.py -v
@@ -18,7 +17,6 @@ Dates: 2094-* — isolated year.  Run from backend/:
 import datetime
 import itertools
 
-import psycopg2
 import pytest
 from sqlalchemy import text as _text
 
@@ -108,180 +106,19 @@ async def _reject_to_returned(client, token, ri_id) -> None:
     assert dec.status_code == 200, f"reject: {dec.text}"
 
 
-# ---------------------------------------------------------------------------
-# 1. Migration / index metadata
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_inreview_slot_index_has_the_current_unique_branch_contract(direct_db):
+    row = (await direct_db.execute(_text("""
+        SELECT indexdef FROM pg_indexes
+        WHERE schemaname = 'payroll'
+          AND indexname = 'ux_payrollperiods_oneinreviewperbranch'
+    """))).first()
+    assert row is not None
+    definition = row[0].lower()
+    assert "unique" in definition
+    assert "companyid" in definition and "branchid" in definition
+    assert "inreview" in definition
 
-class TestMigration:
-
-    def test_0049_down_revision(self):
-        import importlib.util
-        from pathlib import Path
-        spec = importlib.util.spec_from_file_location(
-            "migration_0049",
-            Path(__file__).parent.parent.parent / "migrations" / "versions"
-            / "0049_one_inreview_slot.py",
-        )
-        m = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(m)
-        assert m.revision == "0049"
-        assert m.down_revision == "0048"
-
-    def test_0049_in_alembic_heads(self):
-        """Migration chain must be linear (single current head)."""
-        import subprocess
-        import sys
-        result = subprocess.run(
-            [sys.executable, "-m", "alembic", "heads"],
-            capture_output=True, text=True,
-            cwd=str(__import__("pathlib").Path(__file__).parent.parent.parent),
-        )
-        lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
-        assert len(lines) == 1, (
-            f"Expected exactly one alembic head (linear chain), got {len(lines)}: "
-            f"{result.stdout}\n{result.stderr}"
-        )
-        assert "0093" in lines[0], (
-            f"Expected head 0093, got: {lines[0]}\n{result.stderr}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_index_exists(self, direct_db):
-        row = (await direct_db.execute(_text(
-            "SELECT 1 FROM pg_indexes "
-            "WHERE indexname = 'ux_payrollperiods_oneinreviewperbranch'"
-        ))).first()
-        assert row is not None, "Index ux_payrollperiods_oneinreviewperbranch must exist"
-
-    @pytest.mark.asyncio
-    async def test_index_columns(self, direct_db):
-        row = (await direct_db.execute(_text("""
-            SELECT indexdef FROM pg_indexes
-            WHERE indexname = 'ux_payrollperiods_oneinreviewperbranch'
-        """))).first()
-        assert row is not None
-        defn = row[0].lower()
-        assert "companyid" in defn
-        assert "branchid" in defn
-
-    @pytest.mark.asyncio
-    async def test_index_where_clause(self, direct_db):
-        row = (await direct_db.execute(_text("""
-            SELECT indexdef FROM pg_indexes
-            WHERE indexname = 'ux_payrollperiods_oneinreviewperbranch'
-        """))).first()
-        assert row is not None
-        defn = row[0].lower()
-        assert "inreview" in defn, f"WHERE clause must filter on InReview; got: {defn}"
-
-    @pytest.mark.asyncio
-    async def test_existing_indexes_unchanged(self, direct_db):
-        """0048 OneReturnedPerBranch index must survive CP-1B migration."""
-        row = (await direct_db.execute(_text(
-            "SELECT 1 FROM pg_indexes "
-            "WHERE indexname ILIKE '%onereturnedperbranch%'"
-        ))).first()
-        assert row is not None, "0048 OneReturnedPerBranch index must still exist after 0049"
-
-    def test_disposable_duplicate_inreview_blocks_upgrade(
-        self,
-        safe_test_postgresql_stop,
-    ):
-        """
-        Disposable PostgreSQL: applying 0049 SQL fails when duplicate InReview
-        periods exist (blocking preflight RAISE EXCEPTION).
-        """
-        from pathlib import Path
-
-        from tests.postgresql_compat import create_test_postgresql
-
-        pg = create_test_postgresql()
-        try:
-            conn = psycopg2.connect(pg.url())
-            conn.autocommit = True
-            cur = conn.cursor()
-
-            migrations_sql_dir = Path(__file__).parent.parent.parent / "migrations" / "sql"
-
-            # Apply 0001–0048 only
-            for sql_file in sorted(migrations_sql_dir.glob("*.sql")):
-                if sql_file.stem.split("_")[0] < "0049":
-                    cur.execute(sql_file.read_text(encoding="utf-8"))
-
-            # Minimal seed
-            cur.execute("""
-                INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended, timezonename)
-                VALUES ('DT49', 'Disposable49 Co', 'Disposable49 Ltd', 'Active', FALSE, 'UTC')
-            """)
-            cur.execute("""
-                INSERT INTO core.branches (companyid, branchcode, branchname, status, isdefault)
-                SELECT companyid, 'D49B', 'D49 Branch', 'Active', TRUE
-                FROM core.companies WHERE companycode = 'DT49'
-            """)
-            cur.execute("""
-                INSERT INTO sec.users (companyid, username, displayname, passwordhash, isactive, canlogin)
-                SELECT companyid, 'd49user', 'D49 User', 'placeholder-not-for-auth', TRUE, FALSE
-                FROM core.companies WHERE companycode = 'DT49'
-            """)
-
-            # Insert 2 InReview periods for the same company/branch
-            cur.execute("""
-                INSERT INTO payroll.payrollperiods
-                    (companyid, branchid, periodcode, periodname, periodtype,
-                     startdate, enddate, status, createdbyuserid)
-                SELECT c.companyid, b.branchid, 'D49-W01', 'D49 Week 01', 'Week',
-                       '2094-03-01'::date, '2094-03-07'::date, 'InReview', u.userid
-                FROM core.companies c
-                JOIN core.branches b ON b.companyid = c.companyid AND b.branchcode = 'D49B'
-                JOIN sec.users u ON u.companyid = c.companyid AND u.username = 'd49user'
-                WHERE c.companycode = 'DT49'
-            """)
-            cur.execute("""
-                INSERT INTO payroll.payrollperiods
-                    (companyid, branchid, periodcode, periodname, periodtype,
-                     startdate, enddate, status, createdbyuserid)
-                SELECT c.companyid, b.branchid, 'D49-W02', 'D49 Week 02', 'Week',
-                       '2094-03-08'::date, '2094-03-14'::date, 'InReview', u.userid
-                FROM core.companies c
-                JOIN core.branches b ON b.companyid = c.companyid AND b.branchcode = 'D49B'
-                JOIN sec.users u ON u.companyid = c.companyid AND u.username = 'd49user'
-                WHERE c.companycode = 'DT49'
-            """)
-
-            # Now apply 0049 — MUST fail (blocking preflight)
-            sql_0049 = (migrations_sql_dir / "0049_one_inreview_slot.sql").read_text(encoding="utf-8")
-            with pytest.raises(psycopg2.Error, match="(?i)preflight failed|duplicate inreview"):
-                cur.execute(sql_0049)
-            conn.rollback()
-
-            # Cancel one → preflight must pass → index created
-            cur.execute("""
-                UPDATE payroll.payrollperiods
-                SET status = 'Cancelled'
-                WHERE startdate = '2094-03-08'
-                  AND companyid = (SELECT companyid FROM core.companies WHERE companycode = 'DT49')
-            """)
-            cur.execute(sql_0049)  # must succeed
-
-            # Downgrade: drop only the 0049 index
-            cur.execute("DROP INDEX IF EXISTS payroll.ux_payrollperiods_oneinreviewperbranch")
-
-            cur.execute("""
-                SELECT 1 FROM pg_indexes
-                WHERE indexname = 'ux_payrollperiods_oneinreviewperbranch'
-            """)
-            assert cur.fetchone() is None, "0049 index must be gone after downgrade"
-
-            cur.execute("""
-                SELECT 1 FROM pg_indexes
-                WHERE indexname ILIKE '%onereturnedperbranch%'
-            """)
-            assert cur.fetchone() is not None, "0048 OneReturnedPerBranch index must still exist"
-
-            cur.close()
-            conn.close()
-        finally:
-            safe_test_postgresql_stop(pg)
 
 
 # ---------------------------------------------------------------------------

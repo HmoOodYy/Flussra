@@ -22,8 +22,6 @@ from tests.compensation_database_fixtures import (  # noqa: F401 - register fixt
     p3b_database,
 )
 
-pytestmark = pytest.mark.asyncio
-
 
 def _today() -> str:
     return date.today().isoformat()

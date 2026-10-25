@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -21,13 +20,11 @@ from app.main import create_app
 from app.payroll_setup import readiness
 from app.payroll_setup.errors import PolicyError
 
-_ROOT = Path(__file__).resolve().parents[2]
-_MIGRATIONS = _ROOT / "migrations" / "sql"
 real_app = create_app()
 
 
 @pytest_asyncio.fixture
-async def phase6_ready_db(pg_instance):
+async def phase6_ready_db(pg_instance, schema_databases):
     """Create a fresh migrated database and HTTP app for every Phase6 U0 test."""
     database = "p6_ready_" + uuid4().hex[:12]
     admin_dsn = dict(pg_instance.dsn())
@@ -35,7 +32,12 @@ async def phase6_ready_db(pg_instance):
     admin.autocommit = True
     try:
         with admin.cursor() as cursor:
-            cursor.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(database)))
+            cursor.execute(
+                pg_sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                    pg_sql.Identifier(database),
+                    pg_sql.Identifier(schema_databases.template("sql")),
+                )
+            )
     finally:
         admin.close()
 
@@ -45,8 +47,6 @@ async def phase6_ready_db(pg_instance):
     isolated.autocommit = True
     try:
         with isolated.cursor() as cursor:
-            for migration in sorted(_MIGRATIONS.glob("*.sql")):
-                cursor.execute(migration.read_text(encoding="utf-8"))
             cursor.execute("""
                 INSERT INTO core.Companies (CompanyCode, CompanyName, Status, IsSuspended)
                 VALUES (%s, 'Phase 6 Readiness Date', 'Active', FALSE) RETURNING CompanyID

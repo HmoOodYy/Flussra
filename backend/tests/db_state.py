@@ -458,13 +458,11 @@ def assert_trigger_fingerprints_equal(
 # Static enforcement
 # ---------------------------------------------------------------------------
 
-# Raw SQL is permitted only in these files, named by exact path relative to the tests
-# root (posix separators): this module, and one migration test that operates on its
-# own disposable database (dropped afterwards, never shared). A same-named file in a
-# subdirectory does NOT inherit the exemption.
+# Raw SQL is permitted only in this infrastructure module, named by exact path
+# relative to the tests root (posix separators). A same-named subdirectory file does
+# NOT inherit the exemption.
 APPROVED_RAW_SQL_FILES = frozenset({
     "db_state.py",
-    "test_g0_1_bonus_precision_migration.py",
 })
 
 _TRIGGER_TOGGLE = re.compile(

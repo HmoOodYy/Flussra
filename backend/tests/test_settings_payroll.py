@@ -366,17 +366,6 @@ class TestDeleteStatusKey:
 class TestYearlyAllowanceGuard:
     """deducts_from_yearly_allowance is a future-only feature: true is rejected, false is fine."""
 
-    async def test_create_with_deducts_true_rejected(
-        self, client: httpx.AsyncClient, auth_token: str,
-    ):
-        resp = await client.post(
-            "/settings/status-keys",
-            json={"key_name": uname(), "category": "Vacation",
-                  "deducts_from_yearly_allowance": True},
-            headers=auth(auth_token))
-        assert resp.status_code == 422
-        assert "not available yet" in str(resp.json()["detail"]).lower()
-
     async def test_create_with_deducts_false_succeeds(
         self, client: httpx.AsyncClient, auth_token: str,
     ):

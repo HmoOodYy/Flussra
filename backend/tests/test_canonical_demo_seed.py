@@ -29,7 +29,7 @@ from scripts.canonical_demo import (
     seed_canonical_demo,
     verify_canonical_demo,
 )
-from tests.test_company_status_catalog_migration import _alembic, _disposable_database, _version
+from tests.schema_helpers import _alembic, _disposable_database, _version
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

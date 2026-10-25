@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -23,13 +22,11 @@ from app.payroll_setup.payroll_policy import (
     set_default_setup,
 )
 
-_ROOT = Path(__file__).resolve().parents[2]
-_MIGRATIONS = _ROOT / "migrations" / "sql"
 _ANCHOR = date(2090, 1, 1)
 
 
 @pytest_asyncio.fixture
-async def phase4_policy_db(pg_instance):
+async def phase4_policy_db(pg_instance, schema_databases):
     """Create a disposable migrated PostgreSQL database for these regressions."""
     database = "p4_default_" + uuid4().hex[:12]
     admin_dsn = dict(pg_instance.dsn())
@@ -37,7 +34,12 @@ async def phase4_policy_db(pg_instance):
     admin.autocommit = True
     try:
         with admin.cursor() as cursor:
-            cursor.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(database)))
+            cursor.execute(
+                pg_sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                    pg_sql.Identifier(database),
+                    pg_sql.Identifier(schema_databases.template("sql")),
+                )
+            )
     finally:
         admin.close()
 
@@ -47,8 +49,6 @@ async def phase4_policy_db(pg_instance):
     isolated.autocommit = True
     try:
         with isolated.cursor() as cursor:
-            for migration in sorted(_MIGRATIONS.glob("*.sql")):
-                cursor.execute(migration.read_text(encoding="utf-8"))
             cursor.execute("""
                 INSERT INTO core.Companies (CompanyCode, CompanyName, Status, IsSuspended)
                 VALUES (%s, %s, 'Active', FALSE) RETURNING CompanyID

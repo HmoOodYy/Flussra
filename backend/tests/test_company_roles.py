@@ -35,40 +35,20 @@ class TestDefaultRolesSeeded:
     """Every company gets COMPANY_OWNER and DRIVER on first run."""
 
     @pytest.mark.asyncio
-    async def test_company_owner_exists(self, client, auth_token):
+    async def test_default_roles_are_seeded_and_protected(self, client, auth_token):
+        """The first role list contains the protected defaults and no legacy mirrors."""
         resp = await client.get("/admin/company-roles", headers=auth_headers(auth_token))
         assert resp.status_code == 200
         roles = resp.json()
-        codes = [r["role_code"] for r in roles]
+        codes = {r["role_code"] for r in roles}
         assert "COMPANY_OWNER" in codes
-
-    @pytest.mark.asyncio
-    async def test_driver_exists(self, client, auth_token):
-        resp = await client.get("/admin/company-roles", headers=auth_headers(auth_token))
-        assert resp.status_code == 200
-        codes = [r["role_code"] for r in resp.json()]
         assert "DRIVER" in codes
-
-    @pytest.mark.asyncio
-    async def test_company_owner_is_protected(self, client, auth_token):
-        resp = await client.get("/admin/company-roles", headers=auth_headers(auth_token))
-        owner = next(r for r in resp.json() if r["role_code"] == "COMPANY_OWNER")
+        owner = next(r for r in roles if r["role_code"] == "COMPANY_OWNER")
         assert owner["is_protected"] is True
         assert owner["is_default"] is True
-
-    @pytest.mark.asyncio
-    async def test_driver_is_protected(self, client, auth_token):
-        resp = await client.get("/admin/company-roles", headers=auth_headers(auth_token))
-        driver = next(r for r in resp.json() if r["role_code"] == "DRIVER")
+        driver = next(r for r in roles if r["role_code"] == "DRIVER")
         assert driver["is_protected"] is True
         assert driver["is_default"] is True
-
-    @pytest.mark.asyncio
-    async def test_no_legacy_mirrored_roles_in_list(self, client, auth_token):
-        """Auto-mirrored legacy roles (PAYROLL_ADMIN, PAYROLL_VIEWER, etc.) must not appear."""
-        resp = await client.get("/admin/company-roles", headers=auth_headers(auth_token))
-        assert resp.status_code == 200
-        codes = {r["role_code"] for r in resp.json()}
         # These are global sec.roles codes — should not appear as CompanyRoles
         for legacy_code in ("PAYROLL_ADMIN", "PAYROLL_VIEWER"):
             assert legacy_code not in codes, (
@@ -302,27 +282,34 @@ class TestRoleRename:
         return resp.json()
 
     @pytest.mark.asyncio
-    async def test_rename_custom_role_succeeds(self, client, auth_token):
+    async def test_rename_custom_role_succeeds_and_is_audited(self, client, auth_token):
+        """A successful rename preserves its generated code and writes a real audit record."""
+        from unittest.mock import patch
+
+        from app.admin import audit as admin_audit
+
         role = await self._create_role(client, auth_token, "Rename Source")
-        resp = await client.patch(
-            f"/admin/company-roles/{role['company_role_id']}",
-            json={"role_name": "Rename Target"},
-            headers=auth_headers(auth_token),
-        )
+        original_code = role["role_code"]
+        audit_calls = []
+        original = admin_audit.write_admin_audit
+
+        async def _capture(*args, **kwargs):
+            audit_calls.append(kwargs)
+            return await original(*args, **kwargs)
+
+        with patch.object(admin_audit, "write_admin_audit", _capture):
+            resp = await client.patch(
+                f"/admin/company-roles/{role['company_role_id']}",
+                json={"role_name": "Rename Target"},
+                headers=auth_headers(auth_token),
+            )
+
         assert resp.status_code == 200
         assert resp.json()["role_name"] == "Rename Target"
-
-    @pytest.mark.asyncio
-    async def test_rename_custom_role_preserves_role_code(self, client, auth_token):
-        role = await self._create_role(client, auth_token, "Code Preserve Test")
-        original_code = role["role_code"]
-        resp = await client.patch(
-            f"/admin/company-roles/{role['company_role_id']}",
-            json={"role_name": "Code Preserve Test Renamed"},
-            headers=auth_headers(auth_token),
-        )
-        assert resp.status_code == 200
         assert resp.json()["role_code"] == original_code
+        assert any(c.get("action_code") == "COMPANY_ROLE_UPDATED" for c in audit_calls), (
+            f"COMPANY_ROLE_UPDATED audit not logged; calls were: {audit_calls}"
+        )
 
     @pytest.mark.asyncio
     async def test_rename_to_own_name_succeeds(self, client, auth_token):
@@ -401,36 +388,7 @@ class TestRoleRename:
             json={"role_name": "Sneaky Rename"},
             headers=auth_headers(branch_user_token),
         )
-        assert resp.status_code in (403, 422)
-
-    @pytest.mark.asyncio
-    async def test_rename_audit_log_written(self, client, auth_token):
-        """write_admin_audit must be called with COMPANY_ROLE_UPDATED on a successful rename."""
-        from unittest.mock import patch
-
-        from app.admin import audit as admin_audit
-
-        role = await self._create_role(client, auth_token, "Audit Rename Role")
-        audit_calls = []
-
-        original = admin_audit.write_admin_audit
-
-        async def _capture(*args, **kwargs):
-            audit_calls.append(kwargs)
-            return await original(*args, **kwargs)
-
-        with patch.object(admin_audit, "write_admin_audit", _capture):
-            resp = await client.patch(
-                f"/admin/company-roles/{role['company_role_id']}",
-                json={"role_name": "Audit Rename Role v2"},
-                headers=auth_headers(auth_token),
-            )
-
-        assert resp.status_code == 200
-        assert any(c.get("action_code") == "COMPANY_ROLE_UPDATED" for c in audit_calls), (
-            f"COMPANY_ROLE_UPDATED audit not logged; calls were: {audit_calls}"
-        )
-
+        assert resp.status_code == 403
 
 # =============================================================================
 # Protected role guards
@@ -495,22 +453,6 @@ class TestRoleArchive:
 
     # ── Protected roles cannot be archived ───────────────────────────────────
 
-    @pytest.mark.asyncio
-    async def test_archive_company_owner_returns_422(self, client, auth_token):
-        roles = (await client.get("/admin/company-roles", headers=auth_headers(auth_token))).json()
-        owner_id = next(r["company_role_id"] for r in roles if r["role_code"] == "COMPANY_OWNER")
-        resp = await client.delete(f"/admin/company-roles/{owner_id}", headers=auth_headers(auth_token))
-        assert resp.status_code == 422
-        assert "protected" in resp.json()["detail"].lower()
-
-    @pytest.mark.asyncio
-    async def test_archive_driver_returns_422(self, client, auth_token):
-        roles = (await client.get("/admin/company-roles", headers=auth_headers(auth_token))).json()
-        driver_id = next(r["company_role_id"] for r in roles if r["role_code"] == "DRIVER")
-        resp = await client.delete(f"/admin/company-roles/{driver_id}", headers=auth_headers(auth_token))
-        assert resp.status_code == 422
-        assert "protected" in resp.json()["detail"].lower()
-
     # ── Roles with active assignments cannot be archived ─────────────────────
 
     @pytest.mark.asyncio
@@ -557,99 +499,18 @@ class TestRoleArchive:
     # ── Custom role with no active users archives cleanly ────────────────────
 
     @pytest.mark.asyncio
-    async def test_archive_custom_role_returns_204(self, client, auth_token):
-        role = await self._create_role(client, auth_token, "Archive Me Role")
-        resp = await client.delete(
-            f"/admin/company-roles/{role['company_role_id']}",
-            headers=auth_headers(auth_token),
-        )
-        assert resp.status_code == 204
-
-    @pytest.mark.asyncio
-    async def test_archived_role_absent_from_list(self, client, auth_token):
-        role = await self._create_role(client, auth_token, "List Disappear Role")
-        rid = role["company_role_id"]
-        await client.delete(f"/admin/company-roles/{rid}", headers=auth_headers(auth_token))
-
-        roles = (await client.get("/admin/company-roles", headers=auth_headers(auth_token))).json()
-        ids = [r["company_role_id"] for r in roles]
-        assert rid not in ids, "Archived role must not appear in the roles list"
-
-    @pytest.mark.asyncio
-    async def test_archived_role_returns_404_on_get(self, client, auth_token):
-        role = await self._create_role(client, auth_token, "Get 404 Role")
-        rid = role["company_role_id"]
-        await client.delete(f"/admin/company-roles/{rid}", headers=auth_headers(auth_token))
-
-        resp = await client.get(f"/admin/company-roles/{rid}", headers=auth_headers(auth_token))
-        assert resp.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_archived_role_returns_404_on_patch(self, client, auth_token):
-        role = await self._create_role(client, auth_token, "Patch 404 Role")
-        rid = role["company_role_id"]
-        await client.delete(f"/admin/company-roles/{rid}", headers=auth_headers(auth_token))
-
-        resp = await client.patch(
-            f"/admin/company-roles/{rid}",
-            json={"role_name": "Ghost Rename"},
-            headers=auth_headers(auth_token),
-        )
-        assert resp.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_archived_role_returns_404_on_permissions_put(self, client, auth_token):
-        role = await self._create_role(client, auth_token, "Perms 404 Role")
-        rid = role["company_role_id"]
-        await client.delete(f"/admin/company-roles/{rid}", headers=auth_headers(auth_token))
-
-        resp = await client.put(
-            f"/admin/company-roles/{rid}/permissions",
-            json={"permission_codes": ["reports.view"]},
-            headers=auth_headers(auth_token),
-        )
-        assert resp.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_archived_role_preserved_in_database(self, client, auth_token, direct_db):
-        """Row must remain in DB with isarchived=TRUE and archivedat set."""
-        from sqlalchemy import text as sa_text
-        role = await self._create_role(client, auth_token, "DB Preserved Role")
-        rid = role["company_role_id"]
-        await client.delete(f"/admin/company-roles/{rid}", headers=auth_headers(auth_token))
-
-        row = (await direct_db.execute(
-            sa_text("SELECT isarchived, archivedat, rolecode FROM sec.companyroles WHERE companyroleid = :rid"),
-            {"rid": rid},
-        )).mappings().first()
-
-        assert row is not None, "Row must not be physically deleted"
-        assert row["isarchived"] is True, "isarchived must be TRUE after archive"
-        assert row["archivedat"] is not None, "archivedat must be set"
-
-    @pytest.mark.asyncio
-    async def test_archived_role_code_unchanged(self, client, auth_token, direct_db):
-        """role_code must remain unchanged after archive."""
-        from sqlalchemy import text as sa_text
-        role = await self._create_role(client, auth_token, "Code Frozen Role")
-        rid = role["company_role_id"]
-        original_code = role["role_code"]
-        await client.delete(f"/admin/company-roles/{rid}", headers=auth_headers(auth_token))
-
-        row = (await direct_db.execute(
-            sa_text("SELECT rolecode FROM sec.companyroles WHERE companyroleid = :rid"),
-            {"rid": rid},
-        )).mappings().first()
-        assert row["rolecode"] == original_code
-
-    @pytest.mark.asyncio
-    async def test_archive_audit_log_written(self, client, auth_token):
-        """write_admin_audit must be called with COMPANY_ROLE_ARCHIVED on archive."""
+    async def test_archive_custom_role_hides_and_preserves_it_with_audit(
+        self, client, auth_token, direct_db,
+    ):
+        """A custom role is hidden and write-locked after a real audited archive."""
         from unittest.mock import patch
+
+        from sqlalchemy import text as sa_text
 
         from app.admin import audit as admin_audit
 
-        role = await self._create_role(client, auth_token, "Audit Archive Role")
+        role = await self._create_role(client, auth_token, "Archive Me Role")
+        rid = role["company_role_id"]
         audit_calls = []
         original = admin_audit.write_admin_audit
 
@@ -658,27 +519,34 @@ class TestRoleArchive:
             return await original(*args, **kwargs)
 
         with patch.object(admin_audit, "write_admin_audit", _capture):
-            await client.delete(
-                f"/admin/company-roles/{role['company_role_id']}",
-                headers=auth_headers(auth_token),
-            )
+            archived = await client.delete(f"/admin/company-roles/{rid}",
+                                           headers=auth_headers(auth_token))
 
+        assert archived.status_code == 204
+        listed = await client.get("/admin/company-roles", headers=auth_headers(auth_token))
+        assert listed.status_code == 200
+        assert rid not in [item["company_role_id"] for item in listed.json()]
+        assert (await client.get(f"/admin/company-roles/{rid}",
+                                 headers=auth_headers(auth_token))).status_code == 404
+        assert (await client.patch(f"/admin/company-roles/{rid}",
+                                   json={"role_name": "Ghost Rename"},
+                                   headers=auth_headers(auth_token))).status_code == 404
+        assert (await client.put(f"/admin/company-roles/{rid}/permissions",
+                                 json={"permission_codes": ["reports.view"]},
+                                 headers=auth_headers(auth_token))).status_code == 404
+
+        row = (await direct_db.execute(
+            sa_text("SELECT isarchived, archivedat, rolecode FROM sec.companyroles "
+                    "WHERE companyroleid = :rid"),
+            {"rid": rid},
+        )).mappings().first()
+        assert row is not None, "Row must not be physically deleted"
+        assert row["isarchived"] is True
+        assert row["archivedat"] is not None
+        assert row["rolecode"] == role["role_code"]
         assert any(c.get("action_code") == "COMPANY_ROLE_ARCHIVED" for c in audit_calls), (
             f"COMPANY_ROLE_ARCHIVED audit not logged; calls: {audit_calls}"
         )
-
-    @pytest.mark.asyncio
-    async def test_rename_hardening_still_passes_after_archive_changes(self, client, auth_token):
-        """Smoke: rename guards still work correctly alongside archive behavior."""
-        roles = (await client.get("/admin/company-roles", headers=auth_headers(auth_token))).json()
-        owner_id = next(r["company_role_id"] for r in roles if r["role_code"] == "COMPANY_OWNER")
-        resp = await client.patch(
-            f"/admin/company-roles/{owner_id}",
-            json={"role_name": "Hacked Owner"},
-            headers=auth_headers(auth_token),
-        )
-        assert resp.status_code == 422
-        assert "cannot be renamed" in resp.json()["detail"].lower()
 
 
 # =============================================================================

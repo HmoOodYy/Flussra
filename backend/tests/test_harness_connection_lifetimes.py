@@ -9,6 +9,7 @@ done; this guard keeps it that way.
 """
 from __future__ import annotations
 
+import psycopg2
 import pytest
 
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
@@ -48,3 +49,24 @@ async def test_the_module_database_is_open_for_use_and_holds_no_administrative_c
             assert cur.fetchone()[0] == 0
     finally:
         conn.close()
+
+
+async def test_schema_clones_do_not_share_rows_and_are_dropped_on_exit(schema_databases, pg_instance):
+    """A pristine template is closed to clients; two committed clones cannot contaminate each other."""
+    names = []
+    with schema_databases.database("isolation_a") as first, schema_databases.database("isolation_b") as second:
+        names = [first["database"], second["database"]]
+        for dsn in (first, second):
+            with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
+                cursor.execute("SELECT count(*) FROM core.companies")
+                assert cursor.fetchone() == (0,)
+        with psycopg2.connect(**first) as conn, conn.cursor() as cursor:
+            cursor.execute("INSERT INTO core.companies (companycode, companyname) VALUES ('OWNED', 'Owned')")
+        with psycopg2.connect(**second) as conn, conn.cursor() as cursor:
+            cursor.execute("SELECT count(*) FROM core.companies")
+            assert cursor.fetchone() == (0,)
+    with psycopg2.connect(**pg_instance.dsn()) as conn, conn.cursor() as cursor:
+        cursor.execute("SELECT datname FROM pg_database WHERE datname = ANY(%s)", (names,))
+        assert cursor.fetchall() == []
+        cursor.execute("SELECT datallowconn FROM pg_database WHERE datname = %s", (schema_databases.template(),))
+        assert cursor.fetchone() == (False,)

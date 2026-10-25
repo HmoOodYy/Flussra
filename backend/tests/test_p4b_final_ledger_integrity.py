@@ -186,8 +186,8 @@ async def test_final_lines_and_finalized_routes_enforce_the_access_boundary(
     ledger = make_user(tenant, ["ledger.view", "ledger.audit.view"])
     for url in finalized:
         response = await p3c_client.get(url, headers=ledger)
-        assert response.status_code in (200, 409, 422), (url, response.status_code)
-        assert "payitem" not in response.text.lower() or response.status_code != 200
+        assert response.status_code == 200, (url, response.status_code, response.text)
+        assert "payitem" not in response.text.lower()
 
 
 async def test_finalized_audit_route_uses_the_audit_owner_and_its_own_permission(

@@ -40,6 +40,7 @@ from sqlalchemy import text
 from tests.builders.access import (
     create_company_role_with_permissions,
     create_user_with_role_token,
+    seed_branch_actor_token,
 )
 from tests.builders.pay_rules import ensure_branch_pay_calendar
 from tests.builders.transfer_scenarios import (
@@ -246,7 +247,9 @@ class World:
     columns: list[dict]
 
 
-async def _manager(client, admin, role_id, branch_id) -> str:
+async def _manager(client, admin, role_id, branch_id, *, db=None) -> str:
+    if db is not None:
+        return await seed_branch_actor_token(db, f"eg_{sfx()}", role_id, branch_id)
     return await create_user_with_role_token(
         client, admin, f"eg_{sfx()}", role_id, scope_type="SpecificBranch", branch_id=branch_id)
 
@@ -261,8 +264,8 @@ async def _build_world(client, admin, db) -> World:
     role_id = await create_company_role_with_permissions(
         client, admin, f"EG manager {sfx()}",
         ["drivers.view", "payrates.view", "payrates.edit", "payitems.view"])
-    old_manager = await _manager(client, admin, role_id, old_branch)
-    new_manager = await _manager(client, admin, role_id, new_branch)
+    old_manager = await _manager(client, admin, role_id, old_branch, db=db)
+    new_manager = await _manager(client, admin, role_id, new_branch, db=db)
 
     driver = await make_driver(client, admin, old_branch)
     seed = await _seed(

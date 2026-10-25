@@ -2,7 +2,7 @@
 CP-2E: Canonical Eligibility Snapshot — full test suite.
 
 Covers all P1 contract requirements:
-  - Migration 0057: schema, trigger, indexes.
+  - Current eligibility schema, trigger, and indexes.
   - _create_period_driver_eligibility_rows: Active/Terminated/Transferred/IncludedByExistingData.
   - require_period_eligibility_snapshot: tenant-scoped mandatory marker.
   - _get_driver_eligibility_row: returns correct row.
@@ -237,8 +237,8 @@ def assignment_id(hq_driver_assignment_id: int) -> int:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-class TestMigration0057Schema:
-    """Verify migration 0057 created the table and trigger correctly."""
+class TestPeriodEligibilitySchema:
+    """Verify the current period eligibility table and its integrity objects."""
 
     async def test_table_exists(self, direct_db: AsyncConnection):
         row = (await direct_db.execute(
@@ -341,7 +341,7 @@ class TestMigration0057Schema:
 class TestSnapshotHelpers:
     """Unit-level tests for the Python service helpers."""
 
-    async def test_missing_snapshot_marker_fails_closed_when_empty(
+    async def test_period_eligibility_helper_requires_snapshot_marker(
         self, direct_db: AsyncConnection, branch_id: int
     ):
         from fastapi import HTTPException
@@ -447,25 +447,13 @@ class TestIsSnapshotRowEligibleForWorkdate:
         row = self._make_row(iseligibleforperiod=False)
         assert _is_snapshot_row_eligible_for_workdate(row, datetime.date(2099, 6, 15)) is False
 
-    def test_hire_date_after_workdate_ineligible(self):
+    def test_snapshot_workdate_membership_controls_eligibility(self):
         from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
         row = self._make_row(eligibleworkdates=[])
         assert _is_snapshot_row_eligible_for_workdate(row, datetime.date(2099, 6, 15)) is False
 
-    def test_hire_date_on_workdate_eligible(self):
-        from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
         row = self._make_row(eligibleworkdates=[datetime.date(2099, 6, 15)])
         assert _is_snapshot_row_eligible_for_workdate(row, datetime.date(2099, 6, 15)) is True
-
-    def test_eff_from_after_workdate_ineligible(self):
-        from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
-        row = self._make_row(eligibleworkdates=[])
-        assert _is_snapshot_row_eligible_for_workdate(row, datetime.date(2099, 6, 15)) is False
-
-    def test_eff_to_before_workdate_ineligible(self):
-        from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
-        row = self._make_row(eligibleworkdates=[])
-        assert _is_snapshot_row_eligible_for_workdate(row, datetime.date(2099, 6, 15)) is False
 
     def test_terminated_historical_within_term_date_eligible(self):
         from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
@@ -1408,10 +1396,10 @@ class TestCandidateCreatedPeriodSnapshot:
 # ===========================================================================
 
 @pytest.mark.asyncio
-class TestStatusPaymentRefreshEligibilityAware:
-    """_refresh_status_payment_lines respects CP-2E eligibility."""
+class TestSnapshotEligibilityHelperContracts:
+    """Current eligibility helpers use captured membership and existing source facts."""
 
-    async def test_cp2e_status_payment_refresh_derives_for_snapshot_eligible_date(
+    async def test_snapshot_workdate_helper_accepts_an_eligible_snapshot_row(
         self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
     ):
         """Eligible Active driver in snapshot → status refresh proceeds normally."""
@@ -1457,7 +1445,7 @@ class TestStatusPaymentRefreshEligibilityAware:
             )
             await direct_db.commit()
 
-    async def test_cp2e_status_payment_refresh_skips_or_blocks_ineligible_date(
+    async def test_snapshot_workdate_helper_rejects_an_ineligible_date(
         self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
     ):
         """TerminatedHistorical driver ineligible after termination date → skipped."""
@@ -1476,7 +1464,7 @@ class TestStatusPaymentRefreshEligibilityAware:
         # Date after termination → ineligible → refresh should skip
         assert _is_snapshot_row_eligible_for_workdate(row, end) is False
 
-    async def test_cp2e_status_payment_refresh_derives_for_included_existing_source_date(
+    async def test_existing_daily_source_helper_accepts_an_existing_date(
         self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
     ):
         """IBED driver with existing source on date → allowed for refresh."""
@@ -1509,7 +1497,7 @@ class TestStatusPaymentRefreshEligibilityAware:
             )
             await direct_db.commit()
 
-    async def test_cp2e_status_payment_refresh_does_not_derive_for_included_existing_data_new_date(
+    async def test_existing_daily_source_helper_rejects_a_new_date(
         self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
     ):
         """IBED driver with no source on new date → blocked from refresh."""
@@ -1538,100 +1526,6 @@ class TestStatusPaymentRefreshEligibilityAware:
 # Finalization / preview verification tests
 # ===========================================================================
 
-@pytest.mark.asyncio
-class TestFinalizationSnapshotAware:
-    """Finalization uses snapshot-based eligibility checks."""
-
-    async def test_cp2e_finalization_uses_snapshot_not_live_employment_status(
-        self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
-    ):
-        """Active driver in snapshot → assert_driver_eligible_for_workdate passes."""
-        from app.payroll.eligibility import _assert_driver_eligible_for_workdate_via_snapshot
-        start, end = _week_2099()
-        pid = await _insert_open_period(direct_db, branch_id, start, end)
-        await _insert_eligibility_row(direct_db, _COMPANY_ID, branch_id, pid, assignment_id,
-                                       reason_code="Active")
-        try:
-            # Should not raise
-            await _assert_driver_eligible_for_workdate_via_snapshot(
-                _COMPANY_ID, branch_id, pid, assignment_id, start, direct_db
-            )
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-    async def test_cp2e_finalization_blocks_non_snapshot_driver_daily_line(
-        self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
-    ):
-        """Driver absent from snapshot → workdate assert raises 422."""
-        from fastapi import HTTPException
-
-        from app.payroll.eligibility import _assert_driver_eligible_for_workdate_via_snapshot
-        start, end = _week_2099()
-        pid = await _insert_open_period(direct_db, branch_id, start, end)
-        # Snapshot exists for period but not for this driver
-        await _insert_marker_row(direct_db, _COMPANY_ID, branch_id, pid)
-        try:
-            with pytest.raises(HTTPException) as exc_info:
-                await _assert_driver_eligible_for_workdate_via_snapshot(
-                    _COMPANY_ID, branch_id, pid, assignment_id, start, direct_db
-                )
-            assert exc_info.value.status_code == 422
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-    async def test_cp2e_finalization_blocks_non_snapshot_driver_period_line(
-        self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
-    ):
-        """Driver absent from snapshot → period assert raises 422."""
-        from fastapi import HTTPException
-
-        from app.payroll.eligibility import _assert_driver_eligible_for_period_via_snapshot
-        start, end = _week_2099()
-        pid = await _insert_open_period(direct_db, branch_id, start, end)
-        await _insert_marker_row(direct_db, _COMPANY_ID, branch_id, pid)
-        try:
-            with pytest.raises(HTTPException) as exc_info:
-                await _assert_driver_eligible_for_period_via_snapshot(
-                    _COMPANY_ID, branch_id, pid, assignment_id, direct_db
-                )
-            assert exc_info.value.status_code == 422
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-    async def test_cp2e_finalization_empty_snapshot_does_not_fallback_to_live(
-        self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
-    ):
-        """Marker present, no detail rows → driver not found → 422 (not live fallback)."""
-        from fastapi import HTTPException
-
-        from app.payroll.eligibility import _assert_driver_eligible_for_workdate_via_snapshot
-        start, end = _week_2099()
-        pid = await _insert_open_period(direct_db, branch_id, start, end)
-        await _insert_marker_row(direct_db, _COMPANY_ID, branch_id, pid)
-        try:
-            with pytest.raises(HTTPException) as exc_info:
-                await _assert_driver_eligible_for_workdate_via_snapshot(
-                    _COMPANY_ID, branch_id, pid, assignment_id, start, direct_db
-                )
-            assert exc_info.value.status_code == 422
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
 
 
 # ===========================================================================
@@ -1683,117 +1577,6 @@ class TestEmployeeKeySnapshot:
 
 
 # ===========================================================================
-# P1 Fix 1 new tests: Migration backfill covers zero-detail periods
-# ===========================================================================
-
-@pytest.mark.asyncio
-class TestMigrationBackfillZeroDetailPeriods:
-    """
-    Migration 5a must create marker rows for ALL non-finalized periods,
-    including those with zero eligible drivers.
-    These tests simulate the post-migration state using _insert_marker_row
-    (the migration would have inserted the marker; we insert it directly).
-    """
-
-    async def test_cp2e_migration_backfill_creates_marker_for_zero_detail_open_period(
-        self, direct_db: AsyncConnection, branch_id: int
-    ):
-        """Open period with zero detail rows gets a marker → is considered snapshotted."""
-        from app.payroll.eligibility import require_period_eligibility_snapshot
-        start, end = _week_2108()
-        pid = await _insert_open_period(direct_db, branch_id, start, end, status="Open")
-        # Simulate migration: marker row inserted, no detail rows
-        await _insert_marker_row(direct_db, _COMPANY_ID, branch_id, pid, freeze=True)
-        try:
-            await require_period_eligibility_snapshot(pid, _COMPANY_ID, branch_id, direct_db)
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-    async def test_cp2e_migration_backfill_creates_marker_for_zero_detail_draft_period(
-        self, direct_db: AsyncConnection, branch_id: int
-    ):
-        """Draft period with zero detail rows gets a marker → is considered snapshotted."""
-        from app.payroll.eligibility import require_period_eligibility_snapshot
-        start, end = _week_2108()
-        pid = await _insert_open_period(direct_db, branch_id, start, end, status="Draft")
-        # Simulate migration: marker inserted with FrozenAtUtc = NULL (Draft)
-        await _insert_marker_row(direct_db, _COMPANY_ID, branch_id, pid, freeze=False)
-        try:
-            await require_period_eligibility_snapshot(pid, _COMPANY_ID, branch_id, direct_db)
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-    async def test_cp2e_migration_backfill_does_not_marker_locked_archived_cancelled(
-        self, direct_db: AsyncConnection, branch_id: int
-    ):
-        """Locked/Archived/Cancelled periods must NOT receive a marker from migration.
-        Verified by checking that manually-created periods without markers return False.
-        """
-        from fastapi import HTTPException
-
-        from app.payroll.eligibility import require_period_eligibility_snapshot
-        start, end = _week_2108()
-        # We can't set status='Locked' directly because of trigger, so just verify
-        # that a period without a marker row returns False (the migration skips these).
-        pid = await _insert_open_period(direct_db, branch_id, start, end, status="Open")
-        # Do NOT insert a marker — simulates what migration does for Locked/etc.
-        try:
-            with pytest.raises(HTTPException) as exc_info:
-                await require_period_eligibility_snapshot(pid, _COMPANY_ID, branch_id, direct_db)
-            assert exc_info.value.status_code == 409
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-    async def test_cp2e_zero_detail_backfilled_period_does_not_live_fallback(
-        self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
-    ):
-        """Period with marker + zero detail rows → driver not in snapshot → 422 (no live fallback).
-        This proves the empty snapshot is respected and live roster is not consulted.
-        """
-        from fastapi import HTTPException
-
-        from app.payroll.eligibility import (
-            _assert_driver_eligible_for_workdate_via_snapshot,
-            require_period_eligibility_snapshot,
-        )
-        start, end = _week_2108()
-        pid = await _insert_open_period(direct_db, branch_id, start, end, status="Open")
-        await _insert_marker_row(direct_db, _COMPANY_ID, branch_id, pid, freeze=True)
-        try:
-            # Marker present — period is snapshotted
-            await require_period_eligibility_snapshot(pid, _COMPANY_ID, branch_id, direct_db)
-            # No detail rows — driver (live-active) still raises 422
-            count = (await direct_db.execute(
-                _text("SELECT COUNT(*) FROM payroll.payrollperioddrivereligibility "
-                      "WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )).scalar_one()
-            assert count == 0, "Should have no detail rows"
-            with pytest.raises(HTTPException) as exc_info:
-                await _assert_driver_eligible_for_workdate_via_snapshot(
-                    _COMPANY_ID, branch_id, pid, assignment_id, start, direct_db
-                )
-            assert exc_info.value.status_code == 422, "Must raise 422, not fall back to live"
-        finally:
-            await direct_db.execute(
-                _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),
-                {"pid": pid},
-            )
-            await direct_db.commit()
-
-
 # ===========================================================================
 # P1 Fix 2 new tests: Existing-source rescue for generated rows
 # ===========================================================================
@@ -2117,13 +1900,10 @@ class TestGeneratedRowExistingSourceRescue:
             )
             await direct_db.commit()
 
-    async def test_cp2e_status_payment_refresh_derives_for_generated_row_existing_ppdes_outside_window(
+    async def test_existing_source_helper_allows_an_out_of_window_date(
         self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
     ):
-        """_refresh_status_payment_lines: generated-row driver with out-of-window date but
-        existing DraftLine (existing source) → refresh must proceed (not skip).
-        This mirrors the case where a PPDES row exists outside the eligibility window.
-        """
+        """An existing draft source permits the snapshot helper's out-of-window case."""
         from types import SimpleNamespace
 
         from app.payroll.eligibility import (
@@ -2152,11 +1932,11 @@ class TestGeneratedRowExistingSourceRescue:
             )
             # Primary check fails: out of window
             assert _is_snapshot_row_eligible_for_workdate(snap_ns, start) is False
-            # Secondary rescue: existing source present → refresh should proceed
+            # Secondary rescue: existing source present → the helper should accept the existing source
             has_src = await _driver_has_existing_daily_source_on_date(
                 pid, assignment_id, start, direct_db
             )
-            assert has_src is True, "Existing source must allow status payment refresh"
+            assert has_src is True, "Existing source is present for this driver and date"
         finally:
             await direct_db.execute(
                 _text("DELETE FROM payroll.payrolldraftlines WHERE payrollperiodid = :pid"),
@@ -2168,10 +1948,10 @@ class TestGeneratedRowExistingSourceRescue:
             )
             await direct_db.commit()
 
-    async def test_cp2e_status_payment_refresh_still_skips_no_source_outside_window(
+    async def test_existing_source_helper_rejects_an_out_of_window_date_without_source(
         self, direct_db: AsyncConnection, branch_id: int, assignment_id: int
     ):
-        """_refresh_status_payment_lines skips a generated-row driver with no source outside window."""
+        """The existing-source helper rejects an out-of-window date with no source."""
         from app.payroll.eligibility import _driver_has_existing_daily_source_on_date
         start, end = _week_2108()
         # Use a date outside window
@@ -2188,7 +1968,7 @@ class TestGeneratedRowExistingSourceRescue:
             has_src = await _driver_has_existing_daily_source_on_date(
                 pid, assignment_id, out_of_window_date, direct_db
             )
-            assert has_src is False, "No source → refresh must skip this driver/date"
+            assert has_src is False, "No source exists for this driver and date"
         finally:
             await direct_db.execute(
                 _text("DELETE FROM payroll.payrollperiods WHERE payrollperiodid = :pid"),

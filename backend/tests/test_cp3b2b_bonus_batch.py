@@ -1071,24 +1071,6 @@ async def test_event_count_mismatch_rejected(
     await _cancel_period_db(db_conn, period_id)
 
 
-@pytest.mark.asyncio
-async def test_downgrade_guard_detects_live_batch_rows(
-    client, auth_token, db_conn, cp3b2b_branch_id, cp3b2b_drivers,
-) -> None:
-    """After a real batch, PayrollBonusBatchRequests is non-empty — exactly the
-    condition migration 0060's downgrade refuses on. We assert the mechanism's
-    predicate here (running the alembic downgrade in-process would corrupt the
-    shared session DB)."""
-    period_id = await _open_period_with_roster(db_conn, cp3b2b_branch_id, cp3b2b_drivers, ["alpha"])
-    r = await _batch(client, auth_token, period_id, _key(), 0, [
-        {"driver_assignment_id": cp3b2b_drivers["alpha"], "amount": "10.00"},
-    ])
-    assert r.status_code == 201, r.text
-    total = (await db_conn.execute(
-        _text("SELECT COUNT(*) FROM payroll.payrollbonusbatchrequests"),
-    )).scalar()
-    assert total and total > 0, "downgrade guard refuses when this count > 0"
-    await _cancel_period_db(db_conn, period_id)
 
 
 # ===========================================================================

@@ -28,6 +28,7 @@ from httpx import ASGITransport
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
+from tests.database_templates import SchemaDatabases
 from tests.db_state import (
     assert_trigger_fingerprints_equal,
     preserve_test_guc_state,
@@ -45,6 +46,8 @@ os.environ["ENVIRONMENT"] = "test"
 from app.config import get_settings  # noqa: E402
 
 get_settings.cache_clear()
+
+pytest_plugins = ["tests.execution"]
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +285,16 @@ def pg_instance():
         yield pg
     finally:
         _stop_test_postgresql_safely(pg)
+
+
+@pytest.fixture(scope="session")
+def schema_databases(pg_instance):
+    """One pristine schema per authority/worker; every consumer gets an isolated clone."""
+    databases = SchemaDatabases(pg_instance.dsn(), Path(__file__).resolve().parents[2])
+    try:
+        yield databases
+    finally:
+        databases.close()
 
 
 @pytest.fixture(scope="session")
