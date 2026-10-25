@@ -6,6 +6,7 @@ import psycopg2
 import pytest
 
 from app.db.schema_guard import _check_import_foundation
+from tests.db_state import IMPORT_FILE_DETAIL_WRITABLE_TRIGGER, suspended_test_triggers_sync
 from tests.schema_helpers import _alembic, _disposable_database, _schema_database
 
 SQL = Path(__file__).resolve().parents[2] / "migrations/sql/0094_import_foundation.sql"
@@ -97,9 +98,11 @@ def test_company_actor_and_source_kind_are_enforced(foundation):
 
 def test_schema_guard_detects_disabled_detail_protection(foundation):
     with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
-        cur.execute("ALTER TABLE import.filesources DISABLE TRIGGER trg_importdetail_writable")
-        assert any("filesources.trg_importdetail_writable" in error for error in _check_import_foundation(cur))
-        conn.rollback()
+        with suspended_test_triggers_sync(cur, [IMPORT_FILE_DETAIL_WRITABLE_TRIGGER]):
+            assert any(
+                "filesources.trg_importdetail_writable" in error
+                for error in _check_import_foundation(cur)
+            )
 
 
 def test_schema_guard_detects_missing_company_scoped_driver_relationship(foundation):
