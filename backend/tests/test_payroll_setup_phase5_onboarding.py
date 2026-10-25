@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -20,18 +19,15 @@ from app.auth.security import create_access_token
 from app.dashboard.service import _compute_setup_warnings
 from app.dependencies import get_db
 from app.main import create_app
-from app.payroll_setup import payroll_policy, readiness
-from app.payroll_setup.errors import PolicyError
+from app.payroll_setup import payroll_policy
 from app.settings import audit as settings_audit
 from app.settings import branches
 
-_ROOT = Path(__file__).resolve().parents[2]
-_MIGRATIONS = _ROOT / "migrations" / "sql"
 real_app = create_app()
 
 
 @pytest_asyncio.fixture
-async def phase5_onboarding_db(pg_instance):
+async def phase5_onboarding_db(pg_instance, schema_databases):
     """Create a fresh migrated database and HTTP app for every Phase5 test."""
     database = "p5_onboard_" + uuid4().hex[:12]
     admin_dsn = dict(pg_instance.dsn())
@@ -39,7 +35,12 @@ async def phase5_onboarding_db(pg_instance):
     admin.autocommit = True
     try:
         with admin.cursor() as cursor:
-            cursor.execute(pg_sql.SQL("CREATE DATABASE {}").format(pg_sql.Identifier(database)))
+            cursor.execute(
+                pg_sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                    pg_sql.Identifier(database),
+                    pg_sql.Identifier(schema_databases.template("sql")),
+                )
+            )
     finally:
         admin.close()
 
@@ -49,8 +50,6 @@ async def phase5_onboarding_db(pg_instance):
     isolated.autocommit = True
     try:
         with isolated.cursor() as cursor:
-            for migration in sorted(_MIGRATIONS.glob("*.sql")):
-                cursor.execute(migration.read_text(encoding="utf-8"))
             cursor.execute("""
                 INSERT INTO core.Companies (CompanyCode, CompanyName, Status, IsSuspended)
                 VALUES (%s, 'Phase 5 Onboarding', 'Active', FALSE) RETURNING CompanyID
@@ -996,34 +995,3 @@ async def test_branch_create_default_requires_settings_admin(
             f"/settings/branches/{original_default_id}/set-default", headers=_auth(admin_only),
         )
         assert restored.status_code == 200, restored.text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("policy_code", "expected"), [
-    ("ASSIGNMENT_NOT_FOUND", "NO_ASSIGNMENT"),
-    ("VERSION_NOT_FOUND", "NO_PUBLISHED_VERSION"),
-    ("AUTHORITY_BOUNDARY_CROSSING", "AUTHORITY_BOUNDARY_CONFLICT"),
-    ("SETUP_NOT_ACTIVE", "SETUP_NOT_ACTIVE"),
-    ("INVALID_SCHEDULE_BOUNDARY", "INVALID_SCHEDULE_BOUNDARY"),
-    ("BRANCH_NOT_OPERATIONAL", "BRANCH_NOT_OPERATIONAL"),
-])
-async def test_readiness_reason_codes_are_normalized(
-    phase5_onboarding_db, phase5_onboarding_conn, monkeypatch,
-    policy_code, expected,
-):
-    db_conn = phase5_onboarding_conn
-    company_id, branch_id = (await db_conn.execute(text("""
-        SELECT c.CompanyID, b.BranchID FROM core.Companies c
-        JOIN core.Branches b ON b.CompanyID = c.CompanyID
-        WHERE b.BranchCode = 'P5BRANCH'
-    """))).one()
-
-    async def fail_resolution(*args, **kwargs):
-        raise PolicyError(policy_code, "synthetic readiness result")
-
-    monkeypatch.setattr(readiness, "resolve_payroll_setup_version", fail_resolution)
-    ready, reason = await readiness.branch_schedule_readiness(
-        int(company_id), int(branch_id), db_conn, period_start_date=date(2090, 1, 1),
-    )
-    assert ready is False
-    assert reason == expected

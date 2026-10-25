@@ -597,14 +597,15 @@ def test_scanner_exempts_only_the_approved_infrastructure_files(tmp_path):
     sub.mkdir()
     (sub / "helper.py").write_text(f"SQL = {sql!r}\n", encoding="utf-8")
     (sub / "db_state.py").write_text(f"SQL = {sql!r}\n", encoding="utf-8")
-    (sub / "test_g0_1_bonus_precision_migration.py").write_text(f"SQL = {sql!r}\n", encoding="utf-8")
-    (tmp_path / "test_g0_1_bonus_precision_migration.py").write_text(f"SQL = {sql!r}\n", encoding="utf-8")
+    (sub / "test_bonus_amount_contract.py").write_text(f"SQL = {sql!r}\n", encoding="utf-8")
+    (tmp_path / "test_bonus_amount_contract.py").write_text(f"SQL = {sql!r}\n", encoding="utf-8")
     # Exact test-root-relative paths are exempt; a same-named file in a subdirectory is not.
     assert sorted(scan_tests_for_unsafe_sql(tmp_path)) == [
         "builders/db_state.py",
         "builders/helper.py",
-        "builders/test_g0_1_bonus_precision_migration.py",
+        "builders/test_bonus_amount_contract.py",
         "test_bad.py",
+        "test_bonus_amount_contract.py",
     ]
 
 

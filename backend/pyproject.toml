@@ -32,6 +32,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
+    "pytest-xdist>=3.8,<4",
     "pytest-asyncio>=0.25",
     "httpx>=0.28",          # async test client for FastAPI
     "testing.postgresql>=1.3",

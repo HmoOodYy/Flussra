@@ -2,9 +2,8 @@
 CP-2B: Payroll period-day calendar snapshot tests.
 
 Product contracts verified:
-  - Migration 0052: PayrollPeriodDays table exists with all required columns,
+  - Current schema: PayrollPeriodDays table exists with all required columns,
     constraints (unique, checks, FKs), and indexes.
-  - Alembic has one current head at 0093.
   - Candidate-created Open/Draft periods get one row per calendar day.
   - Candidate-created Prepared periods also create day rows.
   - Day rows: WorkDate range inclusive, DayOfWeek correct, NormalDaysOffMask
@@ -229,11 +228,11 @@ async def _day_rows_simple(db: AsyncConnection, period_id: int) -> list[dict]:
 class TestCp2bPeriodDays:
 
     # ------------------------------------------------------------------ #
-    # D01 — Migration schema
+    # Current PeriodDays schema
     # ------------------------------------------------------------------ #
 
     @pytest.mark.asyncio
-    async def test_d01_migration_schema(self, direct_db):
+    async def test_period_days_schema(self, direct_db):
         """D01: PayrollPeriodDays table exists with required columns, constraints, indexes."""
         # Table exists
         r = await direct_db.execute(
@@ -289,25 +288,6 @@ class TestCp2bPeriodDays:
                 {"iname": idx_name},
             )
             assert idx_r.first() is not None, f"Index {idx_name!r} missing"
-
-    # ------------------------------------------------------------------ #
-    # D02 — Alembic head is the current migration
-    # ------------------------------------------------------------------ #
-
-    def test_d02_alembic_head_current(self):
-        """D02: Migration chain is linear and head is 0093."""
-        import subprocess
-        import sys
-        result = subprocess.run(
-            [sys.executable, "-m", "alembic", "heads"],
-            capture_output=True, text=True,
-            cwd=str(__import__("pathlib").Path(__file__).parent.parent.parent),
-        )
-        lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
-        assert len(lines) == 1, (
-            f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
-        )
-        assert "0093" in lines[0], f"Expected head 0093, got: {lines[0]}"
 
     # ------------------------------------------------------------------ #
     # D03 — Candidate Open Week period gets 7 day rows

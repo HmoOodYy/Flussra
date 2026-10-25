@@ -1,3 +1,5 @@
+param([switch]$SkipBackendTests)
+
 $ErrorActionPreference = "Stop"
 
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -82,9 +84,13 @@ Invoke-ValidationGate "Backend tooling availability" $BACKEND $PYTHON @(
     "-c", "import pytest, ruff, alembic"
 )
 
-Invoke-ValidationGate "Backend full test suite" $BACKEND $PYTHON @(
-    "-m", "pytest", "-ra", "--tb=short"
-)
+if (-not $SkipBackendTests) {
+    Invoke-ValidationGate "Backend full test suite" $BACKEND $PYTHON @(
+        (Join-Path $ROOT "scripts/run_backend_tests.py"), "--suite", "full", "--workers", "2"
+    )
+} else {
+    Write-Host "Backend tests are supplied by the required CI shard jobs."
+}
 
 Invoke-ValidationGate "Backend Ruff" $BACKEND $PYTHON @(
     "-m", "ruff", "check", "--no-cache", "tests"

@@ -1,25 +1,22 @@
-"""Migration 0088 and the database-level Driver-owned compensation contract.
+"""Current database-level Driver-owned compensation contract.
 
 Ordinary rate schedules and Min/Max pay rules belong to the permanent
 ``core.Drivers`` row: they carry no DriverAssignmentID and no BranchID, so a permanent
 transfer (one Driver, several home DriverAssignments) continues them without any copy.
-These tests exercise the schema only, directly against a migrated database.
+These tests exercise the current schema on an isolated fresh Alembic database.
 """
+
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 from contextlib import contextmanager
 from datetime import date
-from pathlib import Path
 from uuid import uuid4
 
 import psycopg2
 import pytest
 from psycopg2 import errors, sql
 
-_ROOT = Path(__file__).resolve().parents[2]
+from tests.schema_helpers import _schema_database
 
 PAST_START = "2020-01-01 00:00+00"
 PAST_MID = "2020-06-01 00:00+00"
@@ -27,47 +24,10 @@ PAST_END = "2020-09-01 00:00+00"
 FUTURE_START = "2099-01-01 00:00+00"
 
 
-def _alembic(env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-B", "-m", "alembic", *args],
-        cwd=_ROOT, env=env, capture_output=True, text=True, check=False,
-    )
-
-
-@contextmanager
-def _disposable_database(pg_instance, prefix: str):
-    dsn = pg_instance.dsn()
-    name = f"{prefix}_{uuid4().hex[:12]}"
-    admin = psycopg2.connect(**dsn)
-    admin.autocommit = True
-    with admin.cursor() as cursor:
-        cursor.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    env = os.environ.copy()
-    env["DATABASE_URL"] = f"postgresql+asyncpg://{dsn['user']}@{dsn['host']}:{dsn['port']}/{name}"
-    env["SECRET_KEY"] = "driver-owned-compensation-disposable-migration-test"
-    try:
-        yield env, {**dsn, "database": name}
-    finally:
-        with admin.cursor() as cursor:
-            cursor.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
-        admin.close()
-
-
-@pytest.fixture
-def pre_0088_database(pg_instance):
-    """A disposable database upgraded to 0087, the last assignment-owned compensation schema."""
-    with _disposable_database(pg_instance, "dc88pre") as (env, dsn):
-        assert _alembic(env, "upgrade", "0087").returncode == 0
-        yield env, dsn
-
-
 @pytest.fixture(scope="module")
-def head_database(pg_instance):
-    with _disposable_database(pg_instance, "dc88head") as (env, dsn):
-        result = _alembic(env, "upgrade", "head")
-        assert result.returncode == 0, result.stderr
-        yield env, dsn
+def head_database(schema_databases):
+    with _schema_database(schema_databases, "driver_compensation") as database:
+        yield database
 
 
 @pytest.fixture
@@ -109,6 +69,7 @@ def _set_op(cursor, op: str) -> None:
 # ---------------------------------------------------------------------------
 # Seed helpers (head schema)
 # ---------------------------------------------------------------------------
+
 
 def _company(cursor, *, zones: tuple[str, ...] = ("UTC", "UTC")) -> tuple[int, list[int]]:
     code = "DC" + uuid4().hex[:8]
@@ -325,6 +286,7 @@ def _finalized_period(cursor, world: dict, branch_id: int, assignment_id: int, *
 # Preflight, irreversibility and fresh upgrade
 # ---------------------------------------------------------------------------
 
+
 def _seed_0087_rows(cursor, kind: str) -> None:
     """The assignment-owned compensation state 0088 refuses to reinterpret."""
     code = "DC88" + kind[:4].upper() + uuid4().hex[:4]
@@ -387,55 +349,6 @@ def _seed_0087_rows(cursor, kind: str) -> None:
             (driverrateassignmentid, ratedefinitionid, ratecomponentdefinitionid, amount)
         VALUES (%s, %s, %s, 25)
     """, (schedule_id, rate_definition_id, component_id))
-
-
-@pytest.mark.parametrize("kind", ["schedule", "pay_rule"])
-def test_0088_refuses_existing_compensation_rows_before_any_ddl(pre_0088_database, kind):
-    env, dsn = pre_0088_database
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        _seed_0087_rows(cursor, kind)
-
-    result = _alembic(env, "upgrade", "head")
-    assert result.returncode != 0
-    assert "DURABLE_COMPENSATION_REBUILD_REQUIRED" in (result.stderr + result.stdout)
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        cursor.execute("SELECT version_num FROM public.alembic_version")
-        assert cursor.fetchone() == ("0087",)
-        for old, new in (("driverrateassignments", "driverrateschedules"),
-                         ("driverratevalues", "driverrateschedulevalues")):
-            cursor.execute("SELECT to_regclass(%s), to_regclass(%s)", (f"payroll.{old}", f"payroll.{new}"))
-            assert cursor.fetchone() == (f"payroll.{old}", None)
-        cursor.execute("""
-            SELECT count(*) FROM information_schema.columns
-            WHERE table_schema = 'payroll' AND table_name = 'driverpayrules'
-              AND column_name IN ('driverassignmentid', 'branchid')
-        """)
-        assert cursor.fetchone() == (2,)
-        cursor.execute("SELECT to_regprocedure('core.fn_driverassignmentforbusinessdate(integer,integer,date)')")
-        assert cursor.fetchone()[0] is None
-
-
-def test_0088_applies_over_a_roster_without_compensation(pre_0088_database):
-    env, dsn = pre_0088_database
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        _seed_0087_rows(cursor, "roster_only")
-        cursor.execute("""
-            DELETE FROM payroll.driverratevalues;
-            DELETE FROM payroll.driverrateassignments;
-        """)
-    assert _alembic(env, "upgrade", "head").returncode == 0
-    with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
-        cursor.execute("SELECT version_num FROM public.alembic_version")
-        assert cursor.fetchone() == ("0093",)
-        cursor.execute("SELECT count(*) FROM core.driverassignments")
-        assert cursor.fetchone() == (1,)
-
-
-def test_0088_is_irreversible(head_database):
-    env, _ = head_database
-    result = _alembic(env, "downgrade", "0087")
-    assert result.returncode != 0
-    assert "irreversible" in (result.stderr + result.stdout)
 
 
 def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, cur):
@@ -545,6 +458,7 @@ def test_driver_owned_context_guards_remain_without_legacy_assignment_guards(cur
 # ---------------------------------------------------------------------------
 # Ownership: the permanent Driver
 # ---------------------------------------------------------------------------
+
 
 def test_a_schedule_belongs_to_a_driver_of_its_own_company_and_pay_definition(cur):
     w = _world(cur)
@@ -664,6 +578,7 @@ def test_a_pay_rule_window_and_open_end_are_unique_per_driver_and_rule_type(cur)
 # Schedule triggers, re-pointed
 # ---------------------------------------------------------------------------
 
+
 def test_schedule_lifecycle_guards_hold_on_the_driver_key(cur):
     w = _world(cur)
     other = _driver_row(cur, w["company"], w["branches"][0])[0]
@@ -759,6 +674,7 @@ def test_company_currency_becomes_immutable_once_a_schedule_or_pay_rule_is_autho
 # ---------------------------------------------------------------------------
 # Pay rules: captured calendar and integrity
 # ---------------------------------------------------------------------------
+
 
 def test_pay_rule_calendar_columns_are_required_and_constrained(cur):
     w = _world(cur)
@@ -872,6 +788,7 @@ def test_pay_rule_lifecycle_is_active_to_ended_or_voided_and_ended_to_voided(cur
 # core.fn_DriverAssignmentForBusinessDate
 # ---------------------------------------------------------------------------
 
+
 def _context(cursor, world: dict, day: str, *, company: int | None = None, driver: int | None = None):
     cursor.execute("SELECT core.fn_DriverAssignmentForBusinessDate(%s, %s, %s::date)",
                    (company or world["company"], driver or world["driver"], day))
@@ -953,6 +870,7 @@ def test_a_scheduled_transfers_destination_is_context_only_from_its_effective_da
 # ---------------------------------------------------------------------------
 # payroll.fn_DriverFinalizedPayrollTouched
 # ---------------------------------------------------------------------------
+
 
 def _touched(cursor, world: dict, footprint: str, mode: str, driver: int | None = None):
     cursor.execute("""
@@ -1051,6 +969,7 @@ def test_finalized_guard_rejects_an_unknown_mode_or_a_null_footprint(cur):
 # ---------------------------------------------------------------------------
 # core.trg_DriverCompensationContextWritable
 # ---------------------------------------------------------------------------
+
 
 def test_approve_void_and_end_are_refused_when_the_context_tenure_has_ended(cur):
     w = _world(cur)  # one open assignment from 2020-01-01

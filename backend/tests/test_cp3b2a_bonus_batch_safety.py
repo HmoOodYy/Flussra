@@ -13,7 +13,7 @@ transactional bonus batch (CP-3B2b) will depend on:
   - bonus_data_revision exposed on GET /bonuses/summary
 
 Covers:
-  - Migration/schema: 0059 objects exist with correct shape.
+  - Current schema: bonus batch objects exist with the required shape.
   - DB ownership hardening: mismatched Company/Branch inserts/updates rejected.
   - Summary revision exposure: starts at 0, present in response.
   - Single-event revision bumps: create/update/void each +1 exactly once.
@@ -220,26 +220,9 @@ async def _snapshot_entry(driver_assignment_id: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 1. Migration / schema
+# Current schema
 # ---------------------------------------------------------------------------
 
-@pytest.mark.asyncio
-async def test_alembic_head_is_current() -> None:
-    # CP-3B2a introduced migration 0059; CP-3B2b later added 0060, which is now
-    # the head. This test only asserts the chain is linear and that 0059 is
-    # applied (i.e. head is 0059 or a later revision that builds on it).
-    import pathlib
-    import subprocess
-    import sys
-    result = subprocess.run(
-        [sys.executable, "-m", "alembic", "heads"],
-        capture_output=True, text=True,
-        cwd=str(pathlib.Path(__file__).parent.parent.parent),
-    )
-    lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
-    assert len(lines) == 1, f"Expected exactly one alembic head, got {len(lines)}: {result.stdout}"
-    head_rev = lines[0].split()[0]
-    assert head_rev >= "0059", f"Expected head >= 0059, got: {lines[0]}"
 
 
 @pytest.mark.asyncio

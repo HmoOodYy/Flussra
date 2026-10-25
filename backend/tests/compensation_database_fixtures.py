@@ -1,7 +1,6 @@
 """Shared PostgreSQL fixtures and builders for the P3b target compensation tests.
 
-The target schema is dormant, so these tests work directly against a disposable
-database built from the direct SQL bootstrap. Every builder uses unique data,
+These tests use independently cloned current-schema databases. Every builder uses unique data,
 so tests never need cleanup (approved schedules are intentionally undeletable).
 Rate schedules and pay rules are owned by the permanent Driver; ``make_driver`` still
 returns the home DriverAssignment id that status rates and payroll rows are keyed by.
@@ -11,37 +10,20 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import psycopg2
 import pytest
-from psycopg2 import sql
-
-_SQL_DIR = Path(__file__).resolve().parents[2] / "migrations" / "sql"
 
 TIERS = [(1, 1), (2, 2), (3, None)]
 
 
-def _run_on_cluster(dsn: dict[str, Any], statement: sql.Composable) -> None:
-    """One statement on a short-lived autocommit connection that is always closed."""
-    admin = psycopg2.connect(client_encoding="utf-8", **dsn)
-    try:
-        admin.autocommit = True
-        with admin.cursor() as cur:
-            cur.execute(statement)
-    finally:
-        admin.close()
-
-
-def _bootstrap_schema(target: dict[str, Any]) -> None:
+def _seed_user(target: dict[str, Any]) -> None:
     bootstrap = psycopg2.connect(client_encoding="utf-8", **target)
     try:
         bootstrap.autocommit = True
         with bootstrap.cursor() as cur:
-            for path in sorted(_SQL_DIR.glob("*.sql")):
-                cur.execute(path.read_text(encoding="utf-8"))
             cur.execute("""
                 INSERT INTO core.companies (companycode, companyname, legalname, status, issuspended)
                 VALUES ('P3BUSERCO', 'P3b users', 'P3b users', 'Active', FALSE)
@@ -64,17 +46,10 @@ def _bootstrap_schema(target: dict[str, Any]) -> None:
 # its database dropped, when its module is done. No connection is held for its own sake: the
 # administrative connections that create and drop the database are opened only for that.
 @pytest.fixture(scope="module", name="p3b_dsn")
-def p3b_database(pg_instance):
-    dsn = pg_instance.dsn()
-    name = "p3b_" + uuid4().hex[:12]
-    _run_on_cluster(dsn, sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    target = {**dsn, "database": name}
-    try:
-        _bootstrap_schema(target)
+def p3b_database(schema_databases):
+    with schema_databases.database("compensation") as target:
+        _seed_user(target)
         yield target
-    finally:
-        _run_on_cluster(
-            dsn, sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
 
 
 @pytest.fixture(name="cur")

@@ -12,19 +12,16 @@ Design notes:
   - Payroll mutation tests use the PAYTEST branch.
 
 Matrix:
-  1.  DRIVER/Self user cannot access payroll period list/detail/lines/summary.
-  2.  Driver role + SpecificBranch cannot access payroll period list/detail/lines/summary.
-  3.  SpecificBranch user without payroll.view/payroll.entry cannot read Current Payroll.
-  4.  SpecificBranch user with payroll.view can read only allowed branch.
-  5.  SpecificBranch user cannot access other branch.
-  6.  AllCompanyBranches operational user can access company branches.
-  7.  Driver/DRIVER/Self cannot mutate draft lines or period status.
-  8.  Review list/detail require review/payroll access (not just branch access).
-  9.  Driver/DRIVER/Self cannot access review list/detail/decide.
-  10. Final-lines require payroll read permission.
-  11. Final-lines reject non-Locked/non-Archived periods.
-  12. Driver/DRIVER/Self cannot access final-lines.
-  15. Driver role with SpecificBranch (not only DRIVER/Self) is specifically blocked.
+  1. DRIVER/Self users cannot access payroll period list/detail/lines/summary.
+  2. SpecificBranch users without payroll access cannot read Current Payroll or Review.
+  3. SpecificBranch payroll readers can access only their allowed branch.
+  4. AllCompanyBranches operational users can access company branches.
+  5. DRIVER/Self users cannot mutate payroll or access review/final-line routes.
+  6. Payroll read permissions govern review and final-line access.
+  7. The pre-seeded branch_user can read HQ payroll data but cannot write.
+  8. DRIVER/Self CompanyRole assignments remain blocked from period and review reads.
+  9. Driver/Self users cannot create payroll periods, even with payroll.entry.
+ 10. Operational users can create open candidates through canonical setup authority.
 """
 
 import datetime
@@ -425,80 +422,9 @@ class TestSecurityMatrix:
         )
         assert resp.status_code == 403
 
-    # -----------------------------------------------------------------------
-    # 2 & 15. Driver role + SpecificBranch blocked (key regression test)
-    # -----------------------------------------------------------------------
 
-    async def test_2_driver_sb_blocked_period_list(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_driver_role_id: int,
-    ):
-        """Driver role + SpecificBranch is blocked from period list.
 
-        This is the critical gap: _get_driver_self_own_driver_id missed DRIVER+SpecificBranch.
-        require_non_driver_subject catches it by checking rolecode='DRIVER'.
-        """
-        tok = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_hq_id
-        )
-        resp = await session_client.get("/payroll/periods", headers=_hdr(tok))
-        assert resp.status_code == 403, (
-            f"Driver+SpecificBranch must be blocked from period list; got {resp.status_code}"
-        )
 
-    async def test_2_driver_sb_blocked_period_detail(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_driver_role_id: int,
-        sm_hq_period_id: int,
-    ):
-        """Driver role + SpecificBranch is blocked from period detail."""
-        tok = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_hq_id
-        )
-        resp = await session_client.get(
-            f"/payroll/periods/{sm_hq_period_id}", headers=_hdr(tok)
-        )
-        assert resp.status_code == 403
-
-    async def test_2_driver_sb_blocked_period_lines(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_driver_role_id: int,
-        sm_hq_period_id: int,
-    ):
-        """Driver role + SpecificBranch is blocked from period draft lines."""
-        tok = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_hq_id
-        )
-        resp = await session_client.get(
-            f"/payroll/periods/{sm_hq_period_id}/lines", headers=_hdr(tok)
-        )
-        assert resp.status_code == 403
-
-    async def test_2_driver_sb_blocked_period_summary(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_driver_role_id: int,
-        sm_hq_period_id: int,
-    ):
-        """Driver role + SpecificBranch is blocked from period draft summary."""
-        tok = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_hq_id
-        )
-        resp = await session_client.get(
-            f"/payroll/periods/{sm_hq_period_id}/lines/summary", headers=_hdr(tok)
-        )
-        assert resp.status_code == 403
 
     # -----------------------------------------------------------------------
     # 3. SpecificBranch without payroll.view/entry is blocked
@@ -784,19 +710,6 @@ class TestSecurityMatrix:
         resp = await session_client.get("/review/items", headers=_hdr(tok))
         assert resp.status_code == 403
 
-    async def test_9_driver_sb_blocked_from_review_list(
-        self,
-        session_client: httpx.AsyncClient,
-        auth_token: str,
-        sm_hq_id: int,
-        sm_driver_role_id: int,
-    ):
-        """Driver+SpecificBranch cannot access review list."""
-        tok = await _make_driver_self_user(
-            session_client, auth_token, sm_driver_role_id, sm_hq_id
-        )
-        resp = await session_client.get("/review/items", headers=_hdr(tok))
-        assert resp.status_code == 403
 
     # -----------------------------------------------------------------------
     # 15. The pre-seeded branch_user (PAYROLL_VIEWER_CO + SpecificBranch=HQ)

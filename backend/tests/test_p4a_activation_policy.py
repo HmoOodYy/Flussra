@@ -19,8 +19,6 @@ from tests.compensation_database_fixtures import (  # noqa: F401 - register fixt
 )
 from tests.test_p3c_pay_definition_governance import _decide, _submitted
 
-pytestmark = pytest.mark.asyncio
-
 
 def _branch_today(cur, tenant, branch_id: int):
     cur.execute("SELECT core.fn_BranchToday(%s, %s)", (tenant.company_id, branch_id))

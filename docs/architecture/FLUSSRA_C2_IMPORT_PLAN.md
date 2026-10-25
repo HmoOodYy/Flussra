@@ -34,7 +34,7 @@ The idea the whole feature rests on:
 |---|---|
 | R1 | The file is flexible, the target is strict. Users bring their own Excel; Flussra adapts to it. |
 | R2 | No silent changes. Nothing is overwritten without being shown and decided. |
-| R3 | Every imported value is traceable to its batch, file, sheet, row and column. |
+| R3 | Every imported value is traceable to its batch, file, sheet, row and column while its period can change; after finalization, to its durable import and audit record (D7). |
 | R4 | The period is the import schema: not the current settings, not a fixed template. Importing into an older period uses that period's frozen Pay Items. |
 | R5 | Import never calculates pay. It supplies driver, date, Pay Item and quantity; the calculation engine does the rest. |
 | R6 | Import never creates master data. Unknown drivers or columns are reported, never created. |
@@ -105,7 +105,7 @@ C3  Choose sheet and header row
 C4  Map columns: Driver, Date, and the period's Pay Items
 C5  Match drivers: identifier → confirmed name → user choice
 C6  Validate: type, unit, date, eligibility, in-file duplicates
-C7  Review: valid, warnings, errors, conflicts; resolve conflicts, exclude rows
+C7  Review: valid, warnings, errors, decisions (conflicts, full-day-off Statuses, day-off work); decide or exclude
 C8  Impact preview → Import N changes
 C9  Revalidate at commit → commit everything at once
 C10 Receipt → links to the Daily Grid and the updated payroll preview
@@ -121,7 +121,7 @@ Import lifecycle: `UPLOADED → ANALYZING → NEEDS_MAPPING → NEEDS_REVIEW →
 |---|---|---|
 | F1 | One shared engine; each import type supplies its own contract (Period now, then People and Rates) | People and Rate imports without a second system |
 | F2 | Staging separate from payroll | Future integrations enter the same staging engine as files |
-| F3 | Value-level provenance (batch, file, sheet, row, column) | Tracing, explanation, audit |
+| F3 | Value-level provenance (batch, file, sheet, row, column) until finalization, then the durable import and audit record (D7) | Tracing, explanation, audit |
 | F4 | Every batch stores the column and driver mapping it used | L1 and L3 become reuse of stored data |
 | F5 | Before and after values stored for every change | A later safe Undo that never reverts over newer manual edits |
 | F6 | File fingerprint and canonical content fingerprint | S11 duplicate protection and L5 drift detection |
@@ -151,7 +151,11 @@ Decided 2026-10-24.
 |---|---|
 | D1 | There is no automatic default for a conflict: the user decides each one, and may apply a decision to all similar conflicts. |
 | D2 | An imported value never replaces an existing value silently, whatever put that value there (a manual entry or an earlier import): the user chooses whether to overwrite it. |
-| D3 | An **error** is incoming data whose destination Flussra cannot determine with confidence: an unidentified or ambiguous driver, a column with no target in the period, a date outside the period, or a value that is not a readable quantity. Errors block the import. A **warning** is data Flussra understands and can place, but that looks unusual. Warnings are shown and do not block. |
+| D3 | An **error** is incoming data whose destination — driver, target, date, pay item or any other required destination — Flussra cannot determine with confidence. Errors block the import. A **warning** is data Flussra understands and can place, but that looks unusual. Where understood data cannot be accepted without a choice, Review asks for it; the user either decides or deliberately excludes the affected data and continues with the rest, and an unresolved choice blocks completion. |
+| D4 | Version 1 reads one row per driver per day. Other layouts (one column per day) come later as additional reader modes and must not be precluded by the design. |
+| D5 | Imported work on a day whose Status is a full day off is resolved inside Review, never by sending the user out of Import. Review lists the affected drivers once each, nothing selected by default, with select all. Selecting a driver removes the conflicting full-day-off Status where imported work exists and accepts that work; otherwise that work is not accepted and is deliberately excluded. |
+| D6 | Imported work on a normal day off asks whether to treat it as an exception for this period. Yes accepts it and Review notes that day-off exceptions were accepted; No excludes it and the rest continues; unanswered blocks completion. |
+| D7 | The original file and detailed provenance (sheet, row, column) serve Import and Review until the period is finalized; they are not permanent payroll data. After finalization Flussra keeps the accepted payroll data and a durable import and audit record, not the file or row/column detail. |
 
 ## 12. Existing import tables
 

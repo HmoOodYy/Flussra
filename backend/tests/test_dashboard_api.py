@@ -16,11 +16,16 @@ from uuid import uuid4
 
 import httpx
 import psycopg2
-import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
 from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
+from tests.payroll_runtime_fixtures import (
+    assign_weekly_setup,
+    build_payroll_tenant,
+    make_user,
+    rated_definition,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -631,54 +636,35 @@ class TestDashboardSetupWarnings:
     async def test_no_warnings_when_all_clear(
         self,
         client: httpx.AsyncClient,
-        hq_entry_token: str,
-        hq_branch_id: int,
-        direct_db,
+        apply_schema,
+        test_engine,
     ):
-        """
-        When HQ has a canonical Payroll Setup assignment, no open NMR lines, and all drivers have
-        approved rates, no warnings should appear for the HQ-scoped user.
-        This is a best-effort check; skip if prerequisites aren't met.
-        """
-        # Check HQ has canonical Payroll Setup authority
-        result = await direct_db.execute(
-            text("""
-                SELECT COUNT(*) FROM payroll.branchpayrollsetupassignments
-                WHERE branchid = :bid
-            """),
-            {"bid": hq_branch_id},
+        """An owned, fully configured branch has no warnings for its scoped payroll user."""
+        tenant = build_payroll_tenant(apply_schema.dsn())
+        await assign_weekly_setup(test_engine, tenant, tenant.branch_a)
+        for driver_assignment_id in (tenant.driver_a, tenant.driver_a2):
+            await rated_definition(
+                client, tenant, driver_assignment_id=driver_assignment_id,
+            )
+        scoped_user = make_user(
+            tenant, ["payroll.entry"], scope="SpecificBranch", branch_id=tenant.branch_a,
         )
-        if result.scalar_one() == 0:
-            pytest.skip("HQ has no payroll settings — prerequisite not met")
 
-        # Check HQ has no active drivers without approved rates
-        result = await direct_db.execute(
-            text("""
-                SELECT COUNT(*) FROM core.driverassignments a
-                JOIN core.drivers d ON d.driverid = a.driverid
-                JOIN core.employees e ON e.employeeid = a.employeeid
-                WHERE a.branchid = :bid
-                  AND a.effectivetoat IS NULL
-                  AND d.driverstatus = 'Active'
-                  AND e.employmentstatus = 'Active'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM payroll.driverrateschedules dr
-                      WHERE dr.driverid = a.driverid AND dr.status = 'Approved'
-                  )
-            """),
-            {"bid": hq_branch_id},
-        )
-        if result.scalar_one() > 0:
-            pytest.skip("HQ has drivers without approved rates — skip clean check")
+        async with test_engine.connect() as db:
+            current_drivers = (await db.execute(text("""
+                SELECT driverid FROM core.driverassignments
+                WHERE companyid = :cid AND branchid = :bid AND effectivetoat IS NULL
+                ORDER BY driverid
+            """), {"cid": tenant.company_id, "bid": tenant.branch_a})).scalars().all()
+        assert set(current_drivers) == {tenant.driver_a_id, tenant.driver_a2_id}
 
-        resp = await _get_dashboard(client, hq_entry_token)
+        resp = await client.get(BASE, headers=scoped_user)
         assert resp.status_code == 200
-        branch_warnings = [
-            w for w in resp.json()["setup_warnings"]
-            if w.get("branch_id") == hq_branch_id
-        ]
-        # Should be empty for HQ
-        assert branch_warnings == []
+        data = resp.json()
+        assert data["scope"] == "Branch"
+        assert data["setup_warnings"] == []
+        assert [branch["branch_id"] for branch in data["branch_summaries"]] == [tenant.branch_a]
+        assert data["branch_summaries"][0]["active_driver_count"] == 2
 
 
 # ---------------------------------------------------------------------------
