@@ -1,6 +1,6 @@
 # FLUSSRA C2 IMPORT DESIGN — PAYROLL WORK DATA, VERSION 1
 
-**Status:** Draft for review, revised after an independent code review (2026-10-24). Implements `FLUSSRA_C2_IMPORT_PLAN.md`; point IDs (R, S, O, L, F, N, D) refer to that plan. Nothing here is built yet.<br>
+**Status:** Implementation design, with the agreed Slice A mission contract finalized on 2026-10-25. Implements [the C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md); point IDs (R, S, O, L, F, N, D) refer to that plan. A1, A2, A3 and Slice B are not implemented.<br>
 **Scope:** importing ordinary work quantities from an `.xlsx` or `.csv` file into one Draft (Prepared), Open or Returned payroll period. Status, Bonus, People and Rate imports are out of scope (O1–O3); the engine and tables below are shaped so they can be added without a second engine (F1, F2, F7).<br>
 **Prerequisite:** the Day Grid workspace (`GET /payroll/periods/{id}/entry-overview`, `frontend/src/pages/payroll/entry/`) is merged to `main` before Slice A starts. Facts in §1 marked † come from that work.
 
@@ -34,7 +34,7 @@
 
 ```
 file (.xlsx/.csv)
-  → read to text cells (bounded, in a worker thread)          import engine
+  → read to text cells (bounded, synchronous request)        import engine
   → map columns to the target contract                         import engine
   → resolve drivers, dates and values; validate                import engine, reads payroll
   → diff against current values → plan                          import engine, reads payroll
@@ -44,18 +44,30 @@ file (.xlsx/.csv)
 
 Staging never changes payroll (R9). The commit is the only payroll write and applies the same eligibility, definition, quantity and full-day-off rules as typing (R5, R6). The engine (batches, files, source rows, issues, driver matches) is generic; what is specific to payroll work data is the period target and its cells (F1).
 
+Slice A is one upload/preview milestone delivered in the strict order **A1 → review → A2 → review → A3 → review**, then Slice B (§10). In Slice A, staging and preview may automatically resolve exact stable identifiers and discover/explain unresolved identities, conflicts and other required decisions. They never perform user match confirmations, choose a replacement, exclude payroll data as a user decision, remove a Status or apply a quantity. The decisions and commit steps above belong to Slice B.
+
+### 2.1 Synchronous processing contract (D10)
+
+Slice A completes upload inspection, interpretation, mapping and preview work within the initiating HTTP request. No queues, workers, background import jobs, polling/status APIs or asynchronous-request architecture are introduced. A pending browser request is not a persisted processing job. Ordinary request I/O does not change this contract.
+
+Perform bounded file reading/parsing without holding a long-lived database transaction or period lock. Authorize access before accepting file content; recheck authority and the period's source-editable state in the short transaction that persists staging or replaces a preview. Serialize that transaction with finalization by locking the period before its import rows; never take a period lock after an import lock. This prevents a late upload or refresh from recreating detail after finalization has purged it. This staging lock does not change canonical payroll facts or invoke the Slice B mutation path.
+
+A1 must measure representative bounded files, including a valid file near the supported upper workload (§4.1). Record file shape/size, environment and configured request/resource budgets, observed request and parsing/staging time, relevant memory and temporary-storage behavior, and whether ordinary application requests remain responsive. Include dense selected-sheet and text/decompression-heavy cases that jointly respect all limits; do not assume every independent maximum can occur in one valid file. Record measured evidence and the review conclusion with A1 validation, not a promised performance number. A2 repeats the relevant benchmark with mapping, validation and comparison enabled.
+
+If the supported limits are unsuitable for synchronous processing, report the evidence and stop the affected mission's acceptance. An explicit design amendment is required before introducing background processing. Do not silently lower limits, truncate input, return partial results as a complete preview or build speculative asynchronous infrastructure.
+
 ## 3. Data model
 
 ### 3.1 Retirement of the dormant schemas (migration `0094`)
 A fail-closed preflight (pattern of `0071`) raises if any of `integration.IntegrationSyncRuns`, `integration.IntegrationConnections` or the seven `import.*` tables holds a row, or if any object other than `app.vw_ImportBatchSummary` and `integration.IntegrationSyncRuns` depends on them. Then, without CASCADE: drop the view, the two integration tables and the seven import tables. Integrations get their own design when built (N5). The new tables follow. Alembic head becomes `0094`; `scripts/validate.ps1`, `scripts/compare_schema_authorities.py` (`EXPECTED_HEAD`), `README.md`, the schema guard and `tests/test_durable_driver_schema.py` follow, and a test asserts the view and old tables are gone.
 
 ### 3.2 Tables (schema `import`)
-Company-scoped composite foreign keys throughout. Rows of a batch, its target, cells, issues and driver matches become immutable once the batch is `Completed` or `Cancelled` (trigger); the only later change allowed is purging file content (§3.3).
+Company-scoped composite foreign keys throughout. Rows of a batch, its target, cells, issues and driver matches become immutable once the batch is `Completed` or `Cancelled` (trigger); the only later changes allowed are the exact finalization purge of file content and detailed records, and its purge metadata (§3.3).
 
 **Generic engine**
-- **`import.Imports`** — `ImportID`; `CompanyID`; `BranchID` (nullable for future Company-level kinds); `ImportKind` (`PayrollWork`); `SourceKind` (`File`); `Status` (`NeedsMapping` | `NeedsReview` | `Completed` | `Cancelled`); `CorrelationID` UUID unique; `SheetName`, `HeaderRowNumber`, `DateOrder` (`DMY`|`MDY`|`YMD`|null), `DecimalSeparator` (reserved, `.` in version 1); `ColumnMapping` JSONB (source column index → target; definition targets carry both `PayrollPeriodDefinitionID` and `PayDefinitionID` so a later saved profile can be reused across periods); `MappingFingerprint`, `ContentFingerprint` (canonical hash of the mapped cell values, F6), `PlanFingerprint`; counts; `ReviewSummary` JSONB (written at commit, §3.3); created/completed/cancelled by and at.
+- **`import.Imports`** — `ImportID`; `CompanyID`; `BranchID` (nullable for future Company-level kinds); `ImportKind` (`PayrollWork`); `SourceKind` (`File`); `Status` (`NeedsMapping` | `NeedsReview` | `Completed` | `Cancelled`); `CorrelationID` UUID unique; `SheetName`, `HeaderRowNumber`, `DateOrder` (`DMY`|`MDY`|`YMD`|null), `DecimalSeparator` (reserved, `.` in version 1); bounded `InspectionMetadata` JSONB (sheet/header detection, selected-versus-detected interpretation provenance, CSV encoding/delimiter and inspection counts; not the workbook or all its rows); `ColumnMapping` JSONB (source column index → target; definition targets carry both `PayrollPeriodDefinitionID` and `PayDefinitionID` so a later saved profile can be reused across periods); `MappingFingerprint`, `ContentFingerprint` (canonical hash of the mapped cell values, F6), `PlanFingerprint`; counts; `ReviewSummary` JSONB (written at commit, §3.3); created/completed/cancelled by and at.
 - **`import.ImportFiles`** (1:1) — `ImportID`; `OriginalFileName`, `FileExtension`, `FileSizeBytes`, `FileSha256`; `FileContent` BYTEA nullable (≤ 10 MB); `ContentPurgedAtUtc`.
-- **`import.ImportSourceRows`** — `ImportSourceRowID`; `ImportID`; `SourceRowNumber` (as the user sees it), unique per import; `RawCells` JSONB holding only mapped and identifier columns; `ImportDriverMatchID` (nullable); `IsSkipped` (no non-blank mapped quantity, e.g. a totals row); `IsExcluded`.
+- **`import.ImportSourceRows`** — `ImportSourceRowID`; `ImportID`; `SourceRowNumber` (as the user sees it), unique per import; `RawCells` JSONB holding only mapped and identifier columns; `RowFingerprint` (§6); `ImportDriverMatchID` (nullable); `IsSkipped` (no non-blank mapped quantity, e.g. a totals row); `IsExcluded`.
 - **`import.ImportDriverMatches`** — one per distinct driver identifier in an import: `ImportID`; `IdentifierKind` (`DriverNumber`|`EmployeeKey`|`DriverName`); `NormalizedValue`, unique per import and kind; `DriverID` (FK `core.Drivers (DriverID, CompanyID)`, null when unresolved); `Resolution` (`ByDriverNumber`|`ByEmployeeKey`|`NameProposed`|`UserChosen`); `ConfirmedByUserID`/`ConfirmedAtUtc`. This is the structure saved aliases later reuse (L3, DWR-023).
 - **`import.ImportIssues`** — `ImportID`; optional source row, cell and column; `Severity` (`Error`|`Warning`); `IssueCode`; `Message`.
 
@@ -68,21 +80,24 @@ A cell carries its own `WorkDate`, so the cell model is independent of the file'
 
 Nothing references `payroll.PayrollPeriodDriverEligibility` rows by key: they are deleted and rebuilt.
 
+A1 creates the target schema, including the nullable/defaulted columns that later missions need. It stages the original file and bounded inspection/interpretation metadata in `Imports`/`ImportFiles`; it does not copy an entire unmapped workbook into `RawCells`. A2 populates mapped source rows, matches, cells, issues and fingerprints. Slice B alone populates user decisions, confirmations, applied identifiers, removal records and completed-import summaries. Schema availability is not permission to implement those later behaviors early.
+
 ### 3.3 Retention (D7)
 Detailed provenance (the file, its rows, cells, columns, issues and driver matches) serves Import and Review while the period can still change; it is not permanent payroll data.
 - **Until finalization:** everything is kept, so any imported value can be traced to its file, sheet, row and column.
 - **When the period is finalized** (in the finalize transaction, through a one-way call from the payroll lifecycle into the import module): the original file content, source rows, cells, issues and driver matches of every import of the period are deleted, including imports that were never completed.
 - **Kept permanently — the durable import record:** `import.Imports` (who, when, status, correlation id, counts), `import.ImportFiles` metadata (name, size, SHA-256, `ContentPurgedAtUtc`), `import.PayrollWorkImports`, `import.PayrollWorkStatusRemovals`, and a `ReviewSummary` JSONB on `import.Imports` (conflicts resolved each way, Statuses removed, day-off exceptions accepted, cells excluded, per-definition change counts). The accepted payroll values and their audit evidence (with the import's correlation id and reason) are payroll data and stay as they are.
 - The immutability trigger allows exactly this purge and nothing else.
-- `RawCells` keeps only mapped and identifier columns, so unrelated personal data in a user's sheet is never stored.
+- `RawCells` keeps only mapped and identifier columns, so unmapped columns are not duplicated into staged row/cell records. The retained original file can still contain those columns and is subject to the same finalization purge.
+
+**Primary owner: A1.** The finalization cleanup hook, its transaction ordering, the permitted immutability exception and its verification must exist before any upload is exposed as an available product workflow. It covers `NeedsMapping`, `NeedsReview`, `Cancelled` and, once Slice B exists, `Completed` imports. Never-completed imports are not exempt. Keep metadata and any existing summary without fabricating completion, applied changes or a review summary for an unfinished import. After purge, metadata can explain that the period is finalized; detail cannot be reconstructed by remapping or refreshing. A3 verifies this behavior through the connected workflow; Slice B verifies completed-import provenance through the same lifecycle. This requirement adds no import apply behavior to Slice A and changes no payroll calculation, source fact or finalization outcome.
 
 ## 4. Reading files and mapping
 
-- **Accepted:** `.xlsx` and `.csv` only; `.xlsm`, `.xls` and UTF-16 CSV are refused with a clear message. The 10 MB limit is enforced while streaming the upload.
-- **Safety:** `.xlsx` is read with openpyxl in read-only mode under `defusedxml`, after checking the total uncompressed size of the archive; parsing runs in a worker thread so it never blocks the server.
-- **Formula cells:** the cached value is used; a formula without a computed value is an error ("formula without a calculated value"), never a blank.
+- **Accepted:** `.xlsx` and `.csv` only; `.xlsm`, `.xls` and UTF-16 CSV are refused with a clear message. Validate actual content and its consistency with the allowed format; a filename extension or claimed MIME type alone is not sufficient. A renamed macro-enabled workbook is not an accepted `.xlsx` file.
+- **Safety:** `.xlsx` is read with openpyxl in read-only mode under `defusedxml`, with archive/XML validation and the limits in §4.1. Parsing follows the synchronous contract in §2.1; libraries must not evaluate formulas or follow external references to obtain values.
+- **Formula cells:** use the already stored cached value; Flussra does not evaluate or recalculate spreadsheet formulas, and does not promise that an existing cache is current. Preserve the distinction between a blank and a formula with no cached result. A missing required cached result is a validation error ("formula without a calculated value"), never a blank, zero or a guessed result.
 - **CSV:** UTF-8 with or without BOM, else Windows-1252; delimiter sniffed among `,` `;` and tab.
-- **Limits:** 20,000 data rows and 200 columns.
 - **Sheet and header:** every sheet is listed; the header row is the row with the most cells matching targets, else the first mostly-text row; the user can change it.
 - **Shape (version 1, D4):** one row per driver per work date. One-column-per-day files (`Mon | Tue | Wed …`) are a later reader and mapping mode that produce the same cells (§3.2); nothing in the tables, validation, plan or commit assumes the one-row-per-day layout.
 - **Targets:** `DriverNumber`, `EmployeeKey`, `DriverName`, `WorkDate`, one per operational period definition, or `Ignore`. Required: at least one driver identifier, the date, and one definition. Every non-empty source column must be mapped or explicitly set to `Ignore` (D3).
@@ -91,6 +106,30 @@ Detailed provenance (the file, its rows, cells, columns, issues and driver match
 - **Dates:** date-formatted cells are dates; a bare number under a date column is an error; text `YYYY-MM-DD` is unambiguous; for `d/m/y` versus `m/d/y` the order is inferred from values above 12 or from which order fits the period, else the user chooses it once; values with a time zone offset are refused.
 - **Template (S2):** `GET …/imports/template.xlsx` builds a workbook for the period: Driver number, Driver name, Date and one column per operational definition, one row per eligible driver per period day, every text written as a string (a name starting with `=` is never a formula). Its exact headers map automatically; the hidden period stamp (L5) is deferred.
 
+### 4.1 Hard limits and enforcement (D9)
+
+All limits are inclusive. Size labels use decimal bytes: 1 MB = 1,000,000 bytes and 1 KB = 1,000 bytes. Text length is measured as UTF-8 bytes of decoded text, not a count of characters.
+
+| Bound | C2 v1 maximum | Enforcement point |
+|---|---:|---|
+| Uploaded file size | **10 MB** | Count actual received file bytes while streaming, before unbounded multipart buffering/spooling or persistence; a declared content length is not sufficient |
+| Decompressed XLSX content | **50 MB** | Whole archive, across all entries; validate declared sizes before parsing and enforce actual decompressed bytes while reading |
+| Sheets per workbook | **10** | Workbook inspection, including hidden sheets, before selected-sheet processing |
+| Rows in the selected sheet | **20,000** | Bounded selected-sheet reading; includes the header and preceding rows |
+| Columns in the selected sheet | **50** | Bounded selected-sheet reading, including unmapped columns |
+| Cells in the selected sheet | **1,000,000** | Selected-sheet rectangular extent (rows × columns), including empty positions within that extent; do not count only mapped/non-empty cells |
+| Text content per individual cell | **8 KB** | Bounded text decoding, including headers and ignored columns; applies to workbook/CSV text cells, not only validated quantity fields |
+
+For CSV, the file is the one selected sheet. XLSX selected-sheet extents must be verified from actual content, not trusted worksheet dimension metadata; no silent dropping of out-of-range rows/columns. Reapply selected-sheet limits when the sheet/header interpretation changes. Whole-workbook decompression, sheet-count and per-cell text protections are not bypassed by selecting a smaller sheet. Generated templates must themselves fit these ingestion bounds; if a period's full template cannot fit, explain the limit rather than truncate it or emit an unimportable template.
+
+An over-limit or unsafe upload stops inspection/staging and returns an actionable rejection naming the exceeded bound and supported maximum (without leaking another tenant's data). Do not retain a partially accepted file/import on failure; release invocation-owned temporary resources. An invalid reinterpretation leaves the last accepted staging state unchanged. Accepted files can still contain mapped validation errors discovered in A2; distinguish those row/cell issues from rejecting an unsafe or over-limit file. A3 renders these failures and allows correction/re-upload, not a bypass or partial-file import.
+
+### 4.2 Interpretation contract (D12)
+
+A1 inspection and interpretation responses expose the selected sheet, selected/detected header row and values, detected CSV encoding/delimiter, and date-order state (selected, detected or still unresolved). The user can select a sheet/header and, when relevant, a date order before relying on validation results. Before `WorkDate` is mapped, do not invent a date interpretation: report that mapping is required. A2 owns date inference/validation against the mapped date column and period under the rules above; every preview carries the interpretation used. A3 displays this metadata with the results, including an unresolved/ambiguous state rather than a guessed date order. Changing interpretation invalidates dependent mapping/preview results and requires recomputation.
+
+Treat driver numbers, Employee keys and other identifier text as text where practical, preserving leading zeros. Do not invent padding or recover information Excel has already discarded; retain the existing numeric-identifier warning. Show that XLSX formula results are cached values and are not recalculated. These are file/column interpretation choices; they are not permission to confirm a Driver match or resolve a payroll conflict in Slice A.
+
 ## 5. Validation (D3)
 
 - An **error** is incoming data whose destination — driver, date, pay item, target column or any other required destination — Flussra cannot determine with confidence.
@@ -98,6 +137,8 @@ Detailed provenance (the file, its rows, cells, columns, issues and driver match
 - A **warning** is understood data that looks unusual and needs no choice.
 
 Errors and open decisions prevent the commit. The user resolves each one or deliberately excludes the affected data and continues with the rest. Warnings never block.
+
+The resolution actions described in §§5.2, 5.4 and 5.5 are Slice B behavior. A2 discovers, classifies and explains these cases; A3 displays them as unresolved. Slice A does not submit decisions, confirm matches, accept exceptions or exclude rows/cells to resolve a case.
 
 ### 5.1 File and mapping
 Unreadable or unsafe file, limits exceeded, no header, missing required targets, two columns on one target, a non-empty column left unmapped.
@@ -109,6 +150,10 @@ Unreadable or unsafe file, limits exceeded, no header, missing required targets,
 - Several identifier columns mapped and disagreeing on a row → error.
 - A numeric identifier that may have lost leading zeros → warning.
 - Per row, the DriverAssignment is the Driver's assignment eligible on the row's date, by the exact Day Grid rules: snapshot window plus live lifecycle for a new value; existing-source rescue allowed for changing or clearing a value. No eligible assignment on that date → error ("not in this payroll on …").
+
+**DWR-023 ownership:** A2 owns the C2 v1 identity resolver and the per-import `ImportDriverMatches` record. Read [DWR-023](FLUSSRA_DEFERRED_WORK_REGISTER_EN.md#dwr-023--external-driver-identifiers-and-aliases-are-deferred-to-c2-import) together with product-plan L3: resolve the file's identifiers through the existing company-scoped `DriverNumber`/`EmployeeKey` and permanent Driver, then the effective DriverAssignment for the Branch/date. Names produce proposals, not confirmations. An unknown source-system identifier remains unresolved; do not invent a master-data identifier, guess a Driver or create an external alias. Slice B owns user choices and confirmations within this import. Remembering source-system + external-key → Driver aliases across imports remains the later L3 capability; A1–A3 do not build or close that capability.
+
+DWR-023's `import.ImportRows.MatchedDriverID` current-state reference describes the dormant pre-`0094` schema, not the new resolver's authority. A1 retires that schema under §3.1 and updates the register's current-state reference when the retirement actually lands; A2 uses the replacement model above. Do not resurrect `ExternalDriverID` or `core.DriverAliases`, and do not label DWR-023 implemented merely because its design responsibility has been assigned.
 
 ### 5.3 Dates and values
 - An unreadable date, or a date that is not a period day → error.
@@ -149,10 +194,17 @@ The diff reads current values with a lean set-based reader (active lines, entry 
 
 - **Decisions (D1, D2):** every conflict needs `UseImported` or `KeepExisting`, per cell or for all similar conflicts (same definition, or the whole import). Each decision records the value it was made against; if a refreshed preview shows a different existing value, the decision is cleared and the cell asks again.
 - **Status and day-off decisions** (§5.4, §5.5) apply only to cells whose imported work would be written (a `New` cell, or a `Conflict` decided `UseImported`). A `StatusDecision` records the held Status it was made against; a refresh showing a different held Status clears it.
-- **Plan fingerprint:** SHA-256 over every reviewed, non-excluded cell — target, incoming value, `ExpectedCurrentQuantity`, held full-day-off Status, outcome and every decision — plus the driver confirmations. Returned with the preview, sent with the commit.
+- **Row and import fingerprints (A2):** `RowFingerprint` identifies a canonical mapped source row with its identifiers, date, quantities and interpretation/mapping context. `MappingFingerprint` identifies that context; `ContentFingerprint` identifies canonical mapped import content (F6), not a browser page. Define stable ordering, identifier/text handling, exact Decimal representation and blank/zero distinctions; generated database ids and timestamps must not make identical content unstable. The A1 file SHA-256 is a separate byte-level digest. A2 records and verifies these canonicalization rules.
+- **Plan fingerprint:** SHA-256 over the whole preview's target cells — target, incoming value, `ExpectedCurrentQuantity`, held full-day-off Status, outcome and every decision — plus driver confirmations and the interpretation/mapping context. A2 produces it with decisions/confirmations unresolved; Slice B extends it with the user's decisions and exclusions. Returned with the preview, sent with the Slice B commit. Pagination/filtering never changes fingerprint scope. Mapping, interpretation, source or relevant current-payroll changes require preview recomputation.
 - **Refresh:** an explicit refresh re-runs resolution, validation and the diff against current payroll.
 - **Commit-time revalidation (S10):** under the locks the commit re-runs the same resolver, validator and diff and recomputes the plan fingerprint. A difference refuses the commit with 409 `IMPORT_PLAN_STALE`, lists the changed cells, and writes nothing; the import stays in review.
-- **Same file again (S11):** an upload whose `FileSha256` or `ContentFingerprint` equals a `Completed` import of the same period is flagged ("already imported at … by …"); the diff yields no changes anyway.
+- **Same file again (S11):** an upload whose `FileSha256` or `ContentFingerprint` equals a `Completed` import of the same period is flagged ("already imported at … by …"). A2 still compares current facts rather than assuming they are unchanged because a hash matches. Slice B owns the S11 no-reapply behavior; this flag does not authorize overwriting later manual changes.
+
+### 6.1 Bounded preview API (D11)
+
+The import detail response carries bounded metadata, interpretation, whole-import summary counts and page information/links. It must not embed an entire workbook or unbounded staged rows/issues. A2 supplies paginated preview rows and paginated issues, with filters for errors, warnings and conflicts. Results retain source row/column positions, incoming and current values where applicable, and the reason for each issue or unresolved match. Whole-import counts remain distinguishable from filtered/page counts. Unresolved decisions are visible, not executable actions.
+
+A2 chooses concrete page parameters, default sizes, hard maximum sizes and serialized-response bounds using existing API conventions and measured behavior. Record those numeric bounds in the API contract and verification before A2 is accepted; omitted or excessive page-size values cannot create an unlimited response. Use deterministic ordering and associate every page with the same preview fingerprint/version; a refresh must not silently combine old and new pages. Count and fingerprint the complete import on the server, not just the displayed subset. Verify that traversing pages/filter results loses or duplicates no rows/issues, and that every page is company/Branch scoped. No processing-status polling API is added.
 
 ## 7. Commit
 
@@ -179,38 +231,114 @@ A new payroll function applies an import plan to a pre-authorized, locked period
 
 ## 8. API
 
-| Method and path | Permission | Purpose |
+| Method and path | Permission | Primary delivery owner and purpose |
 |---|---|---|
-| `POST /payroll/periods/{period_id}/imports` (multipart file) | `payroll.entry` | Create an import: store and read the file, list sheets, suggest header and mapping |
-| `GET /payroll/periods/{period_id}/imports/template.xlsx` | `payroll.view` or `payroll.entry` | The period's template |
-| `GET /payroll/periods/{period_id}/imports` | `payroll.view` or `payroll.entry` | Import history of the period |
-| `GET /payroll/imports/{import_id}` | `payroll.view` or `payroll.entry` | Import detail: mapping, preview or receipt |
-| `PUT /payroll/imports/{import_id}/mapping` | `payroll.entry` | Sheet, header row, date order, column mapping → preview |
-| `PUT /payroll/imports/{import_id}/decisions` | `payroll.entry` | Driver confirmations and choices, conflict decisions, full-day-off Status decisions per driver, the day-off exception answer, exclusions → preview |
-| `POST /payroll/imports/{import_id}/refresh` | `payroll.entry` | Re-run the preview against current payroll |
-| `POST /payroll/imports/{import_id}/commit` (body: plan fingerprint) | `payroll.entry` | Commit (§7) |
-| `POST /payroll/imports/{import_id}/cancel` | `payroll.entry` | Cancel an import not yet completed |
+| `POST /payroll/periods/{period_id}/imports` (multipart file) | `payroll.entry` | A1: bounded file inspection/staging, sheet list and header suggestion. A2 adds column-map suggestions; no payroll write |
+| `GET /payroll/periods/{period_id}/imports/template.xlsx` | `payroll.view` or `payroll.entry` | A2: the period's bounded template |
+| `GET /payroll/periods/{period_id}/imports` | `payroll.view` or `payroll.entry` | Slice B: period import-history presentation; A3 does not implement history |
+| `GET /payroll/imports/{import_id}` | `payroll.view` or `payroll.entry` | A1: bounded staging/interpretation metadata; A2: bounded preview pages and issue access (§6.1); Slice B: receipt |
+| `PUT /payroll/imports/{import_id}/mapping` | `payroll.entry` | A1: interpretation-only fields (sheet, header, date-order selection). A2 extends it with column mapping and preview computation |
+| `PUT /payroll/imports/{import_id}/decisions` | `payroll.entry` | Slice B only: Driver confirmations/choices, conflict decisions, Status/day-off decisions and exclusions |
+| `POST /payroll/imports/{import_id}/refresh` | `payroll.entry` | A2: re-run preview against current payroll; no decisions or writes to payroll |
+| `POST /payroll/imports/{import_id}/commit` (body: plan fingerprint) | `payroll.entry` | Slice B only: commit (§7) |
+| `POST /payroll/imports/{import_id}/cancel` | `payroll.entry` | A1: cancel the whole staged import; never resolve a row/cell decision or apply payroll |
 
 Every route resolves the import's period through `get_period_by_id` (Company and branch scope) and is listed in `route_inventory.py`; Driver/Self subjects are refused. An import whose period is no longer source-editable is shown as no longer committable.
 
-## 9. Frontend
-Under `frontend/src/pages/payroll/entry/import/`. The entry page gains "Add payroll data" (upload, or download the template) and an "Imports" history list. Flow: upload → sheet and header → column mapping (and date order when needed) → review (errors; driver confirmations and choices; conflicts with per-cell and bulk decisions; the full-day-off Status list of affected drivers, once each, none selected, with select all; the day-off exception question and, once accepted, its notice; warnings; row and cell exclusion) → impact summary with "Import N changes" and the number of Statuses to remove → receipt with links to the Day Grid and the payroll preview.
+The shared mapping resource has an explicit staged contract: A1 accepts and persists interpretation fields only, and reports unsupported column-mapping/decision input rather than ignoring it. It does not depend on A2 validation to inspect a file. A2 adds the mapping/preview portion after A1 review. Inspection metadata and samples are bounded in A1; A2 fixes the detailed preview/issue paging contract in §6.1. Neither mission exposes Slice B decision/commit endpoints or makes a batch `Completed`. Cancellation is whole-batch lifecycle behavior, not a shortcut for excluding problematic rows.
 
-## 10. Build order
-0. Merge the Day Grid workspace and this plan to `main`.
-1. **Slice A — upload and preview, no payroll write:** migration `0094`; reading, mapping, driver matching, validation, the set-based reader and diff, preview, refresh, template; the mapping and review screens.
-2. **Slice B — decisions and commit:** decisions and confirmations, the quantity write path, commit with revalidation, evidence provenance, SourceType rules, receipt and history.
+## 9. Frontend
+Under `frontend/src/pages/payroll/entry/import/`. **A3 connects only Upload → Mapping → Preview**, using A1/A2 APIs: file selection/template download; selected sheet/header/date interpretation; column mapping; bounded preview rows, summaries and issue filters; refresh, recoverable request errors and correction/re-upload. Do not render a successful upload as an applied import, or offer nonfunctional confirm/overwrite/exclude/apply controls. Display unresolved name proposals, conflicts, full-day-off Status cases and normal-day-off cases with their reasons; their decision actions remain unavailable in Slice A. No payroll value or Status is changed.
+
+**Slice B completes the existing v1 flow:** Driver confirmations/choices; per-cell/bulk conflict decisions; the full-day-off Status list of affected drivers once each, none selected, with select all; day-off acceptance/exclusion; row/cell exclusions; impact summary with "Import N changes" and Status-removal count; atomic commit; receipt with Day Grid/payroll-preview links; and period import history. Keeping these controls downstream does not remove them from v1.
+
+## 10. Build order and mission gates (D8, D13)
+
+The Day Grid workspace and the C2 product/design documents are prerequisites. **Slice A remains one feature milestone, implemented as three sequential, independently reviewable missions: A1 → A2 → A3.** Finish the scope, verification and review of A1 before beginning A2; finish and review A2 before beginning A3. Slice B begins only after A3 completes and is reviewed. Landing a schema or route does not authorize a later mission's behavior or public upload exposure before the retention gate.
+
+### 10.1 A1 — Safe upload and staging
+
+**Dependencies:** the merged Day Grid/whole-period-read baseline; §§2–4 and §8 of this design; existing Company/Branch/period authorization and finalization lifecycle. A1 must not depend on an A2 mapper, A3 UI or Slice B apply function to meet its gate.
+
+**Scope:**
+- Migration `0094`: the fail-closed dormant-schema retirement and new staging schema in §3, together with the named single-head/schema-authority/seed-reset compatibility updates in §3.1.
+- Synchronous CSV/XLSX ingestion, actual-content validation, all seven hard limits and their failure behavior (§4.1), safe XML/archive handling and resource cleanup.
+- Original-file staging, file digest, bounded inspection metadata, sheet selection, header detection/selection, and the interpretation-only API portion in §8. Preserve text identifiers and formula/cache distinctions for A2; expose interpretation state as specified in §4.2 without attempting payroll mapping.
+- Required authentication, Company/Branch/period access, non-driver boundary, whole-batch cancellation and non-editable-period handling. Register every introduced route in the authorization inventory.
+- Finalization cleanup for all staged-import states, the precise immutability exception and protection against upload/refresh racing finalization (§3.3). A1 owns this gate before upload exposure; no Slice B apply behavior is needed for cleanup.
+- The bounded representative/near-upper-workload synchronous benchmark and evidence in §2.1.
+
+**Non-goals:** column mapping and business preview computation; Driver matching or user confirmation; conflict/exception/exclusion decisions; payroll writes, calculation, SourceType mutation, commit, receipt/history UI; saved external aliases; queues, workers, background jobs or polling/status APIs; the connected UI (A3).
+
+**Completion/acceptance gate:** files can be safely uploaded, inspected, interpreted and staged without changing payroll or any canonical payroll facts. Each hard limit has an enforcement point and actionable failure. Failed ingestion leaves no partial file/import; failed reinterpretation preserves prior accepted state. The original file is retained only under D7. Finalization purges its detail even if it never advanced beyond `NeedsMapping`, without fabricating completion or affecting payroll outcomes. Benchmark evidence supports the synchronous limits; unsuitable evidence stops acceptance pending an explicit design amendment.
+
+**Verification:** focused parser tests for accepted/refused content, malformed archives/XML, all caps at and beyond the boundary, workbook versus selected-sheet scope, UTF-8 text-byte limits, misleading dimensions, hidden sheets, encodings, header changes, text identifiers and formulas with/without caches. API/database checks prove tenant isolation, non-driver refusal, allowed staging/cancel transitions, atomic rejection, zero canonical-payroll mutations, required cleanup and its rollback behavior, and serialization with finalization. Verify a fresh `0094` chain, current schema constraints, canonical seed/reset and SQL/Alembic equivalence. Record measured benchmark inputs/environment/timing/resources and the review result. Verify inspection responses/samples are bounded. A1 is handed off with these contracts and evidence, not a partially functioning decision/apply path.
+
+### 10.2 A2 — Mapping and accurate preview
+
+**Dependencies:** A1 completed and reviewed, including its schema, bounded reader, interpretation API, access and retention contracts. Reuse those contracts; do not create a second importer or identifier authority.
+
+**Scope:** exact automatic/manual column mapping and explicit Ignore; DWR-023's current-design per-import resolution (§5.2); date interpretation, typed/domain validation, eligibility and duplicate detection; stable mapped row/import/context fingerprints; set-based current-value reads and comparison (§6); preview refresh and completed-file duplicate notices; bounded template generation; the paginated rows/issues, summary counts and error/warning/conflict filters in §6.1. Expose invalid rows, unresolved identities, warnings, conflicts, incoming values and current values accurately. Detecting an outcome is not accepting a decision.
+
+**Non-goals:** user-chosen Driver matches or confirmations; keep/replace choices, exception acceptance, row/cell exclusions and other resolution actions; payroll mutation/commit, evidence application, SourceType changes, receipt/history; saved source-system aliases across imports; connected UI (A3); asynchronous processing.
+
+**Completion/acceptance gate:** preview accurately represents the payroll facts that would be affected, including invalid rows, unresolved identities, warnings, conflicts and current-value comparisons. Every result carries the interpretation and preview identity used. Summary, filtering and paging agree with the complete import; no page/filter changes the hash scope or silently drops issues. Numeric default/max page sizes and response bounds are chosen, measured, documented and enforced before acceptance. Refresh handles relevant live changes without applying or deciding anything. Template output obeys the ingestion contract. The extended bounded workload remains suitable for synchronous requests.
+
+**Verification:** database-free cases for mapping/normalization, Decimal precision, blank versus zero, date ambiguity, missing required formula caches, in-file duplicates and deterministic fingerprints. Focused integration cases cover stable identifiers, same-name proposals, disagreeing identifiers, unresolved external values, multiple assignments of one Driver, lifecycle eligibility/rescue, no cross-tenant leakage, existing-zero/current-value comparison, stale refresh, generated templates and completed-file notices. Traverse all pages and filters against expected whole-import counts; exercise absent/excessive page sizes, maximum responses and refresh between pages. Prove no user decision, confirmation, canonical fact or payroll evidence is written. Recheck scoped access and finalization-purge behavior on A2 rows/issues/matches and record the extended benchmark.
+
+### 10.3 A3 — Connected user flow
+
+**Dependencies:** A2 completed and reviewed; stable A1 inspection and A2 bounded-preview contracts; A1 retention cleanup is working before upload becomes an available product workflow.
+
+**Scope:** connect the period entry page to **Upload → Mapping → Preview** (§9), including template download, selected sheet/header/date interpretation, useful request/validation errors, paginated rows/issues and error/warning/conflict filters. Display source coordinates, incoming/current values, unresolved identities and decision reasons. Provide correction/re-upload, supported whole-import cancel, interpretation/mapping correction and synchronous refresh/retry states. During a pending request, show request-local progress/loading; never poll a background job. Failed responses cannot be shown as successful staging or an applied import; after an uncertain response, use available import metadata or correction/re-upload rather than assume a commit occurred.
+
+**Non-goals:** deciding any match, conflict, replacement or exception; row/cell exclusion to resolve a case; confirm/apply/commit controls; payroll mutation, receipt/history; asynchronous status workflows or inline source-value editing. Keep the existing complete v1 decision flow for Slice B, rather than adding dead controls to Slice A.
+
+**Completion/acceptance gate:** an authorized user can go from file selection through a reliable preview, see the interpretation used and inspect all relevant outcomes through bounded pages/filters, recover from supported failures, and refresh after changes. The workflow cannot decide or apply payroll changes. Upload exposure is blocked until retention/access gates are satisfied. Slice A completion means preview completion, not a completed payroll import.
+
+**Verification:** connected UI/API scenarios for an accepted file, template round-trip, interpretation correction, bad/over-limit file, invalid/unresolved/conflicting rows, warnings, empty/zero outcomes, pagination/filtering, failed requests and refresh. Verify inaccessible periods and Driver/Self users cannot use the workflow. Verify finalized periods cannot recreate purged details. Prove payroll facts remain unchanged from file selection through preview/cancel. Include a representative near-bound workload so the UI neither requests nor renders the entire workbook at once.
+
+### 10.4 Slice B — Decisions and commit, downstream
+
+**Dependency:** all of A1, A2 and A3 completed and reviewed. Slice B alone enables user match choices/confirmations, conflict/overwrite decisions, full-day-off Status removal choices, configured-day-off exception decisions, exclusions, final impact confirmation and applying the import. It owns the quantity write path, lock-ordered atomic commit with revalidation, evidence/provenance links, SourceType rules, idempotent completion, receipt and import history. It verifies completed-import retention through the lifecycle A1 already provides. §§5.4–5.5 and §7 describe these downstream behaviors, not permission to build them in A1–A3.
+
+### 10.5 Requirement ownership and cross-cutting contracts
+
+Each row has one primary delivery owner. A later mission's consumption or verification is not a second implementation owner. Cross-cutting contracts remain binding in every mission that uses them.
+
+| Existing Slice A requirement / contract | Primary owner | Consumer or verification boundary |
+|---|---|---|
+| `0094`, dormant retirement, target schema, schema/head/seed-reset updates (§3.1) | A1 | A2/B populate only their assigned fields |
+| CSV/XLSX reading, real content checks, hard limits, synchronous parsing and failure cleanup (§§2.1, 4.1) | A1 | A2 reuses the reader; A3 displays failures |
+| File staging and byte-level file fingerprint (§3.2, F6) | A1 | A2 adds mapped-content fingerprints |
+| Sheet/header selection and interpretation metadata contract (§4.2, S3) | A1 | A2 adds mapped-date inference; A3 renders the same metadata |
+| Authorization, tenant/Branch scoping, non-driver boundary, editable-period guards (§8) | A1 cross-cutting contract | A2 applies to every added page/route; A3 verifies connected access |
+| Finalization purge and its serialization/immutability exception (D7, §3.3) | A1 cross-cutting contract | A2 adds detail coverage; A3 checks exposure; B adds completed-import verification |
+| Bounded synchronous intake benchmark (§2.1) | A1 cross-cutting contract | A2 measures added preview work; A3 checks connected workload |
+| Column mapping, exact suggestions, Ignore and mapped row storage (S4, F4) | A2 | A3 supplies mapping controls, not payroll decisions |
+| Driver/external identifier resolution required by v1, per-import matches (S5, DWR-023, L3) | A2 | A3 displays unresolved proposals; B owns choices/confirmations; saved aliases stay deferred |
+| Mapped date inference, type/unit/date/eligibility checks, duplicates and skipped rows (S6, S8, §5) | A2 | A1 preserves parser distinctions; A3 displays results |
+| Set-based current-value read, blank/zero and conflict comparison (§6, S7) | A2 | A3 displays; B resolves conflicts |
+| Row, mapping, content and whole-preview fingerprints (§6, F6) | A2 | A3 preserves preview identity; B revalidates before commit |
+| Refresh and completed-file notices (S10/S11 preview portions) | A2 | A3 refreshes/displays; B owns commit-time revalidation and no-reapply behavior |
+| Period template (S2), bounded preview rows/issues, summaries and filters (S8/S9 preview portions) | A2 | A3 consumes bounded responses |
+| Upload → Mapping → Preview screens, interpretation display, error/recovery states and end-to-end flow (§9) | A3 | Uses A1/A2 contracts without duplicating their rules |
+| Choices, confirmations, resolution/exclusion actions, impact confirmation and all apply behavior | Slice B | Excluded from every Slice A mission |
 
 ## 11. Tests (behavior-named)
-Reading: encodings, delimiters, limits while streaming, refused types, unsafe archives, formula without value, number grammar and precision, date order inference and refusal, header choice. Mapping: automatic only on exact matches, unmapped columns. Drivers: each resolution path, name proposals needing confirmation, disagreeing identifiers, multiple assignments of one Driver, eligibility with and without rescue, no leakage outside the period. Validation: every error, decision and warning; blank versus zero; duplicates; skipped rows. Review: the full-day-off list shows each affected driver once with nothing selected; selecting removes the Status and accepts the work, excluding drops the work, unresolved blocks; the day-off question accepts with a notice, excludes, or blocks when unanswered. Plan: the diff table, existing 0 lines, decision invalidation (values and held Statuses), fingerprints, refresh. Commit: writes exactly the decided changed cells as `Import`; removes exactly the chosen full-day-off Statuses before writing work, keeping notes; never touches other Statuses or notes; evidence carries the correlation id and the cell links the event; stale plan refused with no writes; non-editable period refused; idempotent repeat; lock order. Retention: finalizing a period purges file content and row/cell/issue/match detail of its imports and keeps the durable record and summary. Day Grid save and public line routes unchanged except the forced `Manual`. Migration: fail-closed preflight, view and old tables gone, schema-authority equivalence at `0094`. Route inventory.
+
+The mission-specific checks in §10 are the acceptance evidence for A1–A3. Use focused parser/unit, schema/API, authorization and connected-workflow checks appropriate to each change, with behavior-named tests.
+
+Slice B additionally verifies choosing/confirming matches; the full-day-off list once per Driver, nothing selected by default; selecting removes exactly the chosen Statuses, preserves notes and accepts the work; exclusions do not apply data; configured-day-off answers accept with a notice, exclude, or block when unanswered; value/held-Status decision invalidation; commit-time stale refusal with no writes; source-editable-state refusal; exactly decided changed quantities, idempotent repeat and lock order; permanent correlation/evidence and SourceType behavior; finalization purge of completed imports with durable record/summary preserved. Day Grid/public line route regressions include the forced `Manual` behavior only when Slice B implements it.
 
 ## 12. Deliberate deviations from the plan
-- The plan's lifecycle names `ANALYZING`, `READY`, `COMMITTING` and `FAILED` are not persisted: reading and committing each happen inside one request, a failed request rolls back, and "ready" is a computed property of a `NeedsReview` import with no blocking items.
-- The template's hidden period stamp (L5) is deferred; exact headers already map the template.
+There are no differing Slice A instructions between this design and the product plan. Both use synchronous requests and persisted `NeedsMapping`, `NeedsReview`, `Completed` and `Cancelled` states; readiness is computed, not a background-job state. Slice A never completes an import. Both defer the template's hidden period stamp under L5; exact headers already map the template. Slice A mission completion does not mark a C2 product capability or DWR-023 implemented before its code and verification exist.
 
 ## 13. Decisions
-Recorded as D4–D7 in `FLUSSRA_C2_IMPORT_PLAN.md` §11 (decided 2026-10-24):
+The original implementation decisions D4–D7 are recorded in `FLUSSRA_C2_IMPORT_PLAN.md` §11 (decided 2026-10-24):
 - **D4** — version 1 reads one row per driver per day; other layouts come later as reader modes (§4, §3.2).
 - **D5** — work on a full-day-off Status day is resolved inside Review, per affected driver (§5.4).
 - **D6** — work on a normal day off is accepted as a reviewed exception or excluded; unanswered blocks (§5.5).
 - **D7** — detailed provenance and the original file are kept until finalization, then purged; the durable import record stays (§3.3).
+
+The 2026-10-25 delivery/operational decisions are recorded as D8–D13 in the product plan §11: sequential A1/A2/A3 delivery (§10); hard limits and actual-content checks (§4.1); synchronous processing with measured evidence (§2.1); bounded preview pagination (§6.1); visible spreadsheet interpretation/cached-value semantics (§4.2); and the Slice B decision/apply boundary plus A1 retention responsibility (§§3.3, 9–10).
