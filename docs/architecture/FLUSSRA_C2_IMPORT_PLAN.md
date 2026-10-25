@@ -34,16 +34,16 @@ The idea the whole feature rests on:
 |---|---|
 | R1 | The file is flexible, the target is strict. Users bring their own Excel; Flussra adapts to it. |
 | R2 | No silent changes. Nothing is overwritten without being shown and decided. |
-| R3 | Every imported value is traceable to its batch, file, sheet, row and column while its period can change; after finalization, to its durable import and audit record (D7). |
-| R4 | The period is the import schema: not the current settings, not a fixed template. Importing into an older period uses that period's frozen Pay Items. |
-| R5 | Import never calculates pay. It supplies driver, date, Pay Item and quantity; the calculation engine does the rest. |
-| R6 | Import never creates master data. Unknown drivers or columns are reported, never created. |
+| R3 | PayrollWork/File values are traceable to their import, file, sheet, row and column while the period can change; after finalization, to the durable import and payroll audit record (D7). Other sources/targets define their own provenance and retention contracts. |
+| R4 | For PayrollWork, the period is the target schema: not current settings or a fixed template. Importing into an older period uses that period's frozen Pay Items. Other Import kinds need not have a PayrollPeriod. |
+| R5 | PayrollWork import never calculates pay. It supplies driver, date, Pay Item and quantity; the calculation engine does the rest. |
+| R6 | PayrollWork v1 never creates Driver, Employee, PayDefinition or other master data. Future People Import may create/update only the entities permitted by the locked Workforce contract, through canonical Workforce authority. No import silently creates Access/User accounts or a parallel source of truth. |
 | R7 | Pay Items are never imported. They are configured in Flussra only. A bulk Pay Item tool, if ever needed, is a separate configuration feature and not part of Import. |
 | R8 | A Status in a file (for example PTO) belongs to the Status domain and never becomes a Pay Item. |
 | R9 | Everything before confirmation is staging, not payroll truth. |
 | R10 | All or nothing. There is no accidental partial import; the user may deliberately exclude rows. |
-| R11 | Identifying a driver is separate from that driver being eligible for the period and date. Both are checked. |
-| R12 | Blank is not zero. Blank means the file gave no value; zero means it gave zero. |
+| R11 | PayrollWork Driver identification is separate from eligibility for the period/date. Both are checked by that target contract. Generic source records have no mandatory Driver match. |
+| R12 | For PayrollWork quantities, blank is not zero: blank means the file gave no value; zero means it gave zero. |
 | R13 | Suggestions may assist mapping, but nothing decides payroll automatically. Anything ambiguous needs a person. |
 
 ## 3. Version 1 — included (S)
@@ -81,7 +81,7 @@ These are the complete C2 v1 capabilities, not permission to deliver them all in
 
 These are inclusive limits using decimal bytes (1 MB = 1,000,000 bytes; 1 KB = 1,000 bytes). Cell text is measured in UTF-8 bytes after decoding. Selected-sheet cells include the rectangular extent, not just non-empty/mapped cells. CSV is one selected sheet. Actual content is validated; the filename extension alone is insufficient. [Design §4.1](FLUSSRA_C2_IMPORT_DESIGN.md#41-hard-limits-and-enforcement-d9) defines streaming/decompression enforcement, interpretation changes and actionable rejection without truncation or partial acceptance.
 
-Slice A remains synchronous: each request finishes its bounded processing before returning. No queues, workers, background import jobs, polling/status APIs or asynchronous-request architecture are added. A1 benchmarks representative files, including near the supported upper workload, and records observed time/resource behavior against the execution environment's budgets. A2 measures the added preview work. Unsuitable evidence requires an explicit design amendment before background processing; it does not authorize speculative infrastructure or silently reduced limits.
+Slice A remains synchronous: each request finishes its bounded processing before returning. Blocking parsing uses bounded in-process thread offload while that request remains pending; it must not block the asyncio event loop. No queues, background import workers/jobs, polling/status APIs or asynchronous-request architecture are added. A1 benchmarks representative files, including near the supported upper workload, and records time/resources plus ordinary-request responsiveness. A2 measures the added preview work. Unsuitable evidence requires an explicit design amendment before background processing; it does not authorize speculative infrastructure or silently reduced limits. C2 v1 limits are operating/security policy, not the shared engine's permanent architectural capacity.
 
 Preview responses contain summary counts and bounded, paginated rows/issues, with filters for errors, warnings and conflicts. Never return the entire workbook or all staged rows/issues in one response. A2 selects and records numeric default/max page sizes and response bounds from existing API conventions and measurements before its review gate. The user sees the selected sheet, selected/detected header and relevant date interpretation before relying on validation. Identifiers remain text where practical. Formula results use existing cached values only; Flussra does not evaluate or recalculate formulas, and missing required cached results remain validation errors.
 
@@ -143,10 +143,10 @@ Slice A covers C1–C4 and the discovery/validation/display portions of C5–C8.
 |---|---|---|
 | F1 | One shared engine; each import type supplies its own contract (Period now, then People and Rates) | People and Rate imports without a second system |
 | F2 | Staging separate from payroll | Future integrations enter the same staging engine as files |
-| F3 | Value-level provenance (batch, file, sheet, row, column) until finalization, then the durable import and audit record (D7) | Tracing, explanation, audit |
-| F4 | Every batch stores the column and driver mapping it used | L1 and L3 become reuse of stored data |
+| F3 | Source/target-specific provenance: File coordinates and PayrollWork value/evidence links until payroll finalization, then durable import/audit metadata (D7) | Other source/target kinds supply their own provenance and retention trigger |
+| F4 | File/PayrollWork imports store their interpretation and target column/Driver mapping in the owning specialized contract | L1 and L3 become reuse of stored data without Driver/File fields in the generic core |
 | F5 | Before and after values stored for every change | A later safe Undo that never reverts over newer manual edits |
-| F6 | File fingerprint and canonical content fingerprint | S11 duplicate protection and L5 drift detection |
+| F6 | File byte fingerprint on the File source; versioned semantic content/plan fingerprints on the owning target | S11 duplicate protection and L5 drift detection, separate from creation idempotency and resource revision |
 | F7 | Status data routed to the Status domain | Status import without touching Pay Items |
 
 ## 9. What follows (N)
@@ -193,10 +193,17 @@ D1–D7 were decided on 2026-10-24. D8–D13 record the settled delivery and ope
 | D7 | The original file and detailed provenance (sheet, row, column) serve Import and Review until the period is finalized; they are not permanent payroll data. After finalization Flussra keeps the accepted payroll data and a durable import and audit record, not the file or row/column detail. |
 | D8 | Slice A is one milestone delivered as A1 → review → A2 → review → A3 → review; only then begins Slice B. Each mission has a separate implementable scope and acceptance gate in the design. |
 | D9 | Hard caps are 10 MB upload, 50 MB decompressed XLSX, 10 sheets, 20,000 selected-sheet rows, 50 selected-sheet columns, 1,000,000 selected-sheet cells and 8 KB text per cell; validate actual file content and reject violations without truncation or partial acceptance. |
-| D10 | Slice A is synchronous. A1 must produce bounded representative/near-upper-workload timing/resource evidence; A2 measures preview work. Unsuitable evidence requires an explicit design amendment before queues, workers or background processing. |
+| D10 | Slice A is synchronous from the caller's perspective; bounded in-process thread offload protects the event loop while the same request waits. A1 produces representative/near-upper time/resource/responsiveness evidence; A2 measures preview work. Queues/background jobs require an explicit design amendment. |
 | D11 | Preview is bounded: whole-import summaries, paginated rows/issues and error/warning/conflict filters. A2 records and enforces numeric page/response bounds based on existing conventions and measurement. |
 | D12 | Show selected sheet, selected/detected header and relevant date interpretation before results are relied upon. Preserve identifier text where practical; use cached formula values without evaluation/recalculation, and report missing required caches as validation errors. |
 | D13 | Slice A may resolve exact stable identifiers automatically and discover/display unresolved matches/conflicts, but makes no user decisions, confirmations, user-directed resolutions or payroll changes. Those actions remain in Slice B. A1 owns D7 cleanup before upload exposure, including never-completed imports, without importing Slice B apply behavior. |
+| D14 | The shared Import envelope owns neutral identity/scope/kinds/lifecycle/revision/idempotency/version metadata. File sources own file/interpretation/provenance; PayrollWork targets own period/mapping/Driver matching/plan state. Source records/issues are neutral, and multiple identifier associations per PayrollWork source record preserve disagreement detection. No universal matcher or ETL platform is built. |
+| D15 | Import reads return revision. Interpretation/cancel and later mapping/refresh/decision/commit mutations require expected revision, update atomically and reject stale callers. Revision and PlanFingerprint protect different kinds of staleness. |
+| D16 | Upload creation requires a client Idempotency-Key. Same Company key and identical versioned creation identity returns the existing Import; changed identity conflicts; a new key deliberately creates another Import. File SHA is not the key and this is distinct from S11. |
+| D17 | Persist envelope, source and target contract versions, plus the PayrollWork canonicalization version before A2 hashes exist. Unsupported staged versions fail closed and require reset/re-upload, without compatibility adapters. |
+| D18 | Bound actual route-local request bytes and exactly one supported multipart file, including bounded overhead. Use short authorization/persistence transactions with no DB transaction or period lock during receive/hash/parse. Reauthorize and revision-check under period-before-import locks before accepted persistence. |
+| D19 | Import owns retention invariants; Payroll finalization invokes the PayrollWork cleanup hook in its existing transaction. Failure rolls back the complete finalization. Other targets choose their own retention trigger; payroll finalization is not generic Import lifecycle authority. |
+| D20 | XLSX safety also includes a generous, measured and boundary-tested internal package/member ceiling, separate from the existing product limits and actual decompressed-byte cap. |
 
 ## 12. Existing import tables
 
