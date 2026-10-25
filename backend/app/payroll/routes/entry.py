@@ -18,6 +18,7 @@ from app.payroll.schemas import (
     DraftLineUpdate,
     DriverPeriodSummary,
     OffDriversSummaryResponse,
+    PeriodEntryOverviewResponse,
     SelectedDayOffDriversResponse,
 )
 
@@ -236,6 +237,28 @@ async def get_day_grid(
         company_id=int(token["cid"]),
         user_id=int(token["sub"]),
         work_date=work_date,
+        db=db,
+    )
+
+
+@day_grid_router.get(
+    "/periods/{period_id}/entry-overview",
+    response_model=PeriodEntryOverviewResponse,
+    summary="Get the daily entry grid of every work date of a period",
+    responses={
+        403: {"description": "No payroll.view or payroll.entry permission"},
+        404: {"description": "Period not found"},
+    },
+)
+async def get_period_entry_overview(
+    period_id: int,
+    token: TokenDep,
+    db: DbDep,
+) -> PeriodEntryOverviewResponse:
+    return await day_grid.get_period_entry_overview(
+        period_id=period_id,
+        company_id=int(token["cid"]),
+        user_id=int(token["sub"]),
         db=db,
     )
 

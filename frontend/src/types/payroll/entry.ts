@@ -89,6 +89,24 @@ export interface DayGridResponse {
   summary: DayGridSummary;
 }
 
+/** One work date of the period overview: the rows and summary the Day Grid returns for it. */
+export interface PeriodEntryOverviewDay {
+  work_date: string;
+  is_configured_off_day: boolean;
+  rows: DayGridRow[];
+  summary: DayGridSummary;
+}
+
+/** Every day of a period at once, read only: the saved rows of each day. */
+export interface PeriodEntryOverviewResponse {
+  period: DayGridPeriod;
+  columns: DayGridColumn[];
+  status_keys: DayGridStatusKey[];
+  /** Evidence availability of a finalized period's Statuses; absent or null otherwise. */
+  status_evidence?: unknown;
+  days: PeriodEntryOverviewDay[];
+}
+
 export interface DayGridSaveRow {
   driver_assignment_id: number;
   /** Keyed by String(payroll_period_definition_id), never by code or name. */

@@ -9,7 +9,7 @@ import {
   statusInputSuggestions,
   type StatusCatalogEntry,
 } from '../src/lib/statusInput.ts';
-import { daySaveErrorMessage, statusCellText } from '../src/pages/payroll/dayGridModel.ts';
+import { daySaveErrorMessage, statusCellText } from '../src/pages/payroll/entry/dayGridModel.ts';
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -101,15 +101,16 @@ test('a failed save shows the server message whatever the shape of the error', (
 });
 
 test('the payroll entry workbench takes typed Status text through the shared cell and shows canonical names', () => {
-  const source = read('src/pages/payroll/PayrollEntryDialog.tsx');
+  const source = ['PayrollEntryPage.tsx', 'DayEntryTable.tsx']
+    .map((name) => read(`src/pages/payroll/entry/${name}`)).join('\n');
   assert.match(source, /<StatusCellInput/);
   assert.match(source, /shownText=\{getStatusText\(row\)\}/);
   assert.match(source, /daySaveErrorMessage/);
   assert.doesNotMatch(source, /getStatusValue|<option key=\{sk\.key_code\}/);
-  const cell = read('src/pages/payroll/StatusCellInput.tsx');
+  const cell = read('src/pages/payroll/entry/StatusCellInput.tsx');
   assert.match(cell, /<datalist/);
   assert.match(cell, /statusInputSuggestions\(entry\)/);
   assert.match(cell, /resolution\.entry\.label/);
-  const controller = read('src/pages/payroll/useDailyEntryController.ts');
+  const controller = read('src/pages/payroll/entry/useDailyEntryController.ts');
   assert.match(controller, /statusCellText\(row, dirtyRows\.get\(row\.driver_assignment_id\), grid\?\.status_keys \?\? \[\]\)/);
 });

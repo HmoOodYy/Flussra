@@ -6,14 +6,14 @@
  * that id (as a string), never by a code or a name. Code and label are display metadata
  * and have no behavior here.
  */
-import { displayedStatusText, type StatusCatalogEntry } from '../../lib/statusInput.ts';
+import { displayedStatusText, type StatusCatalogEntry } from '../../../lib/statusInput.ts';
 import type {
   DayGridColumn,
   DayGridResponse,
   DayGridRow,
   DayGridSaveRow,
   DayGridSummary,
-} from '../../types/payroll/entry';
+} from '../../../types/payroll/entry';
 
 /** The stable key for a column in value maps and save payloads. */
 export function columnKey(column: Pick<DayGridColumn, 'payroll_period_definition_id'>): string {
@@ -21,13 +21,16 @@ export function columnKey(column: Pick<DayGridColumn, 'payroll_period_definition
 }
 
 export interface QuantityInputProps {
-  step: number | 'any';
-  min: number;
+  inputMode: 'numeric' | 'decimal';
 }
 
-/** Input constraints come from the frozen InputType. The server is authoritative. */
+/**
+ * Input constraints come from the frozen InputType; the server is authoritative. A quantity is
+ * typed in a text field: a number field would let the mouse wheel and the arrow keys change a
+ * value without it being typed.
+ */
 export function quantityInputProps(column: Pick<DayGridColumn, 'input_type'>): QuantityInputProps {
-  return column.input_type === 'WholeNumber' ? { step: 1, min: 0 } : { step: 'any', min: 0 };
+  return { inputMode: column.input_type === 'WholeNumber' ? 'numeric' : 'decimal' };
 }
 
 export interface QuantityTotalView {

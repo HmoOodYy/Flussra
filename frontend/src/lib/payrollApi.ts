@@ -6,6 +6,7 @@ import apiClient from './apiClient';
 import type {
   DayGridResponse,
   DayGridSaveRequest,
+  PeriodEntryOverviewResponse,
   SelectedDayOffDriversResponse,
 } from '../types/payroll/entry';
 import type {
@@ -82,6 +83,15 @@ export async function getDayGrid(
   const resp = await apiClient.get<DayGridResponse>(
     `/payroll/periods/${periodId}/day-grid`,
     { params },
+  );
+  return resp.data;
+}
+
+export async function getPeriodEntryOverview(
+  periodId: number,
+): Promise<PeriodEntryOverviewResponse> {
+  const resp = await apiClient.get<PeriodEntryOverviewResponse>(
+    `/payroll/periods/${periodId}/entry-overview`,
   );
   return resp.data;
 }

@@ -268,6 +268,27 @@ class DayGridResponse(BaseModel):
 
 
 
+class PeriodEntryOverviewDay(BaseModel):
+    """One work date of the overview: exactly the rows and summary the day grid returns for it."""
+    __module__ = "app.payroll.schemas"
+    work_date: date
+    is_configured_off_day: bool
+    rows: list[DayGridRow]
+    summary: DayGridSummary
+
+
+
+class PeriodEntryOverviewResponse(BaseModel):
+    __module__ = "app.payroll.schemas"
+    period: DayGridPeriod
+    columns: list[DayGridColumn]
+    status_keys: list[DayGridStatusKey]
+    days: list[PeriodEntryOverviewDay]
+    # The same period-level value DayGridResponse carries: set only for Locked/Archived periods.
+    status_evidence: FinalizedSectionAvailability | None = None
+
+
+
 class DayGridSaveRow(BaseModel):
     __module__ = "app.payroll.schemas"
     driver_assignment_id: int

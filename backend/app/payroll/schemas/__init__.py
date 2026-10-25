@@ -66,6 +66,8 @@ from .entry import (
     DriverPeriodSummary,
     FullyOffDriverSummary,
     OffDriversSummaryResponse,
+    PeriodEntryOverviewDay,
+    PeriodEntryOverviewResponse,
     SelectedDayOffDriver,
     SelectedDayOffDriversResponse,
 )
@@ -238,6 +240,8 @@ __all__ = (
     'PeriodEligibleDriver',
     'PeriodEligibleDriversResponse',
     'PeriodEntryCount',
+    'PeriodEntryOverviewDay',
+    'PeriodEntryOverviewResponse',
     'PeriodPayReportResponse',
     'PeriodStatusChange',
     'PeriodSummary',

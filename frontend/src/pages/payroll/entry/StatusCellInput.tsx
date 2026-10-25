@@ -3,7 +3,7 @@ import {
   resolveStatusInput,
   statusInputSuggestions,
   type StatusCatalogEntry,
-} from '../../lib/statusInput';
+} from '../../../lib/statusInput';
 
 /**
  * The Day Grid Status cell: the typed name or alias of a Status (the catalog suggests both),
@@ -11,13 +11,14 @@ import {
  * convenience only; the server decides when the day is saved.
  */
 export function StatusCellInput({
-  shownText, statusKeys, disabled, className, onCommit,
+  shownText, statusKeys, disabled, className, ariaLabel, onCommit,
 }: {
   /** The canonical text to show while the cell is not being edited. */
   shownText: string;
   statusKeys: readonly StatusCatalogEntry[];
   disabled: boolean;
   className?: string;
+  ariaLabel?: string;
   /** Receives the text to save: null clears the Status. */
   onCommit: (text: string | null) => void;
 }) {
@@ -44,10 +45,11 @@ export function StatusCellInput({
         list={listId}
         value={text}
         disabled={disabled}
-        placeholder="—"
+        placeholder="Working"
+        aria-label={ariaLabel}
         aria-invalid={unresolved || undefined}
         title={unresolved ? 'Not a known Status name or alias; the server will check it on save.' : undefined}
-        style={{ width: '9.5rem', ...(unresolved ? { borderColor: '#dc2626' } : null) }}
+        style={unresolved ? { borderColor: '#dc2626' } : undefined}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={(e) => { if (e.key === 'Enter') commit(); }}
