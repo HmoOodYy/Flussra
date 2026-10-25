@@ -9,6 +9,7 @@ import posixpath
 import re
 import zipfile
 from collections.abc import Iterable
+from copy import copy
 from datetime import date, datetime, time
 from typing import Any
 from xml.etree.ElementTree import ParseError
@@ -225,6 +226,8 @@ def _inspect_xlsx(
         for info in infos:
             if info.flag_bits & 0x1:
                 raise _failure("IMPORT_XLSX_ENCRYPTED", "Encrypted workbooks are not supported.")
+            if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                raise _failure("IMPORT_XLSX_INVALID", "Workbook ZIP members must use stored or deflate compression.")
             path_parts = info.filename.replace("\\", "/").split("/")
             if info.filename.startswith(("/", "\\")) or ".." in path_parts:
                 raise _failure("IMPORT_XLSX_INVALID", "Workbook contains an unsafe ZIP path.")
@@ -243,12 +246,14 @@ def _inspect_xlsx(
             for info in infos:
                 if info.is_dir():
                     continue
-                with archive.open(info, "r") as member:
+                # ZipExtFile normally clips output to the declared file_size.
+                # Read against a bounded larger allowance so a lying directory
+                # cannot hide extra inflated bytes before openpyxl reads it.
+                bounded_info = copy(info)
+                bounded_info.file_size = MAX_XLSX_DECOMPRESSED_BYTES + 1
+                with archive.open(bounded_info, "r") as member:
+                    counted_member = _CountingReader(member, decompressed.add)
                     if info.filename.lower().endswith((".xml", ".rels")):
-                        counted_member = _CountingReader(
-                            member,
-                            decompressed.add,
-                        )
                         xml_state: dict[str, Any] = {}
                         for _event, element in _xml_events(counted_member):
                             _scan_xml_element(
@@ -263,8 +268,10 @@ def _inspect_xlsx(
                         while counted_member.read(64 * 1024):
                             pass
                     else:
-                        while chunk := member.read(64 * 1024):
-                            decompressed.add(len(chunk))
+                        while counted_member.read(64 * 1024):
+                            pass
+                    if counted_member.bytes_read != info.file_size:
+                        raise _failure("IMPORT_XLSX_INVALID", "Workbook ZIP member length disagrees with its content.")
             _check_xlsx_shape_limits(shape_by_path, sheet_paths, selected_sheet)
             if "vbaproject.bin" in " ".join(names).casefold() or b"macroenabled" in archive.read(
                 "[Content_Types].xml"

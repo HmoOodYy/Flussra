@@ -5,6 +5,7 @@ import re
 import struct
 import warnings
 import zipfile
+import zlib
 
 import pytest
 from openpyxl import Workbook
@@ -155,6 +156,34 @@ def test_duplicate_encrypted_and_malformed_zip_are_refused():
     assert exc.value.code == "IMPORT_XLSX_ENCRYPTED"
     with pytest.raises(ImportFailure):
         inspect_file(data[:100], "truncated.xlsx")
+
+
+def test_declared_zip_size_cannot_hide_additional_inflated_content():
+    base = _workbook_bytes([["Header"]])
+    with zipfile.ZipFile(io.BytesIO(base)) as archive:
+        original = archive.read("[Content_Types].xml")
+    # The prefix is a complete valid XML document. Its central/local lengths
+    # lie, and its CRC describes only the prefix: ordinary ZipFile.read clips
+    # away the hidden suffix and can accept it. Inspection must reject it.
+    malicious = bytearray(_rewrite_xlsx(base, {"[Content_Types].xml": original + b" " * 100_000}))
+    signature = b"PK\x01\x02"
+    offset = malicious.index(signature)
+    while True:
+        name_len = struct.unpack_from("<H", malicious, offset + 28)[0]
+        name = bytes(malicious[offset + 46:offset + 46 + name_len])
+        if name == b"[Content_Types].xml":
+            local = struct.unpack_from("<I", malicious, offset + 42)[0]
+            struct.pack_into("<I", malicious, offset + 16, zlib.crc32(original))
+            struct.pack_into("<I", malicious, offset + 24, len(original))
+            struct.pack_into("<I", malicious, local + 14, zlib.crc32(original))
+            struct.pack_into("<I", malicious, local + 22, len(original))
+            break
+        offset = malicious.index(signature, offset + 4)
+    with zipfile.ZipFile(io.BytesIO(malicious)) as archive:
+        assert archive.read("[Content_Types].xml") == original
+    with pytest.raises(ImportFailure) as exc:
+        inspect_file(bytes(malicious), "hidden.xlsx")
+    assert exc.value.code == "IMPORT_XLSX_INVALID"
 
 
 def test_csv_bom_tabs_explicit_header_and_malformed_quoting():
