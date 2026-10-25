@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 from uuid import uuid4
 
 import pytest
+from openpyxl import Workbook
 from sqlalchemy import text
 
 from tests.compensation_api_fixtures import (  # noqa: F401 - register isolated API fixtures
@@ -18,6 +20,7 @@ from tests.payroll_runtime_fixtures import (
     make_user,
     open_period_with_grid,
 )
+from tests.test_import_file_inspection import _add_nested_xml
 
 pytestmark = pytest.mark.asyncio
 
@@ -47,13 +50,23 @@ def _upload_headers(tenant, key=None, headers=None):
 async def _upload(
     client, tenant, period,
     data=b"Driver Number,Work Date,Regular\n0012,2026-10-20,4\n",
-    *, key=None, headers=None,
+    *, filename="payroll.csv", key=None, headers=None,
 ):
     return await client.post(
         f"/payroll/periods/{period['payroll_period_id']}/imports",
-        content=_file_body(data),
+        content=_file_body(data, filename=filename),
         headers=_upload_headers(tenant, key, headers),
     )
+
+
+def _xlsx_bytes() -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Driver Number", "Work Date", "Regular"])
+    worksheet.append(["0012", "2026-10-20", 4])
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 async def _period(client, engine, tenant):
@@ -232,3 +245,91 @@ async def test_cancelled_period_rejects_new_upload_and_reinterpretation(
     assert new_upload.json()["detail"]["code"] == "IMPORT_PERIOD_NOT_EDITABLE"
     assert reinterpretation.status_code == 409, reinterpretation.text
     assert reinterpretation.json()["detail"]["code"] == "IMPORT_NOT_EDITABLE"
+
+
+@pytest.mark.parametrize("filename", ["payroll.csv", "payroll.xlsx"])
+async def test_ymd_interpretation_is_normalized_and_persisted_for_each_file_type(
+    p3c_client, p3c_engine, tenant, filename,
+):
+    period = await _period(p3c_client, p3c_engine, tenant)
+    data = (
+        b"Driver Number,Work Date,Regular\n0012,2026-10-20,4\n"
+        if filename.endswith(".csv")
+        else _xlsx_bytes()
+    )
+    created = await _upload(p3c_client, tenant, period, data, filename=filename)
+    assert created.status_code == 200, created.text
+    import_id = created.json()["import_id"]
+    path = f"/payroll/imports/{import_id}"
+
+    interpreted = await p3c_client.put(
+        f"{path}/mapping",
+        json={"expected_revision": 1, "date_order": "YMD"},
+        headers=tenant.admin,
+    )
+    read_back = await p3c_client.get(path, headers=tenant.admin)
+
+    assert interpreted.status_code == 200, interpreted.text
+    assert interpreted.json()["revision"] == 2
+    assert interpreted.json()["interpretation"]["date_order"] == "YMD"
+    assert read_back.status_code == 200, read_back.text
+    assert read_back.json()["interpretation"]["date_order"] == "YMD"
+    assert read_back.json()["interpretation"]["inspection"]["date_order"] == "YMD"
+
+
+async def test_depth_rejection_does_not_stage_or_partially_reinterpret_import(
+    p3c_client, p3c_engine, tenant, monkeypatch,
+):
+    from app.imports.files import MAX_XLSX_XML_DEPTH
+
+    period = await _period(p3c_client, p3c_engine, tenant)
+    valid_data = _xlsx_bytes()
+    over_depth_data = _add_nested_xml(
+        valid_data, "xl/workbook.xml", MAX_XLSX_XML_DEPTH + 1
+    )
+    rejected_upload = await _upload(
+        p3c_client, tenant, period, over_depth_data, filename="payroll.xlsx"
+    )
+
+    assert rejected_upload.status_code == 422, rejected_upload.text
+    assert rejected_upload.json()["detail"]["code"] == "IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED"
+    async with p3c_engine.connect() as conn:
+        count_after_rejection = await conn.scalar(text("""
+            SELECT count(*) FROM import.imports i
+            JOIN import.payrollworkimports w
+              ON w.importid = i.importid AND w.companyid = i.companyid
+            WHERE i.companyid = :cid AND w.payrollperiodid = :pid
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})
+    assert count_after_rejection == 0
+
+    created = await _upload(
+        p3c_client, tenant, period, valid_data, filename="payroll.xlsx"
+    )
+    assert created.status_code == 200, created.text
+    import_id = created.json()["import_id"]
+    path = f"/payroll/imports/{import_id}"
+    before = await p3c_client.get(path, headers=tenant.admin)
+    assert before.status_code == 200, before.text
+
+    from app.imports import service
+
+    original_inspect = service.inspect_file
+
+    def inspect_over_depth(_data, filename, **kwargs):
+        return original_inspect(over_depth_data, filename, **kwargs)
+
+    monkeypatch.setattr(service, "inspect_file", inspect_over_depth)
+
+    rejected_reinterpretation = await p3c_client.put(
+        f"{path}/mapping",
+        json={"expected_revision": 1, "date_order": "YMD"},
+        headers=tenant.admin,
+    )
+    after = await p3c_client.get(path, headers=tenant.admin)
+
+    assert rejected_reinterpretation.status_code == 422, rejected_reinterpretation.text
+    assert rejected_reinterpretation.json()["detail"]["code"] == "IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED"
+    assert after.status_code == 200, after.text
+    assert after.json()["revision"] == before.json()["revision"] == 1
+    assert after.json()["status"] == before.json()["status"] == "NeedsMapping"
+    assert after.json()["interpretation"] == before.json()["interpretation"]

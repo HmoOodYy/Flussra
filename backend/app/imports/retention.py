@@ -24,10 +24,10 @@ async def purge_payroll_work_import_details(db: AsyncConnection, *, company_id: 
     previous = (await db.execute(text("SELECT current_setting('flussra.import_purge_id', TRUE)"))).scalar_one()
     for iid in imports:
         await db.execute(text("SELECT set_config('flussra.import_purge_id', :iid, TRUE)"), {"iid": str(iid)})
-        await clear_derived_state(db, company_id, iid)
+        await clear_derived_state(db, company_id, iid, reset_mapping=False)
         await db.execute(text("""
             UPDATE import.filesources SET filecontent = NULL, contentpurgedatutc = NOW(),
-                sheetname = NULL, headerrownumber = NULL, dateorder = NULL, inspectionmetadata = NULL
+                inspectionmetadata = NULL
             WHERE importid = :iid AND companyid = :cid
         """), {"iid": iid, "cid": company_id})
         await db.execute(text("""

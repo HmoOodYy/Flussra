@@ -459,6 +459,42 @@ def _check_import_foundation(cur) -> list[str]:
     """)
     if cur.fetchall():
         errors.append("Generic Import envelope contains source/target-specific authority (0094).")
+    for table, column, expected_type in (
+        ("filesources", "sheetname", "text"), ("filesources", "headerrownumber", "integer"),
+        ("filesources", "dateorder", "character varying(3)"),
+        ("filesources", "encoding", "character varying(20)"),
+        ("filesources", "delimiter", "character varying(1)"),
+        ("payrollworkimports", "columnmapping", "jsonb"),
+        ("payrollworkimports", "mappingfingerprint", "text"),
+        ("payrollworkimports", "contentfingerprint", "text"),
+        ("payrollworkcells", "decision", "character varying(20)"),
+        ("payrollworkcells", "decisionbasisquantity", "numeric(18,4)"),
+        ("payrollworkcells", "heldstatuskeyid", "integer"),
+        ("payrollworkcells", "statusdecision", "character varying(20)"),
+        ("payrollworkcells", "statusdecisionbasiskeyid", "integer"),
+        ("payrollworkcells", "dayoffdecision", "character varying(20)"),
+        ("payrollworkrecords", "isexcluded", "boolean"),
+    ):
+        cur.execute("""SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+            WHERE attrelid = to_regclass(%s) AND attname = %s AND NOT attisdropped""",
+                    (f"import.{table}", column))
+        if cur.fetchone() != (expected_type,):
+            errors.append(f"Missing or drifted Import contract column {table}.{column} (0094).")
+    for table, constraint, required_values in (
+        ("filesources", "ck_filesources_dateorder", ("'DMY'", "'MDY'", "'YMD'")),
+        ("filesources", "ck_filesources_inspectionpurge", ("inspectionmetadata",)),
+        ("payrollworkcells", "ck_payrollworkcells_valuedecision", ("'UseImported'", "'KeepExisting'", "'Exclude'")),
+        ("payrollworkcells", "ck_payrollworkcells_statusdecision", ("'RemoveStatus'", "'Exclude'")),
+        ("payrollworkcells", "ck_payrollworkcells_dayoffdecision", ("'AcceptException'", "'Exclude'")),
+        ("payrollworkcells", "ck_payrollworkcells_statusdecisionbasis", ("statusdecisionbasiskeyid",)),
+        ("payrollworkcells", "ck_payrollworkcells_valuedecisionbasis", ("decisionbasisquantity",)),
+    ):
+        cur.execute("""SELECT pg_get_constraintdef(oid) FROM pg_constraint
+            WHERE conrelid = to_regclass(%s) AND conname = %s AND contype = 'c' AND convalidated""",
+                    (f"import.{table}", constraint))
+        row = cur.fetchone()
+        if row is None or any(value not in row[0] for value in required_values):
+            errors.append(f"Missing or drifted Import contract check {table}.{constraint} (0094).")
     for table, columns, parent, parent_columns in (
         ("imports", ["branchid", "companyid"], "core.branches", ["branchid", "companyid"]),
         ("payrollworkimports", ["payrollperiodid", "companyid", "branchid"],
@@ -470,6 +506,10 @@ def _check_import_foundation(cur) -> list[str]:
          "import.payrollworkimports", ["importid", "companyid", "branchid", "payrollperiodid"]),
         ("payrollworkcells", ["driverassignmentid", "companyid", "branchid"],
          "core.driverassignments", ["driverassignmentid", "companyid", "branchid"]),
+        ("payrollworkcells", ["heldstatuskeyid", "companyid"],
+         "payroll.payrollstatuskeys", ["statuskeyid", "companyid"]),
+        ("payrollworkcells", ["statusdecisionbasiskeyid", "companyid"],
+         "payroll.payrollstatuskeys", ["statuskeyid", "companyid"]),
         ("payrollworkcells", ["payrollperioddefinitionid", "payrollperiodid", "companyid", "branchid", "paydefinitionid", "ratedefinitionid"],
          "payroll.payrollperioddefinitions", ["payrollperioddefinitionid", "payrollperiodid", "companyid", "branchid", "paydefinitionid", "ratedefinitionid"]),
     ):

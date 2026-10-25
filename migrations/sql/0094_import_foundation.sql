@@ -121,15 +121,17 @@ CREATE TABLE import.FileSources (
     ContentPurgedAtUtc TIMESTAMPTZ,
     SheetName TEXT,
     HeaderRowNumber INTEGER CHECK (HeaderRowNumber BETWEEN 1 AND 20000),
-    DateOrder VARCHAR(3) CHECK (DateOrder IN ('DMY','MDY')),
+    DateOrder VARCHAR(3) CONSTRAINT ck_FileSources_DateOrder CHECK (DateOrder IN ('DMY','MDY','YMD')),
+    Encoding VARCHAR(20) CHECK (Encoding IN ('utf-8','utf-8-sig','cp1252')),
+    Delimiter VARCHAR(1) CHECK (Delimiter IN (',', chr(59), chr(9))),
     InspectionMetadata JSONB,
     UNIQUE (ImportID, CompanyID),
     FOREIGN KEY (ImportID, CompanyID) REFERENCES import.Imports(ImportID, CompanyID),
     CHECK ((FileContent IS NULL) = (ContentPurgedAtUtc IS NOT NULL)),
     CHECK (FileContent IS NULL OR octet_length(FileContent) = FileSizeBytes),
     CHECK (InspectionMetadata IS NULL OR octet_length(InspectionMetadata::TEXT) <= 4000000),
-    CHECK (ContentPurgedAtUtc IS NULL OR
-           (InspectionMetadata IS NULL AND SheetName IS NULL AND HeaderRowNumber IS NULL AND DateOrder IS NULL))
+    CONSTRAINT ck_FileSources_InspectionPurge
+        CHECK (ContentPurgedAtUtc IS NULL OR InspectionMetadata IS NULL)
 );
 
 CREATE TABLE import.FileSourceRecords (
@@ -229,8 +231,15 @@ CREATE TABLE import.PayrollWorkCells (
     CurrentValue JSONB,
     HasStatus BOOLEAN NOT NULL DEFAULT FALSE,
     IsDayOff BOOLEAN NOT NULL DEFAULT FALSE,
-    Decision VARCHAR(40),
-    DecisionBasis JSONB,
+    Decision VARCHAR(20) CONSTRAINT ck_PayrollWorkCells_ValueDecision
+        CHECK (Decision IN ('UseImported','KeepExisting','Exclude')),
+    DecisionBasisQuantity NUMERIC(18,4),
+    HeldStatusKeyID INTEGER,
+    StatusDecision VARCHAR(20) CONSTRAINT ck_PayrollWorkCells_StatusDecision
+        CHECK (StatusDecision IN ('RemoveStatus','Exclude')),
+    StatusDecisionBasisKeyID INTEGER,
+    DayOffDecision VARCHAR(20) CONSTRAINT ck_PayrollWorkCells_DayOffDecision
+        CHECK (DayOffDecision IN ('AcceptException','Exclude')),
     AppliedDraftLineID BIGINT,
     AppliedAction VARCHAR(40),
     AppliedEvidenceEventID BIGINT,
@@ -241,6 +250,12 @@ CREATE TABLE import.PayrollWorkCells (
         REFERENCES import.PayrollWorkImports(ImportID, CompanyID, BranchID, PayrollPeriodID),
     FOREIGN KEY (DriverAssignmentID, CompanyID, BranchID)
         REFERENCES core.DriverAssignments(DriverAssignmentID, CompanyID, BranchID),
+    FOREIGN KEY (HeldStatusKeyID, CompanyID) REFERENCES payroll.PayrollStatusKeys(StatusKeyID, CompanyID),
+    FOREIGN KEY (StatusDecisionBasisKeyID, CompanyID) REFERENCES payroll.PayrollStatusKeys(StatusKeyID, CompanyID),
+    CONSTRAINT ck_PayrollWorkCells_StatusDecisionBasis
+        CHECK ((StatusDecision IS NULL) = (StatusDecisionBasisKeyID IS NULL)),
+    CONSTRAINT ck_PayrollWorkCells_ValueDecisionBasis
+        CHECK (Decision IS NOT NULL OR DecisionBasisQuantity IS NULL),
     FOREIGN KEY (PayrollPeriodID, WorkDate) REFERENCES payroll.PayrollPeriodDays(PayrollPeriodID, WorkDate),
     FOREIGN KEY (AppliedEvidenceEventID, CompanyID, BranchID, PayrollPeriodID)
         REFERENCES payroll.PayrollPeriodAuditEvidenceEvents
@@ -360,18 +375,17 @@ BEGIN
         old_json := to_jsonb(OLD);
         new_json := to_jsonb(NEW);
         IF TG_TABLE_NAME = 'filesources' THEN
-            IF (old_json - ARRAY['filecontent','contentpurgedatutc','sheetname','headerrownumber','dateorder','inspectionmetadata'])
-                IS DISTINCT FROM (new_json - ARRAY['filecontent','contentpurgedatutc','sheetname','headerrownumber','dateorder','inspectionmetadata'])
+            IF (old_json - ARRAY['filecontent','contentpurgedatutc','inspectionmetadata'])
+                IS DISTINCT FROM (new_json - ARRAY['filecontent','contentpurgedatutc','inspectionmetadata'])
                 OR NEW.FileContent IS NOT NULL OR NEW.ContentPurgedAtUtc IS NULL
-                OR NEW.SheetName IS NOT NULL OR NEW.HeaderRowNumber IS NOT NULL
-                OR NEW.DateOrder IS NOT NULL OR NEW.InspectionMetadata IS NOT NULL THEN
+                OR NEW.InspectionMetadata IS NOT NULL
+                OR (OLD.ContentPurgedAtUtc IS NOT NULL AND NEW.ContentPurgedAtUtc IS DISTINCT FROM OLD.ContentPurgedAtUtc) THEN
                 RAISE EXCEPTION 'IMPORT_PURGE_SCOPE: only File detail can be purged.';
             END IF;
         ELSIF TG_TABLE_NAME = 'payrollworkimports' THEN
-            IF (old_json - ARRAY['columnmapping','mappingfingerprint','contentfingerprint','planfingerprint','previewcounts'])
-                IS DISTINCT FROM (new_json - ARRAY['columnmapping','mappingfingerprint','contentfingerprint','planfingerprint','previewcounts'])
-                OR NEW.ColumnMapping IS NOT NULL OR NEW.MappingFingerprint IS NOT NULL
-                OR NEW.ContentFingerprint IS NOT NULL OR NEW.PlanFingerprint IS NOT NULL
+            IF (old_json - ARRAY['planfingerprint','previewcounts'])
+                IS DISTINCT FROM (new_json - ARRAY['planfingerprint','previewcounts'])
+                OR NEW.PlanFingerprint IS NOT NULL
                 OR NEW.PreviewCounts IS NOT NULL THEN
                 RAISE EXCEPTION 'IMPORT_PURGE_SCOPE: only transient PayrollWork plan can be purged.';
             END IF;
@@ -400,8 +414,8 @@ BEGIN
         old_json := to_jsonb(OLD);
         new_json := to_jsonb(NEW);
         IF TG_TABLE_NAME = 'filesources' AND
-           (old_json - ARRAY['sheetname','headerrownumber','dateorder','inspectionmetadata'])
-            IS DISTINCT FROM (new_json - ARRAY['sheetname','headerrownumber','dateorder','inspectionmetadata']) THEN
+           (old_json - ARRAY['sheetname','headerrownumber','dateorder','encoding','delimiter','inspectionmetadata'])
+            IS DISTINCT FROM (new_json - ARRAY['sheetname','headerrownumber','dateorder','encoding','delimiter','inspectionmetadata']) THEN
             RAISE EXCEPTION 'IMPORT_IMMUTABLE: original File identity/content/version cannot change.';
         ELSIF TG_TABLE_NAME = 'payrollworkimports' AND
            (old_json - ARRAY['columnmapping','mappingfingerprint','contentfingerprint','planfingerprint','previewcounts','reviewsummary'])

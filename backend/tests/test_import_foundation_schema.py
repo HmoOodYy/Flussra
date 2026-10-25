@@ -112,6 +112,31 @@ def test_schema_guard_detects_missing_company_scoped_driver_relationship(foundat
         conn.rollback()
 
 
+def test_file_interpretation_accepts_all_date_orders_without_a_payroll_target(foundation):
+    with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
+        cid, uid = identities(cur)
+        iid = envelope(cur, cid, uid, source="File")
+        cur.execute("""INSERT INTO import.filesources (importid, companyid, originalfilename,
+            filetype, filesizebytes, filehashsha256, filecontent, sheetname, headerrownumber, encoding, delimiter)
+            VALUES (%s, %s, 'text.csv', 'csv', 1, %s, %s, 'CSV', 1, 'cp1252', ';')""", (iid, cid, "0" * 64, b"a"))
+        for order in ("DMY", "MDY", "YMD", None):
+            cur.execute("UPDATE import.filesources SET dateorder = %s WHERE importid = %s", (order, iid))
+            cur.execute("SELECT dateorder, encoding, delimiter FROM import.filesources WHERE importid = %s", (iid,))
+            assert cur.fetchone() == (order, "cp1252", ";")
+        conn.rollback()
+
+
+def test_schema_guard_refuses_narrowed_date_order_and_ambiguous_decision_shape(foundation):
+    with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
+        cur.execute("ALTER TABLE import.filesources DROP CONSTRAINT ck_filesources_dateorder")
+        cur.execute("ALTER TABLE import.filesources ADD CONSTRAINT ck_filesources_dateorder CHECK (dateorder IN ('DMY', 'MDY'))")
+        assert any("ck_filesources_dateorder" in error for error in _check_import_foundation(cur))
+        conn.rollback()
+        cur.execute("ALTER TABLE import.payrollworkcells DROP COLUMN decisionbasisquantity")
+        assert any("decisionbasisquantity" in error for error in _check_import_foundation(cur))
+        conn.rollback()
+
+
 @pytest.mark.parametrize("dependency", [
     "CREATE VIEW app.unexpected_import_consumer AS SELECT * FROM import.importbatches",
     "CREATE TABLE app.unexpected_import_consumer (id bigint REFERENCES import.importbatches(importbatchid))",

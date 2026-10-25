@@ -32,6 +32,10 @@ MAX_INSPECTION_JSON_BYTES = 4_000_000
 # workbooks, including a million-cell sheet. See the design's measured evidence.
 MAX_XLSX_MEMBERS = 4_096
 
+# Ordinary OOXML parts have shallow fixed hierarchies, independent of row count.
+# Bound every XML part (including ignored extensions) before openpyxl loads it.
+MAX_XLSX_XML_DEPTH = 256
+
 _BASE_HEADER_LABELS = {
     "drivernumber",
     "driver number",
@@ -240,6 +244,7 @@ def _inspect_xlsx(
                 raise _failure("IMPORT_XLSX_INVALID", "Workbook contains no worksheets.")
             if len(sheet_paths) > MAX_XLSX_SHEETS:
                 raise _failure("IMPORT_SHEET_LIMIT_EXCEEDED", "Workbook exceeds 10 sheets.")
+            xml_parts = _xml_parts(archive, names, sheet_paths)
             shape_by_path: dict[str, dict[str, int]] = {}
             formulas_by_path: dict[str, dict[str, int]] = {}
             decompressed = _DecompressedCounter()
@@ -253,7 +258,7 @@ def _inspect_xlsx(
                 bounded_info.file_size = MAX_XLSX_DECOMPRESSED_BYTES + 1
                 with archive.open(bounded_info, "r") as member:
                     counted_member = _CountingReader(member, decompressed.add)
-                    if info.filename.lower().endswith((".xml", ".rels")):
+                    if info.filename in xml_parts:
                         xml_state: dict[str, Any] = {}
                         for _event, element in _xml_events(counted_member):
                             _scan_xml_element(
@@ -419,12 +424,56 @@ def _metadata_elements(archive: zipfile.ZipFile, name: str, tag: str):
         raise _failure("IMPORT_XLSX_INVALID", "Workbook XML is malformed.") from exc
 
 
+def _xml_parts(archive: zipfile.ZipFile, names: list[str], sheet_paths: dict[str, str]) -> set[str]:
+    """OPC part types, not suffix alone, determine XML parsed by workbook readers."""
+    members = set(names)
+    xml = {name for name in names if name.lower().endswith((".xml", ".rels"))}
+    xml.update(sheet_paths.values())
+    extensions: dict[str, set[str]] = {}
+    for name in names:
+        leaf = name.rsplit("/", 1)[-1]
+        if "." in leaf:
+            extensions.setdefault(leaf.rsplit(".", 1)[-1].lower(), set()).add(name)
+    declared_xml: set[str] = set()
+    seen_defaults: set[str] = set()
+    seen_overrides: set[str] = set()
+    # Retain only names from the already member-count-bounded archive, even
+    # when an untrusted manifest declares many nonexistent parts/extensions.
+    for tag in ("Default", "Override"):
+        for attributes in _metadata_elements(archive, "[Content_Types].xml", tag):
+            content_type = attributes.get("ContentType", "").split(";", 1)[0].strip().lower()
+            is_xml = content_type in ("application/xml", "text/xml") or content_type.endswith("+xml")
+            if tag == "Default":
+                extension = attributes.get("Extension", "").lower()
+                if extension not in extensions:
+                    continue
+                if extension in seen_defaults:
+                    raise _failure("IMPORT_XLSX_INVALID", "Workbook declares duplicate content-type defaults.")
+                seen_defaults.add(extension)
+                if is_xml:
+                    declared_xml.update(extensions[extension])
+            else:
+                part = attributes.get("PartName", "").lstrip("/")
+                if part in members:
+                    if part in seen_overrides:
+                        raise _failure("IMPORT_XLSX_INVALID", "Workbook declares duplicate content-type overrides.")
+                    seen_overrides.add(part)
+                    if is_xml:
+                        declared_xml.add(part)
+                    else:
+                        declared_xml.discard(part)
+    return xml | declared_xml
+
+
 def _xml_events(source):
     """Discard finished children as well as text: empty XML nodes also cost memory."""
     stack = []
     for event, element in SafeET.iterparse(source, events=("start", "end"),
                                           forbid_dtd=True, forbid_entities=True, forbid_external=True):
         if event == "start":
+            if len(stack) >= MAX_XLSX_XML_DEPTH:
+                raise _failure("IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED",
+                               f"Workbook XML exceeds the internal depth bound of {MAX_XLSX_XML_DEPTH} elements.")
             stack.append(element)
         yield event, element
         if event == "end":
@@ -585,8 +634,8 @@ def _normalize_date_order(value: str | None) -> str | None:
     if value is None or value == "":
         return None
     normalized = value.strip().upper()
-    if normalized not in {"DMY", "MDY"}:
-        raise _failure("IMPORT_DATE_ORDER_INVALID", "Date order must be DMY or MDY.")
+    if normalized not in {"DMY", "MDY", "YMD"}:
+        raise _failure("IMPORT_DATE_ORDER_INVALID", "Date order must be DMY, MDY or YMD.")
     return normalized
 
 

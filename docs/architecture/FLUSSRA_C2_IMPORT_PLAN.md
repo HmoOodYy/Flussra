@@ -1,6 +1,6 @@
 # FLUSSRA C2 IMPORT PLAN
 
-**Status:** Agreed product direction (2026-10-24), with Slice A delivery and operational decisions finalized on 2026-10-25. C2 implementation is not started. The [implementation design](FLUSSRA_C2_IMPORT_DESIGN.md) specifies the sequential mission gates and must satisfy the C2 gate in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` §10.<br>
+**Status:** Agreed product direction (2026-10-24), with Slice A delivery and operational decisions finalized on 2026-10-25. A1 is implemented locally and awaiting review acceptance; A2, A3 and Slice B have not started. The [implementation design](FLUSSRA_C2_IMPORT_DESIGN.md) specifies the sequential mission gates and must satisfy the C2 gate in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` §10.<br>
 **Scope:** what Flussra Import is, where it starts, the rules it never breaks, what the first version contains, and what follows.<br>
 **Terms:** *Pay Items* are the company's PayDefinitions as shown in the UI. A period's *frozen Pay Items* are the definitions frozen into that period at creation. *Daily entries* are the period's Daily Grid source rows.
 
@@ -144,7 +144,7 @@ Slice A covers C1–C4 and the discovery/validation/display portions of C5–C8.
 | F1 | One shared engine; each import type supplies its own contract (Period now, then People and Rates) | People and Rate imports without a second system |
 | F2 | Staging separate from payroll | Future integrations enter the same staging engine as files |
 | F3 | Source/target-specific provenance: File coordinates and PayrollWork value/evidence links until payroll finalization, then durable import/audit metadata (D7) | Other source/target kinds supply their own provenance and retention trigger |
-| F4 | File/PayrollWork imports store their interpretation and target column/Driver mapping in the owning specialized contract | L1 and L3 become reuse of stored data without Driver/File fields in the generic core |
+| F4 | File/PayrollWork imports permanently store accepted interpretation (sheet/header/date order and CSV encoding/delimiter), target column mapping including Driver-identifier column roles, and mapping/content identity in the owning specialized contracts. Per-identifier Driver-match rows remain detailed staging under D7 | S13 reports the mapping used; L1 can reuse persisted mappings without Driver/File fields in the generic core. Saved Driver aliases remain the separate later L3 capability |
 | F5 | Before and after values stored for every change | A later safe Undo that never reverts over newer manual edits |
 | F6 | File byte fingerprint on the File source; versioned semantic content/plan fingerprints on the owning target | S11 duplicate protection and L5 drift detection, separate from creation idempotency and resource revision |
 | F7 | Status data routed to the Status domain | Status import without touching Pay Items |
@@ -190,7 +190,7 @@ D1–D7 were decided on 2026-10-24. D8–D20 record the settled delivery, operat
 | D4 | Version 1 reads one row per driver per day. Other layouts (one column per day) come later as additional reader modes and must not be precluded by the design. |
 | D5 | Imported work on a day whose Status is a full day off is resolved inside Review, never by sending the user out of Import. Review lists the affected drivers once each, nothing selected by default, with select all. Selecting a driver removes the conflicting full-day-off Status where imported work exists and accepts that work; otherwise that work is not accepted and is deliberately excluded. |
 | D6 | Imported work on a normal day off asks whether to treat it as an exception for this period. Yes accepts it and Review notes that day-off exceptions were accepted; No excludes it and the rest continues; unanswered blocks completion. |
-| D7 | The original file and detailed provenance (sheet, row, column) serve Import and Review until the period is finalized; they are not permanent payroll data. After finalization Flussra keeps the accepted payroll data and a durable import and audit record, not the file or row/column detail. |
+| D7 | The original file and individual source-row/cell provenance serve Import and Review until the period is finalized; they are not permanent payroll data. After finalization Flussra keeps accepted payroll data and durable import/audit metadata, including accepted File interpretation and target column mapping/identity for S13/L1/F4. File bytes, inspection samples, row/cell/Driver-match detail and transient preview/current-plan state are purged. Selected sheet/header interpretation is durable metadata, distinct from per-data-row coordinates. |
 | D8 | Slice A is one milestone delivered as A1 → review → A2 → review → A3 → review; only then begins Slice B. Each mission has a separate implementable scope and acceptance gate in the design. |
 | D9 | Hard caps are 10 MB upload, 50 MB decompressed XLSX, 10 sheets, 20,000 selected-sheet rows, 50 selected-sheet columns, 1,000,000 selected-sheet cells and 8 KB text per cell; validate actual file content and reject violations without truncation or partial acceptance. |
 | D10 | Slice A is synchronous from the caller's perspective; bounded in-process thread offload protects the event loop while the same request waits. A1 produces representative/near-upper time/resource/responsiveness evidence; A2 measures preview work. Queues/background jobs require an explicit design amendment. |
@@ -203,7 +203,7 @@ D1–D7 were decided on 2026-10-24. D8–D20 record the settled delivery, operat
 | D17 | Persist envelope, source and target contract versions, plus the PayrollWork canonicalization version before A2 hashes exist. Unsupported staged versions fail closed and require reset/re-upload, without compatibility adapters. |
 | D18 | Bound actual route-local request bytes and exactly one supported multipart file, including bounded overhead. Use short authorization/persistence transactions with no DB transaction or period lock during receive/hash/parse. Reauthorize and revision-check under period-before-import locks before accepted persistence. |
 | D19 | Import owns retention invariants; Payroll finalization invokes the PayrollWork cleanup hook in its existing transaction. Failure rolls back the complete finalization. Other targets choose their own retention trigger; payroll finalization is not generic Import lifecycle authority. |
-| D20 | XLSX safety also includes a generous, measured and boundary-tested internal package/member ceiling, separate from the existing product limits and actual decompressed-byte cap. |
+| D20 | XLSX safety also includes generous, measured and boundary-tested internal package/member and XML nesting ceilings, separate from the existing product limits and actual decompressed-byte cap. |
 
 ## 12. Existing import tables
 

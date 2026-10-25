@@ -89,23 +89,33 @@ def _temp_snapshot() -> set[str]:
 
 
 def _measure_inspection_child(path: Path, filename: str) -> dict[str, Any]:
+    from app.imports.errors import ImportFailure
     from app.imports.files import inspect_file
 
     before_memory = _working_set()
     before_temp = _temp_snapshot()
     data = path.read_bytes()
     started = time.perf_counter()
-    metadata = inspect_file(data, filename)
+    metadata = None
+    error = None
+    try:
+        metadata = inspect_file(data, filename)
+    except ImportFailure as exc:
+        error = {"code": exc.code, "status_code": exc.status_code}
     elapsed = time.perf_counter() - started
     after_temp = _temp_snapshot()
-    return {
+    result = {
         "parser_seconds": round(elapsed, 6),
         "file_bytes": len(data),
-        "metadata": metadata,
         "working_set_before": before_memory,
         "working_set_after": _working_set(),
         "parser_temp_files_created": sorted(after_temp - before_temp),
     }
+    if error is not None:
+        result["error"] = error
+    else:
+        result["metadata"] = metadata
+    return result
 
 
 def _run_inspection_child(path: Path, filename: str) -> dict[str, Any]:
@@ -184,6 +194,12 @@ def _append_empty_members(path: Path, total_members: int) -> None:
             archive.writestr(f"benchmark-padding/member-{index:04d}.bin", b"")
 
 
+def _append_nested_xml(path: Path, *, depth: int) -> None:
+    document = b"<n>" + b"<n>" * (depth - 1) + b"</n>" * depth
+    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("custom/structural-depth.xml", document)
+
+
 def _file_facts(path: Path, *, rows: int, columns: int, file_type: str) -> dict[str, Any]:
     facts: dict[str, Any] = {
         "filename": path.name,
@@ -193,16 +209,43 @@ def _file_facts(path: Path, *, rows: int, columns: int, file_type: str) -> dict[
         "actual_decompressed_bytes": 0,
     }
     if file_type == "xlsx":
+        from xml.parsers import expat
+
         with zipfile.ZipFile(path, "r") as archive:
             facts["zip_members"] = len(archive.infolist())
             decompressed = 0
+            max_xml_depth = 0
+            max_xml_depth_member = None
             for info in archive.infolist():
                 if info.is_dir():
                     continue
+                parser = None
+                depth_state = {"current": 0, "max": 0}
+                if info.filename.lower().endswith((".xml", ".rels")):
+                    parser = expat.ParserCreate()
+
+                    def start_element(_name: str, _attributes: dict[str, str]) -> None:
+                        depth_state["current"] += 1
+                        depth_state["max"] = max(depth_state["max"], depth_state["current"])
+
+                    def end_element(_name: str) -> None:
+                        depth_state["current"] -= 1
+
+                    parser.StartElementHandler = start_element
+                    parser.EndElementHandler = end_element
                 with archive.open(info) as member:
                     while chunk := member.read(128 * 1024):
                         decompressed += len(chunk)
+                        if parser is not None:
+                            parser.Parse(chunk, False)
+                    if parser is not None:
+                        parser.Parse(b"", True)
+                        if depth_state["max"] > max_xml_depth:
+                            max_xml_depth = depth_state["max"]
+                            max_xml_depth_member = info.filename
             facts["actual_decompressed_bytes"] = decompressed
+            facts["max_xml_depth"] = max_xml_depth
+            facts["max_xml_depth_member"] = max_xml_depth_member
     else:
         facts["actual_decompressed_bytes"] = facts["file_bytes"]
     return facts
@@ -257,6 +300,27 @@ def _generate_cases(directory: Path) -> list[dict[str, Any]]:
         "kind": "member_ceiling_4096_xlsx",
         "file_type": "xlsx",
         "path": str(member_stress),
+    })
+
+    structural_limit = directory / "structural-depth-256.xlsx"
+    _workbook_file(structural_limit, rows=2, columns=3)
+    _append_nested_xml(structural_limit, depth=256)
+    cases.append({
+        **_file_facts(structural_limit, rows=2, columns=3, file_type="xlsx"),
+        "kind": "structural_depth_boundary_256_xlsx",
+        "file_type": "xlsx",
+        "path": str(structural_limit),
+    })
+
+    structural_over = directory / "structural-depth-257.xlsx"
+    _workbook_file(structural_over, rows=2, columns=3)
+    _append_nested_xml(structural_over, depth=257)
+    cases.append({
+        **_file_facts(structural_over, rows=2, columns=3, file_type="xlsx"),
+        "kind": "structural_depth_over_limit_257_xlsx",
+        "file_type": "xlsx",
+        "expected_parser_error_code": "IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED",
+        "path": str(structural_over),
     })
 
     for case in cases:
@@ -446,7 +510,44 @@ def _run(output_path: Path) -> dict[str, Any]:
         cases = _generate_cases(Path(temporary_directory))
         evidence["generation_seconds"]["all_cases"] = round(time.perf_counter() - generation_start, 6)
         for case in cases:
-            case["parser_result"] = _run_inspection_child(Path(case["path"]), case["filename"])
+            parser_result = _run_inspection_child(Path(case["path"]), case["filename"])
+            expected_error = case.get("expected_parser_error_code")
+            actual_error = parser_result.get("error", {}).get("code")
+            if actual_error != expected_error:
+                raise RuntimeError(
+                    f"Parser outcome for {case['filename']} was {actual_error!r}; "
+                    f"expected {expected_error!r}."
+                )
+            if expected_error and parser_result["error"].get("status_code") != 422:
+                raise RuntimeError(
+                    f"Expected a 422 parser refusal for {case['filename']}, got {parser_result['error']!r}."
+                )
+            case["parser_result"] = parser_result
+        ordinary_xlsx = [
+            case for case in cases
+            if case["file_type"] == "xlsx"
+            and case["kind"] not in {
+                "structural_depth_boundary_256_xlsx",
+                "structural_depth_over_limit_257_xlsx",
+            }
+        ]
+        accepted_depth = next(
+            case for case in cases if case["kind"] == "structural_depth_boundary_256_xlsx"
+        )
+        rejected_depth = next(
+            case for case in cases if case["kind"] == "structural_depth_over_limit_257_xlsx"
+        )
+        evidence["xml_depth_measurement"] = {
+            "guard_limit_elements": 256,
+            "ordinary_generated_max_depth": max(case["max_xml_depth"] for case in ordinary_xlsx),
+            "ordinary_generated_max_depth_member": max(
+                ordinary_xlsx, key=lambda case: case["max_xml_depth"]
+            )["max_xml_depth_member"],
+            "accepted_boundary_depth": accepted_depth["max_xml_depth"],
+            "rejected_one_over_depth": rejected_depth["max_xml_depth"],
+            "one_over_error": rejected_depth["parser_result"]["error"]["code"],
+            "one_over_parser_seconds": rejected_depth["parser_result"]["parser_seconds"],
+        }
         with _private_database() as dsn:
             evidence["application"] = asyncio.run(_application_benchmarks(dsn, cases))
         for case in cases:

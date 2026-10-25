@@ -33,7 +33,7 @@ class RevisionRequest(BaseModel):
 class InterpretationRequest(RevisionRequest):
     sheet_name: str | None = Field(default=None, max_length=31)
     header_row_number: int | None = Field(default=None, strict=True, ge=1, le=20_000)
-    date_order: Literal["DMY", "MDY"] | None = None
+    date_order: Literal["DMY", "MDY", "YMD"] | None = None
 
 
 def failure(code: str, message: str, status: int = 409) -> ImportFailure:
@@ -74,7 +74,7 @@ async def header_labels(db: AsyncConnection, cid: int, pid: int) -> list[str]:
 _METADATA = """
     SELECT i.*, f.contractversion AS file_version, f.originalfilename, f.filetype,
         f.filesizebytes, f.filehashsha256, f.contentpurgedatutc,
-        f.sheetname, f.headerrownumber, f.dateorder, f.inspectionmetadata,
+        f.sheetname, f.headerrownumber, f.dateorder, f.encoding, f.delimiter, f.inspectionmetadata,
         w.payrollperiodid, w.contractversion AS target_version, w.canonicalizationversion
     FROM import.imports i
     JOIN import.filesources f ON f.importid = i.importid AND f.companyid = i.companyid
@@ -113,7 +113,8 @@ def metadata(row) -> dict:
                  "size_bytes": row["filesizebytes"], "sha256": row["filehashsha256"],
                  "content_purged_at": row["contentpurgedatutc"]},
         "interpretation": {"sheet_name": row["sheetname"], "header_row_number": row["headerrownumber"],
-                           "date_order": row["dateorder"], "inspection": row["inspectionmetadata"]},
+                           "date_order": row["dateorder"], "encoding": row["encoding"],
+                           "delimiter": row["delimiter"], "inspection": row["inspectionmetadata"]},
     }
 
 
@@ -186,12 +187,13 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
             """), {"iid": iid, "cid": cid, "bid": period.branch_id, "pid": pid})
             await db.execute(text("""
                 INSERT INTO import.filesources (importid, companyid, originalfilename, filetype,
-                    filesizebytes, filehashsha256, filecontent, sheetname, headerrownumber, dateorder, inspectionmetadata)
-                VALUES (:iid, :cid, :name, :type, :size, :sha, :content, :sheet, :header, :date, CAST(:inspection AS jsonb))
+                    filesizebytes, filehashsha256, filecontent, sheetname, headerrownumber, dateorder, encoding, delimiter, inspectionmetadata)
+                VALUES (:iid, :cid, :name, :type, :size, :sha, :content, :sheet, :header, :date, :encoding, :delimiter, CAST(:inspection AS jsonb))
             """), {"iid": iid, "cid": cid, "name": payload.filename, "type": inspection["file_type"],
                    "size": payload.file_size, "sha": payload.file_sha256, "content": payload.data,
                    "sheet": inspection["selected_sheet"], "header": inspection["header_row_number"],
-                   "date": inspection["date_order"], "inspection": json.dumps(inspection)})
+                   "date": inspection["date_order"], "encoding": inspection["encoding"],
+                   "delimiter": inspection["delimiter"], "inspection": json.dumps(inspection)})
             return metadata(await load(db, cid, iid))
 
 
@@ -246,11 +248,11 @@ async def reinterpret_import(request: Request, engine: AsyncEngine, cid: int, ui
             await clear_derived_state(db, cid, iid)
             await db.execute(text("""
                 UPDATE import.filesources SET sheetname = :sheet, headerrownumber = :header,
-                    dateorder = :date, inspectionmetadata = CAST(:inspection AS jsonb)
+                    dateorder = :date, encoding = :encoding, delimiter = :delimiter, inspectionmetadata = CAST(:inspection AS jsonb)
                 WHERE importid = :iid AND companyid = :cid
             """), {"iid": iid, "cid": cid, "sheet": inspection["selected_sheet"],
                    "header": inspection["header_row_number"], "date": inspection["date_order"],
-                   "inspection": json.dumps(inspection)})
+                   "encoding": inspection["encoding"], "delimiter": inspection["delimiter"], "inspection": json.dumps(inspection)})
             await db.execute(text("""
                 UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
                     updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
