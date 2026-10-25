@@ -705,9 +705,11 @@ class TestCurrentPayrollHub:
         await direct_db.commit()
         try:
             foreign = await _hub(session_client, auth_token, foreign_branch_id)
-            assert foreign.status_code in (200, 403), foreign.text
-            if foreign.status_code == 200:
-                assert foreign.json()["branches"] == []
+            assert foreign.status_code == 200, foreign.text
+            foreign_payload = foreign.json()
+            assert foreign_payload["company_id"] == _COMPANY_ID
+            assert foreign_payload["requested_branch_id"] == foreign_branch_id
+            assert foreign_payload["branches"] == []
         finally:
             await direct_db.execute(
                 _text("DELETE FROM core.branches WHERE branchid = :branch_id"),
