@@ -7,6 +7,22 @@ import sys
 from pathlib import Path
 
 
+def _is_backend_test_target(argument: str, backend_dir: Path, tests_root: Path) -> bool:
+    if argument.startswith("-"):
+        return False
+    target = argument.split("::", 1)[0]
+    if not target:
+        return False
+    try:
+        path = Path(target)
+        if not path.is_absolute():
+            path = backend_dir / path
+        resolved = path.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved == tests_root or tests_root in resolved.parents
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=("focused", "quick", "full"))
@@ -18,13 +34,17 @@ def main(argv: list[str] | None = None) -> int:
     options, extra = parser.parse_known_args(argv)
     if extra and extra[0] == "--":
         extra = extra[1:]
-    has_path = any(arg.startswith(("tests/", "tests\\")) for arg in extra)
-    options.suite = options.suite or ("focused" if has_path else "quick")
+    backend_dir = (Path(__file__).resolve().parents[1] / "backend").resolve()
+    tests_root = (backend_dir / "tests").resolve()
+    has_test_target = any(
+        _is_backend_test_target(argument, backend_dir, tests_root) for argument in extra
+    )
+    options.suite = options.suite or ("focused" if has_test_target else "quick")
     if options.workers < 1 or options.shard_count < 1:
         parser.error("workers and shard-count must be positive")
     if options.shard_index is not None and not 0 <= options.shard_index < options.shard_count:
         parser.error("shard-index must be in [0, shard-count)")
-    if options.suite == "focused" and not has_path:
+    if options.suite == "focused" and not has_test_target:
         parser.error("focused runs require an explicit tests/ path or node ID")
     args = [sys.executable, "-m", "pytest", "-ra", "--tb=short", "--durations=20",
             "--backend-suite", "quick" if options.suite == "quick" else "full"]
@@ -38,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     if options.junitxml:
         args.append(f"--junitxml={Path(options.junitxml).resolve()}")
     args.extend(extra)
-    return subprocess.run(args, cwd=Path(__file__).resolve().parents[1] / "backend", check=False).returncode
+    return subprocess.run(args, cwd=backend_dir, check=False).returncode
 
 
 if __name__ == "__main__":
