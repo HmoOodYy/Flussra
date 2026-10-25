@@ -392,6 +392,11 @@ _RETIRED_TABLES = (
     "payroll.payitemrateslots", "payroll.payitemlinetypemap",
     "payroll.driverrates", "payroll.driverratetiers",
     "payroll.cdpidefinitions", "payroll.cdpirequests", "payroll.cdpirequestevents",
+    "import.importbatches", "import.importfiles", "import.importrows",
+    "import.importdetectedcolumns", "import.importmappingtemplates",
+    "import.importmappingtemplatelines", "import.importvalidationissues",
+    "integration.integrationconnections", "integration.integrationsyncruns",
+    "app.vw_importbatchsummary",
 )
 _RETIRED_COLUMNS = (
     ("sec", "userbranchroles", "roleid"),
@@ -404,6 +409,82 @@ _RETIRED_COLUMNS = (
     "payitemid", "ratetypeid", "driverrateid", "resolvedrateamount", "ratebehavior",
     "draftlineid", "bonuseventid", "workdate", "quantity", "rateamount", "notes",
 ))
+
+
+_IMPORT_TABLES = (
+    "imports", "importsourcerecords", "importissues", "filesources", "filesourcerecords",
+    "payrollworkimports", "payrollworkrecords", "payrollworkdrivermatches",
+    "payrollworkrecordidentifiers", "payrollworkcells", "payrollworkstatusremovals",
+)
+
+
+def _check_import_foundation(cur) -> list[str]:
+    errors: list[str] = []
+    for table in _IMPORT_TABLES:
+        cur.execute("SELECT to_regclass(%s)", (f"import.{table}",))
+        if cur.fetchone()[0] is None:
+            errors.append(f"Missing Import foundation table import.{table} (0094).")
+        triggers = (("trg_imports_envelope", "fn_guard_import_envelope"),
+                    ("trg_imports_notruncate", "fn_guard_import_envelope"),
+                    ("trg_imports_payrollwork", "fn_guard_payroll_work_envelope")) if table == "imports" else (
+                        ("trg_importdetail_writable", "fn_guard_payroll_work_detail"),
+                        ("trg_importdetail_notruncate", "fn_guard_payroll_work_detail"))
+        for trigger, function in triggers:
+            cur.execute("""
+                SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+                JOIN pg_namespace n ON n.oid = p.pronamespace
+                WHERE t.tgrelid = to_regclass(%s) AND t.tgname = %s
+                  AND t.tgenabled IN ('O','A') AND n.nspname = 'import' AND p.proname = %s
+            """, (f"import.{table}", trigger, function))
+            if cur.fetchone() is None:
+                errors.append(f"Missing or disabled Import guard {table}.{trigger} -> {function} (0094).")
+    for table, columns in (
+        ("imports", ("companyid", "importkind", "sourcekind", "revision", "contractversion",
+                     "idempotencykey", "creationfingerprint")),
+        ("filesources", ("companyid", "contractversion", "filehashsha256", "filesizebytes")),
+        ("payrollworkimports", ("companyid", "branchid", "payrollperiodid", "contractversion", "canonicalizationversion")),
+        ("payrollworkrecordidentifiers", ("sourcerecordid", "sourcecolumnindex", "drivermatchid")),
+    ):
+        for column in columns:
+            cur.execute("""
+                SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(%s)
+                    AND attname = %s AND NOT attisdropped
+            """, (f"import.{table}", column))
+            if cur.fetchone() != (True,):
+                errors.append(f"Import foundation requires NOT NULL {table}.{column} (0094).")
+    cur.execute("""
+        SELECT attname FROM pg_attribute WHERE attrelid = to_regclass('import.imports')
+            AND attname IN ('payrollperiodid','driverid','drivermatchid','sheetname','headerrownumber','dateorder','filecontent')
+            AND NOT attisdropped
+    """)
+    if cur.fetchall():
+        errors.append("Generic Import envelope contains source/target-specific authority (0094).")
+    for table, columns, parent, parent_columns in (
+        ("imports", ["branchid", "companyid"], "core.branches", ["branchid", "companyid"]),
+        ("payrollworkimports", ["payrollperiodid", "companyid", "branchid"],
+         "payroll.payrollperiods", ["payrollperiodid", "companyid", "branchid"]),
+        ("payrollworkdrivermatches", ["driverid", "companyid"], "core.drivers", ["driverid", "companyid"]),
+        ("payrollworkrecordidentifiers", ["drivermatchid", "importid", "companyid"],
+         "import.payrollworkdrivermatches", ["drivermatchid", "importid", "companyid"]),
+        ("payrollworkcells", ["importid", "companyid", "branchid", "payrollperiodid"],
+         "import.payrollworkimports", ["importid", "companyid", "branchid", "payrollperiodid"]),
+        ("payrollworkcells", ["driverassignmentid", "companyid", "branchid"],
+         "core.driverassignments", ["driverassignmentid", "companyid", "branchid"]),
+        ("payrollworkcells", ["payrollperioddefinitionid", "payrollperiodid", "companyid", "branchid", "paydefinitionid", "ratedefinitionid"],
+         "payroll.payrollperioddefinitions", ["payrollperioddefinitionid", "payrollperiodid", "companyid", "branchid", "paydefinitionid", "ratedefinitionid"]),
+    ):
+        cur.execute("""
+            SELECT 1 FROM pg_constraint c
+            WHERE c.conrelid = to_regclass(%s) AND c.confrelid = to_regclass(%s)
+              AND c.contype = 'f' AND c.convalidated
+              AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(num, pos)
+                        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.num ORDER BY k.pos) = %s::text[]
+              AND ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(num, pos)
+                        JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.num ORDER BY k.pos) = %s::text[]
+        """, (f"import.{table}", parent, columns, parent_columns))
+        if cur.fetchone() is None:
+            errors.append(f"Missing validated Import ownership FK {table}({', '.join(columns)}) -> {parent} (0094).")
+    return errors
 
 
 def _check_target_physical_authorities(cur) -> list[str]:
@@ -865,6 +946,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     temporal_errors.extend(_check_calculation_evidence(cur))
     temporal_errors.extend(_check_company_status_catalog(cur))
     temporal_errors.extend(_check_target_physical_authorities(cur))
+    temporal_errors.extend(_check_import_foundation(cur))
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)

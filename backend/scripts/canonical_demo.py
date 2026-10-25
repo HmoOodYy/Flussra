@@ -68,13 +68,14 @@ RATE_AMOUNT = Decimal("12.50")
 PAYROLL_SETUP_NAME = "Weekly payroll"
 WEEKEND_OFF_MASK = 65  # Sunday (bit 0) and Saturday (bit 6)
 
-# Every table that holds payroll execution history. The canonical seed leaves all of them empty.
+# Execution history and Import staging are empty after a canonical reset.
 PAYROLL_HISTORY_TABLES = (
     "payroll.payrollperiods", "payroll.payrolldraftlines",
     "payroll.payrollperioddriverdayentrystate", "payroll.payrollbonusevents",
     "payroll.driverpayrules", "payroll.payrollcalculationsnapshots",
     "payroll.payrollfinallines", "payroll.payrollperiodauditevidenceevents",
     "payroll.payrollperiodworkflowactionevidence", "review.managerreviewitems",
+    "import.imports",
 )
 
 

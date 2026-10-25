@@ -28,6 +28,7 @@ from app.company_currency import (
     lock_and_get_company_currency_for_monetary_write,
     require_matching_snapshot_currency,
 )
+from app.imports.retention import purge_payroll_work_import_details
 from app.payroll.final_line_projection import project_final_lines
 from app.payroll.immutable_evidence import capture_workflow_action_evidence
 from app.payroll.period_read import get_period_by_id
@@ -226,6 +227,7 @@ async def finalize_period(period_id: int, company_id: int, user_id: int, db: Asy
     if claimed.scalar_one_or_none() is None:
         raise HTTPException(status_code=422, detail="Period could not be claimed for finalization — its status may have changed concurrently.")
     await _project_approved_snapshot_final_lines(packet=packet, period_id=period_id, company_id=company_id, branch_id=period.branch_id, user_id=user_id, db=db)
+    await purge_payroll_work_import_details(db, company_id=company_id, period_id=period_id, actor_id=user_id)
     await capture_workflow_action_evidence(
         company_id=company_id,
         branch_id=period.branch_id,

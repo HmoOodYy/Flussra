@@ -46,7 +46,7 @@ def _assert_target(cursor):
 
 def test_fresh_upgrade_exposes_only_target_physical_authorities(target_database):
     _, dsn = target_database
-    assert _version(dsn) == "0093"
+    assert _version(dsn) == "0094"
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         _assert_target(cursor)
         for table in (

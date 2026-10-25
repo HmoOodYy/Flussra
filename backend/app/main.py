@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -15,6 +16,8 @@ from app.core.router import router as core_router
 from app.dashboard.router import router as dashboard_router
 from app.db.schema_guard import run_schema_guard
 from app.db.session import create_engine, dispose_engine
+from app.imports.errors import ImportFailure
+from app.imports.router import router as import_router
 from app.payroll.router import router as payroll_router
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.router import router as payroll_setup_router
@@ -73,6 +76,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.import_admission = anyio.CapacityLimiter(2)
+
+    @app.exception_handler(ImportFailure)
+    async def import_failure_handler(request: Request, exc: ImportFailure) -> JSONResponse:
+        del request
+        headers = {"Retry-After": "1"} if exc.status_code == 429 else None
+        return JSONResponse(status_code=exc.status_code,
+                            content={"detail": {"code": exc.code, "message": exc.message}}, headers=headers)
 
     @app.exception_handler(PolicyError)
     async def payroll_setup_policy_error_handler(
@@ -120,6 +131,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix="/auth", tags=["Auth"])
     app.include_router(core_router, prefix="/core", tags=["Core"])
     app.include_router(payroll_router, prefix="/payroll", tags=["Payroll"])
+    app.include_router(import_router)
     app.include_router(
         payroll_setup_router, prefix="/payroll-setup", tags=["Payroll Setup"]
     )

@@ -26,7 +26,11 @@ dependencies = [
     "PyJWT>=2.10",
 
     # Form data support (required by FastAPI for OAuth2 form login)
-    "python-multipart>=0.0.20",
+    "python-multipart>=0.0.32",
+
+    # Bounded spreadsheet inspection and safe XML parsing
+    "openpyxl>=3.1.5,<4",
+    "defusedxml>=0.7.1,<1",
 ]
 
 [project.optional-dependencies]
