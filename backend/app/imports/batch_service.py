@@ -204,7 +204,7 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
     def unit_inspection(value):
         value = value or {}
         keys = ("row_count", "column_count", "cell_count", "header_row_number", "header_state",
-                "date_order", "date_order_state", "encoding", "delimiter", "formula_count",
+                "date_order", "accepted_date_order", "date_order_state", "encoding", "delimiter", "formula_count",
                 "cached_formula_count", "missing_cache_count", "filename_date_candidates", "unit_date_candidates")
         return {key: value[key] for key in keys if key in value}
 
@@ -813,7 +813,8 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             inspection = source["materialized"]["inspection"]
             inspection["accepted_date_order"] = source.get("accepted_date_order")
             inspection["date_order_state"] = source.get("date_order_state")
-            inspection_updates.append((source["source_unit_id"], inspection.get("encoding"),
+            inspection_updates.append((source["source_unit_id"], source.get("accepted_date_order"),
+                                       inspection.get("encoding"),
                                        inspection.get("delimiter"), _json(inspection)))
         del context
         result = await anyio.to_thread.run_sync(prepare_preview, result)
@@ -829,14 +830,15 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             await persist_preview(db, company_id=cid, import_id=iid, branch_id=period.branch_id,
                                   period_id=period.payroll_period_id, result=result)
             current_unit_ids = {unit["sourceunitid"] for unit in current_units}
-            for source_unit_id, encoding, delimiter, inspection_json in inspection_updates:
+            for source_unit_id, date_order, encoding, delimiter, inspection_json in inspection_updates:
                 if source_unit_id not in current_unit_ids:
                     raise failure("IMPORT_REVISION_CONFLICT", "Source units changed while the preview was being prepared.")
                 await db.execute(text("""
-                    UPDATE import.filesourceunits SET encoding = :encoding, delimiter = :delimiter,
+                    UPDATE import.filesourceunits SET dateorder = :date_order,
+                        encoding = :encoding, delimiter = :delimiter,
                         inspectionmetadata = CAST(:inspection AS jsonb)
                     WHERE sourceunitid = :unit AND importid = :iid AND companyid = :cid
-                """), {"encoding": encoding, "delimiter": delimiter,
+                """), {"date_order": date_order, "encoding": encoding, "delimiter": delimiter,
                        "inspection": inspection_json, "unit": source_unit_id, "iid": iid, "cid": cid})
             # Store per-layout mapping identities without exposing generated IDs in their hashes.
             def_by_target = {target_key(d): d for d in definitions}

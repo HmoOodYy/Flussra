@@ -7,6 +7,7 @@ import pytest
 from openpyxl import Workbook
 from sqlalchemy import text
 
+from tests.calculation_snapshot_helpers import finalize, standard_scenario, submit_and_approve
 from tests.compensation_api_fixtures import (  # noqa: F401 - register isolated API fixtures
     p3c_application,
     p3c_database_engine,
@@ -616,6 +617,66 @@ async def test_sheet_date_provider_survives_preview_refresh(p3c_client, p3c_engi
         p3c_client, p3c_engine, tenant, period, "payroll.xlsx", output.getvalue(), unit_name,
         {"kind": "sheet", "value": date_text},
     )
+
+
+async def test_inferred_date_order_survives_refresh_and_finalization_purge(p3c_client, p3c_engine, tenant):
+    scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
+    period = scenario.period
+    async with p3c_engine.connect() as db:
+        driver = (await db.execute(text("""
+            SELECT d.drivernumber, x.workdate
+            FROM payroll.payrollperioddrivereligibility p
+            JOIN core.driverassignments a ON a.driverassignmentid=p.driverassignmentid
+                AND a.companyid=p.companyid AND a.branchid=p.branchid
+            JOIN core.drivers d ON d.driverid=a.driverid AND d.companyid=a.companyid
+            CROSS JOIN LATERAL unnest(p.eligibleworkdates) AS x(workdate)
+            WHERE p.companyid=:cid AND p.payrollperiodid=:pid AND p.iseligibleforperiod
+                AND extract(day FROM x.workdate)<>extract(month FROM x.workdate)
+            ORDER BY x.workdate, d.driverid LIMIT 1
+        """), {"cid": tenant.company_id, "pid": scenario.period_id})).one()
+    definition_id, definition_code = await _definition(p3c_engine, tenant, period)
+    date_text = driver.workdate.strftime("%d/%m/%Y")
+    payload = (f"DriverNumber,WorkDate,{definition_code}\n"
+               f"{driver.drivernumber},{date_text},4\n").encode()
+    uploaded = await _upload(p3c_client, tenant, period, [("inferred-date.csv", payload)])
+    assert uploaded.status_code == 200, uploaded.text
+    created = uploaded.json()
+    preview = await _map_and_preview(p3c_client, tenant, created, definition_id)
+    unit = preview["files"][0]["units"][0]
+    assert unit["date_order"] == "DMY"
+    assert unit["inspection"]["accepted_date_order"] == "DMY"
+    assert unit["inspection"]["date_order_state"] == "detected"
+
+    refreshed = await p3c_client.post(
+        f"/payroll/imports/{created['import_id']}/preview",
+        json={"expected_revision": preview["revision"]},
+        headers=tenant.admin,
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    refreshed_json = refreshed.json()
+    refreshed_unit = refreshed_json["files"][0]["units"][0]
+    assert refreshed_unit["date_order"] == "DMY"
+    assert refreshed_unit["inspection"]["accepted_date_order"] == "DMY"
+    assert refreshed_json["preview"]["mapping_fingerprint"] == preview["preview"]["mapping_fingerprint"]
+    assert refreshed_json["preview"]["content_fingerprint"] == preview["preview"]["content_fingerprint"]
+    assert refreshed_json["preview"]["plan_fingerprint"] == preview["preview"]["plan_fingerprint"]
+
+    await submit_and_approve(p3c_client, tenant, period)
+    finalized = await finalize(p3c_client, tenant, period)
+    assert finalized.status_code == 200, finalized.text
+    retained = await p3c_client.get(f"/payroll/imports/{created['import_id']}", headers=tenant.admin)
+    assert retained.status_code == 200, retained.text
+    retained_unit = retained.json()["files"][0]["units"][0]
+    assert retained.json()["files"][0]["content_purged_at"] is not None
+    assert retained_unit["inspection"] == {}
+    assert retained_unit["date_order"] == "DMY"
+    async with p3c_engine.connect() as db:
+        stored_order = await db.scalar(text("""
+            SELECT dateorder FROM import.filesourceunits
+            WHERE sourceunitid=:unit AND importid=:iid AND companyid=:cid
+        """), {"unit": retained_unit["source_unit_id"], "iid": created["import_id"],
+               "cid": tenant.company_id})
+    assert stored_order == "DMY"
 
 
 async def test_grid_sample_surfaces_nonblank_candidate_after_earlier_blank_sources(
