@@ -150,7 +150,12 @@ def test_semantic_fingerprints_ignore_surrogate_identifier_renumbering():
     renumbered = _context(driver=changed_driver, definition=changed_definition,
                           assignment=changed_assignment,
                           current_lines={(7100, WORK_DATE, 9100): Decimal("2.0000")})
+    renumbered["period"].update(id=3003, company_id=4004, branch_id=5005,
+                                 created_at="2030-01-01T00:00:00Z")
+    baseline["period"]["created_at"] = "2020-01-01T00:00:00Z"
+    source["source_unit_id"] = 17
     changed_source = _source()
+    changed_source["source_unit_id"] = 1700
     changed_source["mapping"]["3"] = "Definition:9100"
 
     original = build_batch_preview([deepcopy(source)], baseline)

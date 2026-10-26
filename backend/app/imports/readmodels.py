@@ -39,6 +39,34 @@ def bounded_page(base: dict, items: list[dict], offset: int, limit: int, total: 
     return canonical(response)
 
 
+def project_source_record(item: dict, cell_offset: int, cell_limit: int) -> dict:
+    """Project one source row's cells and matching normalized details as a page."""
+    projected = dict(item)
+    payload = projected.pop("payload", None) or {}
+    ordered = sorted(payload.items(), key=lambda pair: (0, int(pair[0])) if str(pair[0]).isdigit()
+                     else (1, str(pair[0])))
+    page = ordered[cell_offset:cell_offset + cell_limit]
+    page_columns = {int(key) for key, _ in page if str(key).isdigit()}
+    values = projected.get("values_json") or {}
+    issues = projected.get("issues") or []
+    projected["values_count"] = len(values)
+    projected["issue_count"] = len(issues)
+    projected["values_json"] = {
+        key: value for key, value in values.items()
+        if isinstance(value, dict) and value.get("source_column") in page_columns
+    }
+    projected["issues"] = [
+        issue for issue in issues
+        if issue.get("column") is None or issue.get("column") in page_columns
+    ]
+    projected["cell_count"] = len(ordered)
+    projected["cell_offset"] = cell_offset
+    projected["cell_limit"] = cell_limit
+    projected["cells"] = dict(page)
+    projected["next_cell_offset"] = (cell_offset + len(page) if cell_offset + len(page) < len(ordered) else None)
+    return canonical(projected)
+
+
 async def _read_identity(db, cid: int, uid: int, iid: int, revision: int, plan_fingerprint: str):
     row = (await db.execute(text("""
         SELECT w.payrollperiodid, w.planfingerprint, w.previewcounts, i.revision
@@ -263,18 +291,7 @@ async def read_sources(engine, cid, uid, iid, revision, plan_fingerprint, offset
             ORDER BY s.fileordinal,u.unitordinal,f.sourcerownumber
             OFFSET :offset LIMIT :limit
         """), params)).mappings()]
-        for item in items:
-            payload = item.pop("payload") or {}
-            if isinstance(payload, dict) and "raw" in payload and isinstance(payload["raw"], dict):
-                payload = payload["raw"]
-            ordered = sorted(payload.items(), key=lambda pair: (0, int(pair[0])) if str(pair[0]).isdigit()
-                            else (1, str(pair[0])))
-            item["cell_count"] = len(ordered)
-            item["cell_offset"] = cell_offset
-            item["cell_limit"] = cell_limit
-            item["cells"] = dict(ordered[cell_offset:cell_offset + cell_limit])
-            item["next_cell_offset"] = (cell_offset + len(item["cells"])
-                                         if cell_offset + len(item["cells"]) < len(ordered) else None)
+        items = [project_source_record(item, cell_offset, cell_limit) for item in items]
         base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
                 "summary": identity["previewcounts"], "filter": None}
         return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total))

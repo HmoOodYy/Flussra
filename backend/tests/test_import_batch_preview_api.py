@@ -210,6 +210,8 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
     assert source_rows.json()["filtered_count"] == 2
     assert source_rows.json()["items"][0]["cell_count"] == 3
     assert len(source_rows.json()["items"][0]["cells"]) == 1
+    assert source_rows.json()["items"][0]["values_count"] == 1
+    assert source_rows.json()["items"][0]["values_json"] == {}
     assert source_rows.json()["items"][0]["next_cell_offset"] == 1
     second_cell_page = await p3c_client.get(
         f"/payroll/imports/{created['import_id']}/source-records?{query}&cell_offset=1&cell_limit=1",
@@ -218,6 +220,14 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
     assert second_cell_page.status_code == 200, second_cell_page.text
     assert len(second_cell_page.json()["items"][0]["cells"]) == 1
     assert second_cell_page.json()["items"][0]["next_cell_offset"] == 2
+    third_cell_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&cell_offset=2&cell_limit=1",
+        headers=tenant.admin,
+    )
+    assert third_cell_page.status_code == 200, third_cell_page.text
+    assert third_cell_page.json()["items"][0]["next_cell_offset"] is None
+    assert len(third_cell_page.json()["items"][0]["values_json"]) == 1
+    assert next(iter(third_cell_page.json()["items"][0]["values_json"].values()))["source_column"] == 3
     async with p3c_engine.connect() as db:
         physical = (await db.execute(text("""
             SELECT f.fileordinal, fr.sourcerownumber, fr.sourceunitid
@@ -267,6 +277,23 @@ async def test_record_issues_are_read_from_bounded_per_record_json_not_duplicate
     assert all(item["severity"] == "Error" for item in issues.json()["items"])
     quantity_issue = next(item for item in issues.json()["items"] if item["code"] == "IMPORT_QUANTITY_INVALID")
     assert quantity_issue["value"] == "not-a-quantity"
+    source_rows = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&cell_offset=2&cell_limit=1",
+        headers=tenant.admin,
+    )
+    assert source_rows.status_code == 200, source_rows.text
+    source_row = source_rows.json()["items"][0]
+    assert source_row["issue_count"] > len(source_row["issues"])
+    assert any(issue["code"] == "IMPORT_QUANTITY_INVALID" for issue in source_row["issues"])
+    first_source_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&cell_offset=0&cell_limit=1",
+        headers=tenant.admin,
+    )
+    assert first_source_page.status_code == 200, first_source_page.text
+    first_source_row = first_source_page.json()["items"][0]
+    all_source_issues = {(issue["code"], issue.get("column")) for issue in source_row["issues"]}
+    all_source_issues.update((issue["code"], issue.get("column")) for issue in first_source_row["issues"])
+    assert len(all_source_issues) == source_row["issue_count"]
     async with p3c_engine.connect() as db:
         relational_issue_count = await db.scalar(text(
             "SELECT count(*) FROM import.importissues WHERE importid=:iid"), {"iid": created["import_id"]})
