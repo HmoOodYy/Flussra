@@ -116,21 +116,30 @@ async def test_interpretation_revision_conflicts_are_atomic_and_cancel_is_revisi
     assert created.status_code == 200, created.text
     import_id = created.json()["import_id"]
     path = f"/payroll/imports/{import_id}"
+    source_unit_id = created.json()["files"][0]["units"][0]["source_unit_id"]
 
     interpreted = await p3c_client.put(
-        f"{path}/mapping", json={"expected_revision": 1, "header_row_number": 2},
+        f"{path}/interpretation", json={"expected_revision": 1, "units": [
+            {"source_unit_id": source_unit_id, "selected": True, "header_row_number": 2}]},
         headers=tenant.admin,
     )
     assert interpreted.status_code == 200, interpreted.text
     assert interpreted.json()["revision"] == 2
-    assert interpreted.json()["interpretation"]["header_row_number"] == 2
+    interpreted_unit = interpreted.json()["files"][0]["units"][0]
+    assert interpreted_unit["header_row_number"] == 2
+    assert interpreted_unit["layout_id"] != created.json()["files"][0]["units"][0]["layout_id"]
+    new_layout = next(layout for layout in interpreted.json()["layouts"]
+                      if layout["layout_id"] == interpreted_unit["layout_id"])
+    assert new_layout["inspection"]["header_cells"] == ["0012", "2026-10-20", "4"]
 
     stale = await p3c_client.put(
-        f"{path}/mapping", json={"expected_revision": 1, "header_row_number": 1},
+        f"{path}/interpretation", json={"expected_revision": 1, "units": [
+            {"source_unit_id": source_unit_id, "selected": True, "header_row_number": 1}]},
         headers=tenant.admin,
     )
     invalid = await p3c_client.put(
-        f"{path}/mapping", json={"expected_revision": 2, "header_row_number": 99},
+        f"{path}/interpretation", json={"expected_revision": 2, "units": [
+            {"source_unit_id": source_unit_id, "selected": True, "header_row_number": 99}]},
         headers=tenant.admin,
     )
     after_failures = await p3c_client.get(path, headers=tenant.admin)
@@ -139,7 +148,7 @@ async def test_interpretation_revision_conflicts_are_atomic_and_cancel_is_revisi
     assert invalid.status_code == 422, invalid.text
     assert invalid.json()["detail"]["code"] == "IMPORT_HEADER_ROW_INVALID"
     assert after_failures.json()["revision"] == 2
-    assert after_failures.json()["interpretation"]["header_row_number"] == 2
+    assert after_failures.json()["files"][0]["units"][0]["header_row_number"] == 2
 
     stale_cancel = await p3c_client.post(
         f"{path}/cancel", json={"expected_revision": 1}, headers=tenant.admin,
@@ -158,6 +167,44 @@ async def test_interpretation_revision_conflicts_are_atomic_and_cancel_is_revisi
     assert repeated_cancel.status_code == 200, repeated_cancel.text
     assert repeated_cancel.json()["status"] == "Cancelled"
     assert repeated_cancel.json()["revision"] == 3
+
+
+async def test_interpretation_can_clear_explicit_date_order_and_date_context(
+    p3c_client, p3c_engine, tenant,
+):
+    period = await _period(p3c_client, p3c_engine, tenant)
+    created = await _upload(p3c_client, tenant, period)
+    assert created.status_code == 200, created.text
+    iid = created.json()["import_id"]
+    unit_id = created.json()["files"][0]["units"][0]["source_unit_id"]
+    fixed_date = period["start_date"]
+    malformed = await p3c_client.put(f"/payroll/imports/{iid}/interpretation", json={
+        "expected_revision": 1,
+        "units": [{"source_unit_id": unit_id, "selected": True,
+                   "date_source": {"kind": "fixed_unit", "value": None}}],
+    }, headers=tenant.admin)
+    assert malformed.status_code == 422, malformed.text
+    assert malformed.json()["detail"]["code"] == "IMPORT_DATE_SOURCE_INVALID"
+    accepted = await p3c_client.put(f"/payroll/imports/{iid}/interpretation", json={
+        "expected_revision": 1, "default_work_date": fixed_date,
+        "units": [{"source_unit_id": unit_id, "selected": True, "date_order": "DMY",
+                   "date_source": {"kind": "fixed_unit", "value": fixed_date}}],
+    }, headers=tenant.admin)
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["default_work_date"] == fixed_date
+    assert accepted.json()["files"][0]["units"][0]["date_order"] == "DMY"
+    assert accepted.json()["files"][0]["units"][0]["date_source"] == {
+        "kind": "fixed_unit", "value": fixed_date}
+
+    cleared = await p3c_client.put(f"/payroll/imports/{iid}/interpretation", json={
+        "expected_revision": accepted.json()["revision"], "default_work_date": None,
+        "units": [{"source_unit_id": unit_id, "selected": True, "date_order": None,
+                   "date_source": None}],
+    }, headers=tenant.admin)
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["default_work_date"] is None
+    assert cleared.json()["files"][0]["units"][0]["date_order"] is None
+    assert cleared.json()["files"][0]["units"][0]["date_source"] == {}
 
 
 async def test_import_read_and_mutation_enforce_company_branch_driver_and_permission_boundaries(
@@ -195,13 +242,13 @@ async def test_import_read_and_mutation_enforce_company_branch_driver_and_permis
 async def test_upload_parser_runs_after_auth_transaction_and_before_period_lock_without_payroll_writes(
     p3c_client, p3c_engine, tenant, monkeypatch,
 ):
-    from app.imports import service
+    from app.imports import batch_service
 
     period = await _period(p3c_client, p3c_engine, tenant)
     period_id = period["payroll_period_id"]
     before = await _canonical_counts(p3c_engine, period_id)
-    original_inspect = service.inspect_file
-    original_period_lock = service._lock_period_for_mutation
+    original_inspect = batch_service.inspect_source_file
+    original_period_lock = batch_service._lock_period_for_mutation
     lock_called = False
     observations: list[tuple[int, bool]] = []
 
@@ -214,8 +261,8 @@ async def test_upload_parser_runs_after_auth_transaction_and_before_period_lock_
         lock_called = True
         return await original_period_lock(*args, **kwargs)
 
-    monkeypatch.setattr(service, "inspect_file", inspect_without_db_transaction)
-    monkeypatch.setattr(service, "_lock_period_for_mutation", observed_period_lock)
+    monkeypatch.setattr(batch_service, "inspect_source_file", inspect_without_db_transaction)
+    monkeypatch.setattr(batch_service, "_lock_period_for_mutation", observed_period_lock)
     created = await _upload(p3c_client, tenant, period)
     after = await _canonical_counts(p3c_engine, period_id)
 
@@ -235,9 +282,11 @@ async def test_cancelled_period_rejects_new_upload_and_reinterpretation(
     force_status(tenant, period["payroll_period_id"], "Cancelled")
 
     new_upload = await _upload(p3c_client, tenant, period, key=uuid4())
+    source_unit_id = created.json()["files"][0]["units"][0]["source_unit_id"]
     reinterpretation = await p3c_client.put(
-        f"/payroll/imports/{import_id}/mapping",
-        json={"expected_revision": 1, "header_row_number": 2},
+        f"/payroll/imports/{import_id}/interpretation",
+        json={"expected_revision": 1, "units": [
+            {"source_unit_id": source_unit_id, "selected": True, "header_row_number": 2}]},
         headers=tenant.admin,
     )
 
@@ -261,24 +310,26 @@ async def test_ymd_interpretation_is_normalized_and_persisted_for_each_file_type
     assert created.status_code == 200, created.text
     import_id = created.json()["import_id"]
     path = f"/payroll/imports/{import_id}"
+    source_unit_id = created.json()["files"][0]["units"][0]["source_unit_id"]
 
     interpreted = await p3c_client.put(
-        f"{path}/mapping",
-        json={"expected_revision": 1, "date_order": "YMD"},
+        f"{path}/interpretation",
+        json={"expected_revision": 1, "units": [
+            {"source_unit_id": source_unit_id, "selected": True, "date_order": "YMD"}]},
         headers=tenant.admin,
     )
     read_back = await p3c_client.get(path, headers=tenant.admin)
 
     assert interpreted.status_code == 200, interpreted.text
     assert interpreted.json()["revision"] == 2
-    assert interpreted.json()["interpretation"]["date_order"] == "YMD"
     assert read_back.status_code == 200, read_back.text
-    assert read_back.json()["interpretation"]["date_order"] == "YMD"
-    assert read_back.json()["interpretation"]["inspection"]["date_order"] == "YMD"
+    unit = read_back.json()["files"][0]["units"][0]
+    assert unit["date_order"] == "YMD"
+    assert unit["inspection"]["date_order"] == "YMD"
 
 
 async def test_depth_rejection_does_not_stage_or_partially_reinterpret_import(
-    p3c_client, p3c_engine, tenant, monkeypatch,
+    p3c_client, p3c_engine, tenant,
 ):
     from app.imports.files import MAX_XLSX_XML_DEPTH
 
@@ -310,26 +361,18 @@ async def test_depth_rejection_does_not_stage_or_partially_reinterpret_import(
     path = f"/payroll/imports/{import_id}"
     before = await p3c_client.get(path, headers=tenant.admin)
     assert before.status_code == 200, before.text
-
-    from app.imports import service
-
-    original_inspect = service.inspect_file
-
-    def inspect_over_depth(_data, filename, **kwargs):
-        return original_inspect(over_depth_data, filename, **kwargs)
-
-    monkeypatch.setattr(service, "inspect_file", inspect_over_depth)
-
+    source_unit_id = before.json()["files"][0]["units"][0]["source_unit_id"]
     rejected_reinterpretation = await p3c_client.put(
-        f"{path}/mapping",
-        json={"expected_revision": 1, "date_order": "YMD"},
+        f"{path}/interpretation",
+        json={"expected_revision": 1, "units": [
+            {"source_unit_id": source_unit_id, "selected": True, "header_row_number": 99}]},
         headers=tenant.admin,
     )
     after = await p3c_client.get(path, headers=tenant.admin)
 
     assert rejected_reinterpretation.status_code == 422, rejected_reinterpretation.text
-    assert rejected_reinterpretation.json()["detail"]["code"] == "IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED"
+    assert rejected_reinterpretation.json()["detail"]["code"] == "IMPORT_HEADER_ROW_INVALID"
     assert after.status_code == 200, after.text
     assert after.json()["revision"] == before.json()["revision"] == 1
     assert after.json()["status"] == before.json()["status"] == "NeedsMapping"
-    assert after.json()["interpretation"] == before.json()["interpretation"]
+    assert after.json()["files"][0]["units"] == before.json()["files"][0]["units"]

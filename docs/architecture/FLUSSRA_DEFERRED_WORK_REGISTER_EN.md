@@ -145,11 +145,11 @@ If an issue is officially moved to a different work unit:
 
 **P8b:** CLOSED / merged (PR #69 at `30d538a9686fcc561dde2ace5533560e4345abfe`, migration `0093`; physical authority cutover).
 
-**P8c:** CLOSED (no migration; merge pending): development reset, canonical demo seed and final refoundation closure from baseline `30d538a9686fcc561dde2ace5533560e4345abfe`.
+**P8c:** CLOSED / merged (PR #70; no migration): development reset, canonical demo seed and final refoundation closure from baseline `30d538a9686fcc561dde2ace5533560e4345abfe`.
 
-**Current baseline:** `main @ 30d538a9686fcc561dde2ace5533560e4345abfe` (PR #69), Alembic head `0093`.
+**P8c starting baseline (historical):** `main @ 30d538a9686fcc561dde2ace5533560e4345abfe` (PR #69), Alembic head `0093`. The C2 backend refoundation starts from merged A1, `main @ 337e3f7` (PR #74), head `0094`; its corrected forward schema is `0095`.
 
-**Next work unit:** the refoundation program is complete. C2 Import is the next program; it is unblocked and not started.
+**Current work:** the original refoundation program is complete. C2 Import has started; the batch/layout/compact-preview backend and canonical bulk-write gate precede A3 under the separate C2 plan/design. Public Slice B decisions/apply remain downstream.
 
 **Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`. P3b merge baseline: `main` at the PR #46 merge, `edcf871f59d0616e194a8e752d9b6ba23f42b8a2`. P3c merge baseline: `main` at the PR #47 merge, `3f389499bbb1a0a70935360f32230f8e0aae4a7c`.
 

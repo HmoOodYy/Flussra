@@ -1,4 +1,4 @@
-"""Strict multipart receive boundary for one bounded Import file."""
+"""Strict multipart receive boundary for bounded ordered batches of files."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from python_multipart.multipart import MultipartParser, MultipartState, parse_op
 from starlette.requests import ClientDisconnect, Request
 
 from app.imports.errors import ImportFailure
+from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY, ImportResourcePolicy
 
-MAX_FILE_BYTES = 10_000_000
-MAX_MULTIPART_OVERHEAD_BYTES = 64_000
-MAX_REQUEST_BODY_BYTES = MAX_FILE_BYTES + MAX_MULTIPART_OVERHEAD_BYTES
+MAX_FILE_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_file_bytes
+MAX_MULTIPART_OVERHEAD_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_multipart_overhead_bytes
+MAX_REQUEST_BODY_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_request_body_bytes
 MAX_MULTIPART_HEADER_BYTES = 8_192
 MAX_MULTIPART_HEADER_COUNT = 8
 _CHUNK_SIZE = 64 * 1024
@@ -27,8 +28,10 @@ class FilePayload:
     file_size: int
 
 
-async def receive_file(request: Request) -> FilePayload:
-    """Receive exactly one multipart ``file`` part with strict actual-byte caps."""
+async def receive_files(
+    request: Request, policy: ImportResourcePolicy
+) -> list[FilePayload]:
+    """Receive a bounded ordered multipart batch of repeated ``file`` parts."""
     content_type = request.headers.get("content-type", "")
     media_type, content_type_parameters = parse_options_header(content_type)
     boundary = content_type_parameters.get(b"boundary")
@@ -37,6 +40,8 @@ async def receive_file(request: Request) -> FilePayload:
 
     file_bytes = bytearray()
     digest = hashlib.sha256()
+    files: list[FilePayload] = []
+    total_file_bytes = 0
     request_bytes = 0
     part_count = 0
     part_open = False
@@ -50,8 +55,8 @@ async def receive_file(request: Request) -> FilePayload:
     def on_part_begin() -> None:
         nonlocal part_count, part_open, part_finished, filename
         part_count += 1
-        if part_count > 1:
-            raise _failure("IMPORT_MULTIPART_PARTS_INVALID", "Upload exactly one file and no other form fields.")
+        if part_count > policy.max_files:
+            raise _failure("IMPORT_FILE_COUNT_EXCEEDED", "Import batch contains too many files.")
         part_open = True
         part_finished = False
         filename = None
@@ -92,16 +97,29 @@ async def receive_file(request: Request) -> FilePayload:
             raise _failure("IMPORT_FILE_NAME_INVALID", "Filename contains invalid control characters.")
 
     def on_part_data(data: bytes, start: int, end: int) -> None:
+        nonlocal total_file_bytes
         if not part_open or filename is None:
             raise _failure("IMPORT_MULTIPART_INVALID", "Multipart file data appeared before valid headers.")
         piece = memoryview(data)[start:end]
-        if len(file_bytes) + len(piece) > MAX_FILE_BYTES:
-            raise _failure("IMPORT_FILE_TOO_LARGE", "File exceeds the 10 MB upload limit.")
+        if len(file_bytes) + len(piece) > policy.max_file_bytes:
+            raise _failure("IMPORT_FILE_TOO_LARGE", "A file exceeds its configured upload limit.")
+        if total_file_bytes + len(piece) > policy.max_total_file_bytes:
+            raise _failure("IMPORT_BATCH_TOO_LARGE", "Import batch exceeds its aggregate file-byte limit.")
         file_bytes.extend(piece)
         digest.update(piece)
 
     def on_part_end() -> None:
-        nonlocal part_open, part_finished
+        nonlocal part_open, part_finished, total_file_bytes, digest
+        if filename is None:
+            raise _failure("IMPORT_MULTIPART_INVALID", "Multipart file data appeared before valid headers.")
+        if not file_bytes:
+            raise _failure("IMPORT_FILE_EMPTY", "A file in the import batch is empty.")
+        files.append(FilePayload(
+            data=bytes(file_bytes), filename=filename, file_sha256=digest.hexdigest(), file_size=len(file_bytes)
+        ))
+        total_file_bytes += len(file_bytes)
+        file_bytes.clear()
+        digest = hashlib.sha256()
         part_open = False
         part_finished = True
 
@@ -131,14 +149,14 @@ async def receive_file(request: Request) -> FilePayload:
             if not chunk:
                 continue
             request_bytes += len(chunk)
-            if request_bytes > MAX_REQUEST_BODY_BYTES:
-                raise _failure("IMPORT_REQUEST_TOO_LARGE", "Multipart request exceeds the 10.064 MB limit.")
+            if request_bytes > policy.max_request_body_bytes:
+                raise _failure("IMPORT_REQUEST_TOO_LARGE", "Multipart request exceeds its configured batch limit.")
             written = parser.write(chunk)
             if written != len(chunk):
                 raise _failure("IMPORT_MULTIPART_INVALID", "Multipart parser did not consume the complete body.")
-            if request_bytes - len(file_bytes) > MAX_MULTIPART_OVERHEAD_BYTES:
+            if request_bytes - total_file_bytes - len(file_bytes) > policy.max_multipart_overhead_bytes:
                 raise _failure(
-                    "IMPORT_MULTIPART_OVERHEAD_TOO_LARGE", "Multipart overhead exceeds 64 KB."
+                    "IMPORT_MULTIPART_OVERHEAD_TOO_LARGE", "Multipart overhead exceeds its configured limit."
                 )
         parser.finalize()
     except ImportFailure:
@@ -148,22 +166,14 @@ async def receive_file(request: Request) -> FilePayload:
     except (MultipartParseError, ValueError, UnicodeError) as exc:
         raise _failure("IMPORT_MULTIPART_INVALID", "Multipart body is malformed or incomplete.") from exc
 
-    overhead_bytes = request_bytes - len(file_bytes)
-    if overhead_bytes > MAX_MULTIPART_OVERHEAD_BYTES:
-        raise _failure("IMPORT_MULTIPART_OVERHEAD_TOO_LARGE", "Multipart overhead exceeds 64 KB.")
-    if part_count != 1 or not part_finished or part_open or not multipart_ended:
-        raise _failure("IMPORT_UPLOAD_INCOMPLETE", "Upload must contain one complete file part and final boundary.")
+    overhead_bytes = request_bytes - total_file_bytes
+    if overhead_bytes > policy.max_multipart_overhead_bytes:
+        raise _failure("IMPORT_MULTIPART_OVERHEAD_TOO_LARGE", "Multipart overhead exceeds its configured limit.")
+    if not files or not part_finished or part_open or not multipart_ended:
+        raise _failure("IMPORT_UPLOAD_INCOMPLETE", "Upload must contain complete file parts and a final boundary.")
     if parser.state != MultipartState.END:
         raise _failure("IMPORT_UPLOAD_INCOMPLETE", "Upload is missing its final multipart boundary.")
-    if not file_bytes:
-        raise _failure("IMPORT_FILE_EMPTY", "The uploaded file is empty.")
-    assert filename is not None
-    return FilePayload(
-        data=bytes(file_bytes),
-        filename=filename,
-        file_sha256=digest.hexdigest(),
-        file_size=len(file_bytes),
-    )
+    return files
 
 
 def _failure(code: str, message: str) -> ImportFailure:

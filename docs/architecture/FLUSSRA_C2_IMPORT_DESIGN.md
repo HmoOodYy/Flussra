@@ -60,7 +60,7 @@ Numeric/slash date-order inference for column values follows the existing unambi
 
 Only mapped definition columns belong to a source's supplied set. Omitted/unmapped definitions create no candidate, blank marker, zero, clear operation or unchanged evidence. Later partial Imports compare only their supplied keys against then-current payroll; other definitions and notes remain untouched.
 
-For a mapped definition, blank means no incoming quantity and zero is explicit zero. Preserve that distinction in normalized data and fingerprints. All-blank source rows are skipped without inventing payroll changes. Count mapped candidates, including blanks/invalid values, for admission resource accounting.
+For a mapped definition, blank means no incoming quantity and zero is explicit zero. Preserve that distinction in normalized data and fingerprints. All-blank source rows are skipped without Driver/date errors or confirmation requirements for nonexistent incoming facts; a missing required formula cache is not a blank. Count mapped candidates, including blanks/invalid values, for admission resource accounting. XLSX numeric values and numeric cached formula results retain their XML numeric lexemes for exact Decimal validation, rather than first rounding through a binary float; workbook-styled dates/times/durations keep their interpreted types.
 
 Typed values use exact finite Decimals and canonical quantity validation, including frozen InputType and supported calculation method/version. Flussra never evaluates formulas: use cached results; missing required caches are errors. Identifier text is preserved where practical; numeric identifiers warn without invented leading-zero padding.
 
@@ -95,12 +95,13 @@ All specialized ownership is Company/Import scoped with composite FKs. Generic I
 | Table | Role |
 |---|---|
 | Imports | Existing neutral envelope, lifecycle, revision, correlation, idempotency and actors |
+| FileSourceBatches | File-source contract/version and immutable ordered creation manifest; source metadata is not placed on the PayrollWork target |
 | FileSources | Many immutable files per Import, unique batch file ordinal; content/inspection purge markers |
 | FileSourceUnits | File-owned CSV/worksheet identity; selection, header, date provider/order and current layout binding |
 | SourceLayouts | Import-owned structure digest and accepted mapping; transient header/inspection samples kept separate |
 | ImportSourceRecords | Neutral source locator and bounded mapped typed-source payload, one per source row |
 | FileSourceRecords | Source-record -> source unit + physical row; uniqueness is unit + row, not Import + row |
-| PayrollWorkImports | Period ownership, immutable source manifest, accepted Import fixed-date context, versions, mapping/content/plan fingerprints, counts and future receipt summary; no global ColumnMapping |
+| PayrollWorkImports | Period ownership, accepted Import fixed-date context, versions, mapping/content/plan fingerprints, counts and future receipt summary; no global ColumnMapping |
 | PayrollWorkRecords | One compact normalized source record: Driver/assignment/date scope, preview-group reference, RowFingerprint, skipped state, supplied-values JSON and issues JSON |
 | PayrollWorkDriverMatches | One scoped identifier match/proposal; later confirmations remain Slice B |
 | PayrollWorkRecordIdentifiers | Source identifier-column associations with their match, never one row per quantity |
@@ -129,12 +130,12 @@ Source/configuration mutations require expected_revision, increment once and inv
 
 ## 6. Semantic identities
 
-Current target/source contracts are explicitly versioned for the cutover; canonicalization is version **3**. Unsupported stored versions fail closed, with reset/re-upload rather than adapters.
+The generic envelope stays version 1; File batch/file source and PayrollWork target contracts are version **2**, with canonicalization version **3**. Unsupported stored versions fail closed, with reset/re-upload rather than adapters.
 
 SHA-256 identities use deterministic versioned canonical UTF-8 JSON, exact Decimal normalization, blank distinct from zero and sorted multisets retaining duplicates. Generated Import/file/unit/layout/source/match/group/period/definition/Driver/assignment IDs and audit timestamps never enter public semantic hashes. Relational IDs remain legitimate ownership/application references.
 
 - MappingFingerprint: period business meaning and complete accepted unit/layout/provider contracts. Translate definition references into frozen code/name, InputType/unit, calculation method/version, rate shape and active meaning. Include actual layout assignment/source interpretation, not generated layout IDs.
-- RowFingerprint: that unit's accepted semantic contract, normalized source identifiers/date and only supplied definitions/values. Ignored raw content cannot change semantic content.
+- RowFingerprint: a precomputed digest of that unit's accepted semantic mapping/interpretation contract, normalized source identifiers/date and only supplied definitions/values. Invalid mapped date/quantity values retain their relevant raw/type/cache meaning. Ignored raw content cannot change semantic content.
 - ContentFingerprint: accepted mapping semantics and the complete sorted row multiset. It is separate from immutable byte digests.
 - PlanFingerprint: content plus permanent Driver keys, assignment business window/Branch/timezone meaning, relevant current source presence/quantities/Status/day state, outcomes, issues, source provenance and explicit unresolved decision/confirmation state.
 
@@ -146,12 +147,12 @@ File batch ordinal, worksheet name and physical row/column are source coordinate
 
 The combined preview is Driver + WorkDate oriented across all selected layouts. Columns are the dynamic union of mapped frozen definitions, with code/name/unit/type from that period. Row values omit unsupplied definitions, explicitly mark mapped blanks and preserve zero. Layout mapping inspection remains separate and lists its source units.
 
-One grid value can cite contributing source records/columns. Duplicate candidates display a blocking duplicate summary/count, never an arbitrarily chosen incoming value or implicit sum. Bounded source/issue drilldown exposes every retained candidate and physical locator. Internal granular fact iteration is not a public row-per-fact screen contract.
+One grid value can cite contributing source records/columns. Every supplied definition appears even when more than five layout groups contribute to one Driver/day. Each value exposes exact candidate and nonblank candidate counts, with at most five deterministic provenance samples, nonblank candidates first. Source-record samples are separately bounded to five, with exact totals and issue counts. Duplicate nonblank candidates display a blocking summary/count, never an arbitrarily chosen incoming value or implicit sum. Bounded source/issue drilldown exposes every retained candidate and physical locator. Internal granular fact iteration is not a public row-per-fact screen contract.
 
 ### 7.2 Backend surface
 
 - POST /payroll/periods/{period_id}/imports: ordered multipart batch of one or more repeated file parts; Idempotency-Key required.
-- GET /payroll/imports/{id}: bounded metadata, files/units/layout membership, accepted interpretation/mappings, revision, summaries and preview identity; never file bytes.
+- GET /payroll/imports/{id}: bounded metadata, files/units/layout membership, accepted interpretation/mappings, revision, summaries and preview identity; never file bytes. Mapping targets use target_offset/target_limit (default 50/max 100) and mapping_target_page. Full header labels use header_layout_id/header_offset/header_limit (default/max 25) and header_page. Layout summaries show at most 12 labels of 80 characters, with exact header_count and an explicit truncation flag; they are not the full mapping-inspection contract.
 - PUT /payroll/imports/{id}/interpretation: revisioned selection/header/date-provider changes, including accepted Import fixed date.
 - POST /payroll/imports/{id}/layouts: explicit compatible-unit split/regroup.
 - PUT /payroll/imports/{id}/layouts/{layout_id}/mapping: accept that layout's mapping, invalidate preview.
@@ -161,7 +162,7 @@ One grid value can cite contributing source records/columns. Duplicate candidate
 - GET /payroll/periods/{period_id}/imports/template.xlsx: dynamic frozen-definition template, optionally a selected definition subset; no fixed domain columns.
 - POST /payroll/imports/{id}/cancel: whole uncompleted batch only.
 
-Current page policy: grid default 25/max 100; issues default 50/max 200; source records default 25/max 100; serialized response at most 2,000,000 bytes, with an explicit next offset when short. No whole-workbook response. Severity filters cover errors/warnings/conflicts and counts cover the complete Import. Source-cell pages prevent one large source row from requiring an unlimited response.
+Current page policy: grid default 25/max 100; issues default 50/max 200; source records default 25/max 100, with cell_offset/cell_limit (default 32/max 50). Serialized responses, including root metadata, are at most 2,000,000 UTF-8 bytes; a short page exposes its next offset. No whole-workbook response. Severity filters cover errors/warnings/conflicts and counts cover the complete Import. Issue pages include the offending retained value. Source-cell pages prevent one large source row from requiring an unlimited response.
 
 Mutating operations require payroll.entry and same-Company/Branch access, non-driver actor, editable period and live Import. Reads require payroll.view or payroll.entry with the same subject/scope boundaries. Register every route in the authorization inventory. No decision, confirmation, exclusion, Status-removal, apply or processing-status endpoint is exposed.
 
@@ -186,6 +187,7 @@ The initial operating defaults below protect one submitted Import, not business 
 | Selected data rows/batch | 50,000 |
 | Mapped quantity candidates/batch | 250,000, including blanks/errors |
 | Text/cell | 8,000 UTF-8 bytes |
+| Inspection metadata bytes | 4,000,000, with bounded header samples |
 | Concurrent heavy requests/process | 2, with immediate 429 and Retry-After |
 
 These are configurable operational ceilings, never schema CHECK maxima for Driver/definition/file/layout counts. Aggregate byte/decompression/unit metadata checks cover the entire uploaded batch; selected-row/candidate checks cover the whole selected workload across every layout, so splitting does not bypass them. Reject atomically with actionable errors, never truncate or accept an incomplete plan.
@@ -200,7 +202,7 @@ The million-cell rectangle is a parser/security ceiling, not a million relationa
 
 Import owns cleanup, invoked inside canonical Payroll finalization after period lock/Locked transition. Lock ordered Imports after the period. Purge every file's bytes/inspection, unit/layout inspection samples, source records/typed payloads, identifiers/matches, normalized values/issues and preview groups/plan state, including never-completed/cancelled Imports.
 
-Retain envelope/file manifest metadata, accepted unit/provider/header interpretation, layout mapping/identity, mapping/content fingerprints and legitimate receipt/audit metadata. Do not fabricate completion. The narrowly scoped retention exception permits only those removals/clears; finalized periods cannot recreate detail. A failure rolls back complete finalization. All temporary preparation streams are invocation-owned and removed independently of durable Import completion.
+Retain envelope/file manifest metadata, accepted unit/provider/header interpretation, layout mapping/identity, mapping/content fingerprints and legitimate receipt/audit metadata. ReviewSummary currently retains only aggregate preview counts, not a fabricated completion receipt. Set the target DetailPurgedAtUtc marker once per Import; never depend on its file count or completion state to discover cleanup work. The narrowly scoped retention exception permits only those removals/clears; finalized periods cannot recreate detail. A failure rolls back complete finalization. All temporary preparation streams are invocation-owned and removed independently of durable Import completion.
 
 ### 9.2 Internal canonical bulk quantity boundary
 

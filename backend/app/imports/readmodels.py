@@ -1,0 +1,280 @@
+"""Revision-bound, response-bounded Import preview projections."""
+from __future__ import annotations
+
+from functools import partial
+
+import anyio
+from sqlalchemy import text
+
+from app.imports.errors import ImportFailure
+from app.imports.mapping import canonical, encoded
+from app.imports.runtime import authorize, failure
+from app.payroll.period_definitions import list_period_definitions
+
+MAX_RESPONSE_BYTES = 2_000_000
+ROW_DEFAULT = 25
+ROW_MAX = 100
+ISSUE_DEFAULT = 50
+ISSUE_MAX = 200
+SOURCE_DEFAULT = 25
+SOURCE_MAX = 100
+ROW_DETAIL_SAMPLE = 5
+
+
+def bounded_page(base: dict, items: list[dict], offset: int, limit: int, total: int) -> dict:
+    response = {**base, "offset": offset, "limit": limit, "filtered_count": total,
+                "items": [], "next_offset": None}
+    size = len(encoded(response).encode("utf-8"))
+    for item in items:
+        item_size = len(encoded(item).encode("utf-8")) + 1
+        if size + item_size > MAX_RESPONSE_BYTES:
+            if not response["items"]:
+                raise failure("IMPORT_PREVIEW_ITEM_TOO_LARGE", "A source item exceeds the response limit; request source detail separately.", 422)
+            break
+        response["items"].append(item)
+        size += item_size
+    consumed = len(response["items"])
+    if offset + consumed < total:
+        response["next_offset"] = offset + consumed
+    return canonical(response)
+
+
+async def _read_identity(db, cid: int, uid: int, iid: int, revision: int, plan_fingerprint: str):
+    row = (await db.execute(text("""
+        SELECT w.payrollperiodid, w.planfingerprint, w.previewcounts, i.revision
+        FROM import.imports i JOIN import.payrollworkimports w
+          ON w.importid = i.importid AND w.companyid = i.companyid
+        WHERE i.importid = :iid AND i.companyid = :cid
+    """), {"iid": iid, "cid": cid})).mappings().first()
+    if row is None:
+        raise ImportFailure("IMPORT_NOT_FOUND", "Import not found.", 404)
+    await authorize(db, cid, uid, row["payrollperiodid"], mutate=False)
+    if row["revision"] != revision or row["planfingerprint"] != plan_fingerprint or not plan_fingerprint:
+        raise failure("IMPORT_PREVIEW_STALE", "Preview changed. Read current metadata before requesting another page.")
+    return row
+
+
+async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
+                    plan_fingerprint: str, offset: int, limit: int, severity: str | None):
+    if limit < 1 or limit > ROW_MAX or offset < 0:
+        raise failure("IMPORT_PAGE_INVALID", f"Rows require limit 1–{ROW_MAX} and a non-negative offset.", 422)
+    if severity not in (None, "Error", "Warning", "Conflict"):
+        raise failure("IMPORT_SEVERITY_INVALID", "Severity must be Error, Warning or Conflict.", 422)
+    async with engine.begin() as db:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        identity = await _read_identity(db, cid, uid, iid, revision, plan_fingerprint)
+        params = {"cid": cid, "iid": iid, "severity": severity}
+        severity_sql = "AND g.errorcount > 0" if severity == "Error" else "AND g.warningcount > 0" if severity == "Warning" else "AND g.conflictcount > 0" if severity == "Conflict" else ""
+        total = (await db.execute(text(f"""
+            SELECT count(*) FROM import.payrollworkpreviewgroups g
+            WHERE g.companyid = :cid AND g.importid = :iid {severity_sql}
+        """), params)).scalar_one()
+        groups = (await db.execute(text(f"""
+            SELECT g.previewgroupid, g.groupfingerprint, g.driverid, g.workdate,
+                g.driverdisplay, g.errorcount, g.warningcount, g.conflictcount
+            FROM import.payrollworkpreviewgroups g
+            WHERE g.companyid = :cid AND g.importid = :iid {severity_sql}
+            ORDER BY g.workdate NULLS LAST, g.driverdisplay->>'driver_name' NULLS LAST,
+                     g.groupfingerprint OFFSET :offset LIMIT :limit
+        """), {**params, "offset": offset, "limit": limit})).mappings().all()
+        group_ids = [group["previewgroupid"] for group in groups]
+        records_by_group = {key: [] for key in group_ids}
+        record_counts = {key: 0 for key in group_ids}
+        candidates_by_group = {key: {} for key in group_ids}
+        if group_ids:
+            for record in (await db.execute(text("""
+                WITH ranked AS (
+                SELECT r.previewgroupid, r.sourcerecordid, r.driverassignmentid, r.workdate,
+                    r.isskipped, r.valuesjson, r.issuesjson, f.fileordinal, u.unitname,
+                    f.originalfilename, fr.sourcerownumber,
+                    count(*) OVER (PARTITION BY r.previewgroupid) AS total_records,
+                    row_number() OVER (PARTITION BY r.previewgroupid
+                        ORDER BY f.fileordinal, u.unitordinal, fr.sourcerownumber) AS record_rank
+                FROM import.payrollworkrecords r
+                JOIN import.filesourcerecords fr ON fr.sourcerecordid = r.sourcerecordid
+                    AND fr.importid = r.importid AND fr.companyid = r.companyid
+                JOIN import.filesourceunits u ON u.sourceunitid = fr.sourceunitid
+                    AND u.importid = fr.importid AND u.companyid = fr.companyid
+                JOIN import.filesources f ON f.filesourceid = u.filesourceid
+                    AND f.importid = u.importid AND f.companyid = u.companyid
+                WHERE r.companyid = :cid AND r.importid = :iid
+                    AND r.previewgroupid = ANY(CAST(:ids AS bigint[]))
+                )
+                SELECT * FROM ranked WHERE record_rank <= :sample
+                ORDER BY previewgroupid, record_rank
+            """), {"cid": cid, "iid": iid, "ids": group_ids, "sample": ROW_DETAIL_SAMPLE})).mappings():
+                records_by_group[record["previewgroupid"]].append(dict(record))
+                record_counts[record["previewgroupid"]] = record["total_records"]
+            for candidate in (await db.execute(text("""
+                WITH expanded AS (
+                    SELECT r.previewgroupid, r.sourcerecordid, entry.key AS definition_id,
+                        entry.value AS value, f.fileordinal, f.originalfilename, u.unitname,
+                        u.unitordinal, fr.sourcerownumber,
+                        count(*) OVER (PARTITION BY r.previewgroupid, entry.key) AS candidate_count,
+                        count(*) FILTER (WHERE NOT COALESCE((entry.value->>'is_blank')::boolean, FALSE))
+                            OVER (PARTITION BY r.previewgroupid, entry.key) AS nonblank_candidate_count,
+                        row_number() OVER (PARTITION BY r.previewgroupid, entry.key
+                            ORDER BY COALESCE((entry.value->>'is_blank')::boolean, FALSE),
+                                f.fileordinal, u.unitordinal, fr.sourcerownumber) AS candidate_rank
+                    FROM import.payrollworkrecords r
+                    CROSS JOIN LATERAL jsonb_each(r.valuesjson) AS entry(key, value)
+                    JOIN import.filesourcerecords fr ON fr.sourcerecordid=r.sourcerecordid
+                        AND fr.importid=r.importid AND fr.companyid=r.companyid
+                    JOIN import.filesourceunits u ON u.sourceunitid=fr.sourceunitid
+                        AND u.importid=fr.importid AND u.companyid=fr.companyid
+                    JOIN import.filesources f ON f.filesourceid=u.filesourceid
+                        AND f.importid=u.importid AND f.companyid=u.companyid
+                    WHERE r.companyid=:cid AND r.importid=:iid
+                        AND r.previewgroupid = ANY(CAST(:ids AS bigint[]))
+                )
+                SELECT * FROM expanded WHERE candidate_rank <= :sample
+                ORDER BY previewgroupid, definition_id, candidate_rank
+            """), {"cid": cid, "iid": iid, "ids": group_ids, "sample": ROW_DETAIL_SAMPLE})).mappings():
+                values = candidates_by_group[candidate["previewgroupid"]]
+                entry = values.setdefault(str(candidate["definition_id"]), {
+                    "candidate_count": candidate["candidate_count"],
+                    "nonblank_candidate_count": candidate["nonblank_candidate_count"], "candidates": []})
+                value = candidate["value"]
+                entry["candidates"].append({"source_record_id": candidate["sourcerecordid"],
+                    "file_ordinal": candidate["fileordinal"], "file_name": candidate["originalfilename"],
+                    "unit_name": candidate["unitname"], "source_row": candidate["sourcerownumber"],
+                    "source_column": value["source_column"], "quantity": value["quantity"],
+                    "is_blank": value["is_blank"], "outcome": value["outcome"],
+                    "current_quantity": value["current_quantity"],
+                    "current_source_exists": value["current_source_exists"]})
+        definitions = await list_period_definitions(identity["payrollperiodid"], cid, db, active_only=True)
+        definitions_by_id = {str(d.payroll_period_definition_id): {
+            "payroll_period_definition_id": d.payroll_period_definition_id, "code": d.code,
+            "name": d.name, "unit": d.unit, "input_type": d.input_type}
+            for d in definitions}
+        items = []
+        for group in groups:
+            values = {}
+            sources = []
+            for record in records_by_group[group["previewgroupid"]]:
+                record_issues = record["issuesjson"] or []
+                sources.append({"source_record_id": record["sourcerecordid"], "file_ordinal": record["fileordinal"],
+                    "file_name": record["originalfilename"], "unit_name": record["unitname"],
+                    "source_row": record["sourcerownumber"], "skipped": record["isskipped"],
+                    "issue_count": len(record_issues),
+                    "issue_codes": [item["code"] for item in record_issues[:5]]})
+            for def_id, candidates in candidates_by_group[group["previewgroupid"]].items():
+                values[def_id] = {**definitions_by_id.get(def_id, {"payroll_period_definition_id": int(def_id)}),
+                                  **candidates}
+            items.append({"driver_id": group["driverid"], "driver": group["driverdisplay"],
+                "work_date": group["workdate"], "error_count": group["errorcount"],
+                "warning_count": group["warningcount"], "conflict_count": group["conflictcount"],
+                "values": values, "source_records": sources,
+                "source_record_count": record_counts[group["previewgroupid"]],
+                "source_records_sampled": record_counts[group["previewgroupid"]] > len(sources)})
+        base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
+                "summary": identity["previewcounts"], "filter": severity}
+        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total))
+
+
+async def read_issues(engine, cid, uid, iid, revision, plan_fingerprint, offset, limit, severity):
+    if limit < 1 or limit > ISSUE_MAX or offset < 0:
+        raise failure("IMPORT_PAGE_INVALID", f"Issues require limit 1–{ISSUE_MAX} and a non-negative offset.", 422)
+    if severity not in (None, "Error", "Warning", "Conflict"):
+        raise failure("IMPORT_SEVERITY_INVALID", "Severity must be Error, Warning or Conflict.", 422)
+    async with engine.begin() as db:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        identity = await _read_identity(db, cid, uid, iid, revision, plan_fingerprint)
+        issues = """
+            SELECT i.importissueid::text AS issue_id, i.severity, i.code, i.message, i.locator,
+                NULL::jsonb AS value,
+                i.sourcerecordid AS source_record_id, f.originalfilename AS file_name,
+                f.fileordinal AS file_ordinal, u.unitname AS unit_name, fr.sourcerownumber AS source_row,
+                u.unitordinal AS unit_ordinal
+            FROM import.importissues i
+            LEFT JOIN import.filesourcerecords fr ON fr.sourcerecordid = i.sourcerecordid
+                AND fr.importid=i.importid AND fr.companyid=i.companyid
+            LEFT JOIN import.filesourceunits u ON u.sourceunitid = fr.sourceunitid
+                AND u.importid=fr.importid AND u.companyid=fr.companyid
+            LEFT JOIN import.filesources f ON f.filesourceid=u.filesourceid
+                AND f.importid=u.importid AND f.companyid=u.companyid
+            WHERE i.companyid=:cid AND i.importid=:iid
+            UNION ALL
+            SELECT r.sourcerecordid::text || ':' || entry.ordinality::text AS issue_id,
+                entry.item->>'severity' AS severity, entry.item->>'code' AS code,
+                entry.item->>'message' AS message,
+                jsonb_build_object('file_ordinal', f.fileordinal, 'unit_name', u.unitname,
+                    'source_row', fr.sourcerownumber, 'column', entry.item->'column') AS locator,
+                entry.item->'value' AS value,
+                r.sourcerecordid AS source_record_id, f.originalfilename AS file_name,
+                f.fileordinal AS file_ordinal, u.unitname AS unit_name, fr.sourcerownumber AS source_row,
+                u.unitordinal AS unit_ordinal
+            FROM import.payrollworkrecords r
+            JOIN import.filesourcerecords fr ON fr.sourcerecordid=r.sourcerecordid
+                AND fr.importid=r.importid AND fr.companyid=r.companyid
+            JOIN import.filesourceunits u ON u.sourceunitid=fr.sourceunitid
+                AND u.importid=fr.importid AND u.companyid=fr.companyid
+            JOIN import.filesources f ON f.filesourceid=u.filesourceid
+                AND f.importid=u.importid AND f.companyid=u.companyid
+            CROSS JOIN LATERAL jsonb_array_elements(r.issuesjson) WITH ORDINALITY AS entry(item, ordinality)
+            WHERE r.companyid=:cid AND r.importid=:iid
+        """
+        predicate = "WHERE severity = :severity" if severity else ""
+        params = {"cid": cid, "iid": iid, "severity": severity}
+        total = (await db.execute(text(f"SELECT count(*) FROM ({issues}) AS all_issues {predicate}"), params)).scalar_one()
+        items = [dict(row) for row in (await db.execute(text(f"""
+            SELECT issue_id, severity, code, message, locator, value, source_record_id, file_name,
+                file_ordinal, unit_name, source_row
+            FROM ({issues}) AS all_issues {predicate}
+            ORDER BY file_ordinal NULLS LAST, unit_ordinal NULLS LAST, source_row NULLS LAST, issue_id
+            OFFSET :offset LIMIT :limit
+        """), {**params, "offset": offset, "limit": limit})).mappings()]
+        base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
+                "summary": identity["previewcounts"], "filter": severity}
+        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total))
+
+
+async def read_sources(engine, cid, uid, iid, revision, plan_fingerprint, offset, limit,
+                       cell_offset: int = 0, cell_limit: int = 32):
+    if limit < 1 or limit > SOURCE_MAX or offset < 0:
+        raise failure("IMPORT_PAGE_INVALID", f"Source records require limit 1–{SOURCE_MAX} and a non-negative offset.", 422)
+    if cell_offset < 0 or cell_limit < 1 or cell_limit > 50:
+        raise failure("IMPORT_CELL_PAGE_INVALID", "Source-cell pages require a non-negative offset and limit 1–50.", 422)
+    async with engine.begin() as db:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        identity = await _read_identity(db, cid, uid, iid, revision, plan_fingerprint)
+        params = {"cid": cid, "iid": iid, "offset": offset, "limit": limit}
+        total = (await db.execute(text("""
+            SELECT count(*) FROM import.filesourcerecords f
+            WHERE f.companyid=:cid AND f.importid=:iid
+        """), params)).scalar_one()
+        items = [dict(row) for row in (await db.execute(text("""
+            SELECT r.sourcerecordid AS source_record_id, s.fileordinal AS file_ordinal,
+                s.originalfilename AS file_name, u.unitname AS unit_name,
+                f.sourcerownumber AS source_row, r.locator, r.payload,
+                w.driverid AS driver_id, w.driverassignmentid AS driver_assignment_id,
+                w.workdate AS work_date, w.isskipped AS skipped, w.valuesjson AS values_json,
+                w.issuesjson AS issues
+            FROM import.filesourcerecords f
+            JOIN import.importsourcerecords r ON r.sourcerecordid=f.sourcerecordid
+                AND r.importid=f.importid AND r.companyid=f.companyid
+            JOIN import.filesourceunits u ON u.sourceunitid=f.sourceunitid
+                AND u.importid=f.importid AND u.companyid=f.companyid
+            JOIN import.filesources s ON s.filesourceid=u.filesourceid
+                AND s.importid=u.importid AND s.companyid=u.companyid
+            LEFT JOIN import.payrollworkrecords w ON w.sourcerecordid=r.sourcerecordid
+                AND w.importid=r.importid AND w.companyid=r.companyid
+            WHERE f.companyid=:cid AND f.importid=:iid
+            ORDER BY s.fileordinal,u.unitordinal,f.sourcerownumber
+            OFFSET :offset LIMIT :limit
+        """), params)).mappings()]
+        for item in items:
+            payload = item.pop("payload") or {}
+            if isinstance(payload, dict) and "raw" in payload and isinstance(payload["raw"], dict):
+                payload = payload["raw"]
+            ordered = sorted(payload.items(), key=lambda pair: (0, int(pair[0])) if str(pair[0]).isdigit()
+                            else (1, str(pair[0])))
+            item["cell_count"] = len(ordered)
+            item["cell_offset"] = cell_offset
+            item["cell_limit"] = cell_limit
+            item["cells"] = dict(ordered[cell_offset:cell_offset + cell_limit])
+            item["next_cell_offset"] = (cell_offset + len(item["cells"])
+                                         if cell_offset + len(item["cells"]) < len(ordered) else None)
+        base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
+                "summary": identity["previewcounts"], "filter": None}
+        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total))

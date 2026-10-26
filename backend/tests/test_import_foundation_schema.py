@@ -1,4 +1,5 @@
 """Import source/target ownership, immutable metadata and fail-closed replacement."""
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -115,28 +116,43 @@ def test_schema_guard_detects_missing_company_scoped_driver_relationship(foundat
         conn.rollback()
 
 
+def test_schema_guard_detects_incomplete_child_lookup_index(foundation):
+    with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
+        cur.execute("DROP INDEX import.ix_payrollworkrecordidentifiers_matchscope")
+        cur.execute("CREATE INDEX ix_payrollworkrecordidentifiers_matchscope ON import.payrollworkrecordidentifiers(companyid)")
+        assert any("ix_payrollworkrecordidentifiers_matchscope" in error for error in _check_import_foundation(cur))
+        conn.rollback()
+
+
 def test_file_interpretation_accepts_all_date_orders_without_a_payroll_target(foundation):
     with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
         cid, uid = identities(cur)
         iid = envelope(cur, cid, uid, source="File")
-        cur.execute("""INSERT INTO import.filesources (importid, companyid, originalfilename,
-            filetype, filesizebytes, filehashsha256, filecontent, sheetname, headerrownumber, encoding, delimiter)
-            VALUES (%s, %s, 'text.csv', 'csv', 1, %s, %s, 'CSV', 1, 'cp1252', ';')""", (iid, cid, "0" * 64, b"a"))
+        cur.execute("""INSERT INTO import.filesourcebatches(importid, companyid, sourcemanifest)
+            VALUES (%s, %s, %s::jsonb)""", (iid, cid, json.dumps([{"name": "text.csv", "type": "csv",
+                "size": 1, "sha256": "0" * 64, "units": [{"name": "CSV", "index": 1}]}])))
+        cur.execute("""INSERT INTO import.filesources (importid, companyid, fileordinal, originalfilename,
+            filetype, filesizebytes, filehashsha256, filecontent)
+            VALUES (%s, %s, 1, 'text.csv', 'csv', 1, %s, %s) RETURNING filesourceid""", (iid, cid, "0" * 64, b"a"))
+        fid = cur.fetchone()[0]
+        cur.execute("""INSERT INTO import.filesourceunits(filesourceid, importid, companyid, unitname,
+            unitordinal, unitkind, headerrownumber, encoding, delimiter)
+            VALUES (%s, %s, %s, 'CSV', 1, 'CSV', 1, 'cp1252', ';')""", (fid, iid, cid))
         for order in ("DMY", "MDY", "YMD", None):
-            cur.execute("UPDATE import.filesources SET dateorder = %s WHERE importid = %s", (order, iid))
-            cur.execute("SELECT dateorder, encoding, delimiter FROM import.filesources WHERE importid = %s", (iid,))
+            cur.execute("UPDATE import.filesourceunits SET dateorder = %s WHERE importid = %s", (order, iid))
+            cur.execute("SELECT dateorder, encoding, delimiter FROM import.filesourceunits WHERE importid = %s", (iid,))
             assert cur.fetchone() == (order, "cp1252", ";")
         conn.rollback()
 
 
-def test_schema_guard_refuses_narrowed_date_order_and_ambiguous_decision_shape(foundation):
+def test_schema_guard_refuses_narrowed_date_order_and_missing_compact_values(foundation):
     with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
-        cur.execute("ALTER TABLE import.filesources DROP CONSTRAINT ck_filesources_dateorder")
-        cur.execute("ALTER TABLE import.filesources ADD CONSTRAINT ck_filesources_dateorder CHECK (dateorder IN ('DMY', 'MDY'))")
-        assert any("ck_filesources_dateorder" in error for error in _check_import_foundation(cur))
+        cur.execute("ALTER TABLE import.filesourceunits DROP CONSTRAINT ck_filesourceunits_dateorder")
+        cur.execute("ALTER TABLE import.filesourceunits ADD CONSTRAINT ck_filesourceunits_dateorder CHECK (dateorder IN ('DMY', 'MDY'))")
+        assert any("ck_filesourceunits_dateorder" in error for error in _check_import_foundation(cur))
         conn.rollback()
-        cur.execute("ALTER TABLE import.payrollworkcells DROP COLUMN decisionbasisquantity")
-        assert any("decisionbasisquantity" in error for error in _check_import_foundation(cur))
+        cur.execute("ALTER TABLE import.payrollworkrecords DROP COLUMN valuesjson")
+        assert any("valuesjson" in error for error in _check_import_foundation(cur))
         conn.rollback()
 
 
