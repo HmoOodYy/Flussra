@@ -124,6 +124,14 @@ def test_schema_guard_detects_incomplete_child_lookup_index(foundation):
         conn.rollback()
 
 
+def test_schema_guard_rejects_broad_btree_that_masks_ownership_lookup(foundation):
+    with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
+        cur.execute("DROP INDEX import.ix_payrollworkrecords_import")
+        cur.execute("CREATE INDEX ix_payrollworkrecords_import ON import.payrollworkrecords(importid,companyid,sourcerecordid)")
+        assert any("ix_payrollworkrecords_import" in error for error in _check_import_foundation(cur))
+        conn.rollback()
+
+
 def test_file_interpretation_accepts_all_date_orders_without_a_payroll_target(foundation):
     with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
         cid, uid = identities(cur)

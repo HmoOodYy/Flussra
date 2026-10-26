@@ -14,7 +14,7 @@ depends_on: str | Sequence[str] | None = None
 _MIGRATIONS_DIR = Path(__file__).parent.parent
 if str(_MIGRATIONS_DIR) not in sys.path:
     sys.path.insert(0, str(_MIGRATIONS_DIR))
-from utils import statements_from_file
+from utils import statements_from_file  # noqa: E402 - migration-local SQL loader path
 
 
 def upgrade() -> None:

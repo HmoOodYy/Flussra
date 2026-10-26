@@ -532,19 +532,20 @@ def _check_import_foundation(cur) -> list[str]:
     for table, index_name, columns in (
         ("filesourceunits", "ix_filesourceunits_layout", ["sourcelayoutid", "importid", "companyid"]),
         ("payrollworkrecords", "ix_payrollworkrecords_group", ["previewgroupid", "importid", "companyid", "sourcerecordid"]),
-        ("payrollworkrecords", "ix_payrollworkrecords_import", ["importid", "companyid", "sourcerecordid"]),
+        ("payrollworkrecords", "ix_payrollworkrecords_import", ["importid", "companyid"]),
         ("importsourcerecords", "ix_importsourcerecords_import", ["importid", "companyid", "sourcerecordid"]),
         ("payrollworkrecordidentifiers", "ix_payrollworkrecordidentifiers_matchscope", ["drivermatchid", "importid", "companyid"]),
         ("importissues", "ix_importissues_sourcerecordscope", ["sourcerecordid", "importid", "companyid"]),
     ):
+        method = "brin" if index_name == "ix_payrollworkrecords_import" else "btree"
         cur.execute("""SELECT 1 FROM pg_index i
             JOIN pg_class x ON x.oid=i.indexrelid JOIN pg_am am ON am.oid=x.relam
-            WHERE i.indrelid=to_regclass(%s) AND x.relname=%s AND am.amname='btree'
+            WHERE i.indrelid=to_regclass(%s) AND x.relname=%s AND am.amname=%s
               AND i.indisvalid AND i.indisready AND i.indpred IS NULL AND i.indexprs IS NULL
               AND ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(num,pos)
                   JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num
                   WHERE k.pos <= i.indnkeyatts ORDER BY k.pos)=%s::text[]""",
-                    (f"import.{table}", index_name, columns))
+                    (f"import.{table}", index_name, method, columns))
         if cur.fetchone() is None:
             errors.append(f"Missing or drifted Import lookup index {table}.{index_name} (0095).")
     cur.execute("SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('import.fn_guard_payroll_work_detail()')")

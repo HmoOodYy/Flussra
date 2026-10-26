@@ -195,7 +195,12 @@ BEGIN
         FOREIGN KEY (PayrollPeriodID, WorkDate) REFERENCES payroll.PayrollPeriodDays(PayrollPeriodID, WorkDate)
     );
     CREATE INDEX ix_PayrollWorkRecords_Group ON import.PayrollWorkRecords(PreviewGroupID, ImportID, CompanyID, SourceRecordID);
-    CREATE INDEX ix_PayrollWorkRecords_Import ON import.PayrollWorkRecords(ImportID, CompanyID, SourceRecordID);
+    -- COPY appends an Import's records together. A BRIN scope lookup supports
+    -- batch reads/retirement without offering a deceptively cheap broad btree
+    -- path to per-group/source FK checks immediately after uncommitted DELETE.
+    -- Those checks retain the selective group and unique source btree indexes.
+    CREATE INDEX ix_PayrollWorkRecords_Import ON import.PayrollWorkRecords USING BRIN (ImportID, CompanyID)
+        WITH (pages_per_range = 16);
     CREATE INDEX ix_ImportSourceRecords_Import ON import.ImportSourceRecords(ImportID, CompanyID, SourceRecordID);
 
     CREATE TABLE import.PayrollWorkDriverMatches (
