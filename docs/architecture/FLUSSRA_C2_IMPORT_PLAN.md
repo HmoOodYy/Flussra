@@ -183,7 +183,7 @@ Slice A covers C1–C4 and the discovery/validation/display portions of C5–C8.
 2. Import version 1 (§3–§8), delivered through the gates below.
 3. The broader Flussra visual redesign, after the pilot shows what matters.
 
-A1's merged security foundation is retained. Before A3, the compact multi-file/layout backend, read-only preview and canonical bulk-write feasibility must be implemented and reviewed under the [refoundation design](FLUSSRA_C2_IMPORT_DESIGN.md). Unmerged A2 is evidence only and is not merged wholesale. A3 remains the connected UI; Slice B remains the downstream user-decision/apply workflow.
+A1's merged security foundation is retained. The compact multi-file/layout backend, read-only preview and internal canonical bulk boundary are implemented and measured locally; [design §11](FLUSSRA_C2_IMPORT_DESIGN.md#11-measured-backend-evidence-and-remaining-gate) records the evidence. Independent review and synchronous deployment-budget acceptance still gate A3: no authoritative request/proxy or process-memory budget was found, so synchronous HTTP suitability is not established. Unmerged A2 was evidence only and was not merged wholesale. A3 remains the connected UI; Slice B remains the downstream user-decision/apply workflow.
 
 | Mission | Owned delivery | Completion gate |
 |---|---|---|

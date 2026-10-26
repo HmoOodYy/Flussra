@@ -1,576 +1,355 @@
-"""Generate supported C2 file shapes and record repeatable parser/API measurements.
+"""Measure compact multi-file/layout preview on disposable production-schema databases.
 
-Run from ``backend`` with the worktree's venv and process TEMP/TMP set to the
-repository validation temp (``C:\\Temp`` on Windows). The default output is the
-ignored repository artifact ``.artifacts/import-benchmark.json``.
+Run from backend with Python 3.12: python -m scripts.benchmark_import_files
+Each workload runs in its own process; peak working set includes fixture overhead.
+No application database or public apply endpoint is used.
 """
-
 from __future__ import annotations
 
 import argparse
 import asyncio
 import csv
-import ctypes
-import ctypes.wintypes
+import io
 import json
 import os
 import platform
+import statistics
 import subprocess
 import sys
 import tempfile
-import threading
 import time
-import zipfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 from uuid import uuid4
 
+from scripts.import_benchmark_support import (
+    application,
+    memory_snapshot,
+    private_database,
+    seed_period,
+)
+
 ROOT = Path(__file__).resolve().parents[2]
-BACKEND = ROOT / "backend"
-DEFAULT_OUTPUT = ROOT / ".artifacts" / "import-benchmark.json"
-BOUNDARY = "flussra-import-benchmark"
-UPLOAD_PATH_TEMPLATE = "/payroll/periods/{period_id}/imports"
-ORDINARY_GET_PATH_TEMPLATE = "/payroll/periods/{period_id}/day-grid"
+SCENARIOS = ("representative_csv", "monthly_daily_csv", "monthly_daily_xlsx", "rare_csv", "issue_heavy_csv")
 
 
-def _working_set() -> dict[str, int] | None:
-    if os.name != "nt":
+def source_files(scene, fixture):
+    definitions, drivers, days = fixture["definitions"], fixture["drivers"], fixture["days"]
+    def csv_bytes(selected_definitions, selected_days, *, date_column):
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerow(["DriverNumber", *(["WorkDate"] if date_column else []),
+                         *[definition.code for definition in selected_definitions]])
+        for day in selected_days:
+            for driver in drivers:
+                writer.writerow([driver["drivernumber"], *([day.isoformat()] if date_column else []),
+                    *[("invalid" if scene == "issue_heavy_csv" else "1") for _ in selected_definitions]])
+        return buffer.getvalue().encode("utf-8")
+    if scene == "monthly_daily_csv":
+        # Two different layouts share a Driver/day grid; each supplies half the dynamic definitions.
+        midpoint = len(definitions) // 2
+        return [(f"{day.isoformat()}-family-{family}.csv", csv_bytes(group, [day], date_column=False))
+                for day in days for family, group in enumerate((definitions[:midpoint], definitions[midpoint:]), 1)]
+    if scene == "monthly_daily_xlsx":
+        from openpyxl import Workbook
+        book = Workbook(write_only=True)
         try:
-            import resource
-
-            return {"peak_rss_bytes": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024)}
-        except (ImportError, AttributeError):
-            return None
-
-    class ProcessMemoryCounters(ctypes.Structure):
-        _fields_ = [
-            ("cb", ctypes.c_ulong),
-            ("PageFaultCount", ctypes.c_ulong),
-            ("PeakWorkingSetSize", ctypes.c_size_t),
-            ("WorkingSetSize", ctypes.c_size_t),
-            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
-            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
-            ("PagefileUsage", ctypes.c_size_t),
-            ("PeakPagefileUsage", ctypes.c_size_t),
-        ]
-
-    counters = ProcessMemoryCounters()
-    counters.cb = ctypes.sizeof(counters)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
-    psapi = ctypes.WinDLL("psapi", use_last_error=True)
-    psapi.GetProcessMemoryInfo.argtypes = (
-        ctypes.wintypes.HANDLE,
-        ctypes.POINTER(ProcessMemoryCounters),
-        ctypes.wintypes.DWORD,
-    )
-    psapi.GetProcessMemoryInfo.restype = ctypes.wintypes.BOOL
-    process = kernel32.GetCurrentProcess()
-    if not psapi.GetProcessMemoryInfo(
-        process, ctypes.byref(counters), counters.cb
-    ):
-        return None
-    return {
-        "working_set_bytes": int(counters.WorkingSetSize),
-        "peak_working_set_bytes": int(counters.PeakWorkingSetSize),
-        "peak_pagefile_bytes": int(counters.PeakPagefileUsage),
-    }
+            for day in days:
+                sheet = book.create_sheet(day.isoformat())
+                sheet.append(["DriverNumber", *[definition.code for definition in definitions]])
+                for driver in drivers:
+                    sheet.append([driver["drivernumber"], *[1 for _ in definitions]])
+            buffer = io.BytesIO()
+            book.save(buffer)
+            return [("monthly.xlsx", buffer.getvalue())]
+        finally:
+            book.close()
+    return [("supplied.csv", csv_bytes(definitions, days, date_column=True))]
 
 
-def _temp_snapshot() -> set[str]:
-    root = Path(tempfile.gettempdir())
-    try:
-        return {item.name for item in root.iterdir()}
-    except OSError:
-        return set()
+class Phases:
+    def __init__(self):
+        self.values = {}
+        self.originals = []
+        self.lock_started = None
+        self.copies = {}
+
+    def install(self):
+        from app.imports import batch_service
+        for name in ("_inspect_batch", "_materialize_batch", "build_batch_preview", "prepare_preview"):
+            original = getattr(batch_service, name)
+            def measured(*args, _original=original, _name=name, **kwargs):
+                started = time.perf_counter()
+                try:
+                    return _original(*args, **kwargs)
+                finally:
+                    self.values[_name] = self.values.get(_name, 0) + time.perf_counter() - started
+            self.originals.append((batch_service, name, original))
+            setattr(batch_service, name, measured)
+        from app.imports import preview_store
+        original_copy = preview_store._copy_records
+        async def measured_copy(db, table, columns, records):
+            count = 0
+            def counted():
+                nonlocal count
+                for row in records:
+                    count += 1
+                    yield row
+            started = time.perf_counter()
+            await original_copy(db, table, columns, counted())
+            self.values["copy_" + table] = time.perf_counter() - started
+            self.copies[table] = {"records": count, "batches": (count + 999) // 1000}
+        self.originals.append((preview_store, "_copy_records", original_copy))
+        preview_store._copy_records = measured_copy
+        for name in ("load_context", "persist_preview", "clear_derived_state", "_lock_mutable"):
+            original = getattr(batch_service, name)
+            async def measured(*args, _original=original, _name=name, **kwargs):
+                started = time.perf_counter()
+                try:
+                    result = await _original(*args, **kwargs)
+                    if _name == "_lock_mutable":
+                        self.lock_started = time.perf_counter()
+                        args[0].info["measured_import_lock"] = self.lock_started
+                    return result
+                finally:
+                    self.values[_name] = self.values.get(_name, 0) + time.perf_counter() - started
+            self.originals.append((batch_service, name, original))
+            setattr(batch_service, name, measured)
+
+    def reset(self):
+        self.values = {}
+        self.lock_started = None
+        self.copies = {}
+
+    def restore(self):
+        for module, name, original in self.originals:
+            setattr(module, name, original)
 
 
-def _measure_inspection_child(path: Path, filename: str) -> dict[str, Any]:
-    from app.imports.errors import ImportFailure
-    from app.imports.files import inspect_file
-
-    before_memory = _working_set()
-    before_temp = _temp_snapshot()
-    data = path.read_bytes()
+async def timed_request(client, path, headers, send, phases):
+    phases.reset()
+    baseline_started = time.perf_counter()
+    ordinary = await client.get(path, headers=headers)
+    assert ordinary.status_code == 200, ordinary.text
+    baseline = time.perf_counter() - baseline_started
+    probes = []
     started = time.perf_counter()
-    metadata = None
-    error = None
-    try:
-        metadata = inspect_file(data, filename)
-    except ImportFailure as exc:
-        error = {"code": exc.code, "status_code": exc.status_code}
-    elapsed = time.perf_counter() - started
-    after_temp = _temp_snapshot()
-    result = {
-        "parser_seconds": round(elapsed, 6),
-        "file_bytes": len(data),
-        "working_set_before": before_memory,
-        "working_set_after": _working_set(),
-        "parser_temp_files_created": sorted(after_temp - before_temp),
-    }
-    if error is not None:
-        result["error"] = error
-    else:
-        result["metadata"] = metadata
-    return result
+    pending = asyncio.create_task(send())
+    while not pending.done():
+        before = time.perf_counter()
+        ordinary = await client.get(path, headers=headers)
+        probes.append(time.perf_counter() - before)
+        assert ordinary.status_code == 200, ordinary.text
+        if not pending.done():
+            await asyncio.sleep(0.05)
+    response = await pending
+    finished = time.perf_counter()
+    assert response.status_code == 200, response.text
+    return response.json(), {"request_seconds": finished - started, "phases_seconds": dict(phases.values),
+        "copy": dict(phases.copies),
+        "locked_to_response_seconds": finished - phases.lock_started if phases.lock_started else None,
+        "ordinary_get_baseline_seconds": baseline, "ordinary_get_count": len(probes),
+        "ordinary_get_median_seconds": statistics.median(probes) if probes else None,
+        "ordinary_get_max_seconds": max(probes) if probes else None, "memory": memory_snapshot()}
 
 
-def _run_inspection_child(path: Path, filename: str) -> dict[str, Any]:
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(BACKEND) + os.pathsep + environment.get("PYTHONPATH", "")
-    with tempfile.TemporaryDirectory(
-        prefix="flussra-import-parser-child-", dir=tempfile.gettempdir()
-    ) as child_temp:
-        environment["TEMP"] = child_temp
-        environment["TMP"] = child_temp
-        result = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), "--inspect-child", str(path), filename],
-            cwd=BACKEND,
-            env=environment,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    if result.returncode:
-        raise RuntimeError(
-            f"Parser measurement failed for {filename} ({result.returncode}):\n{result.stdout}\n{result.stderr}"
-        )
-    try:
-        return json.loads(result.stdout.strip().splitlines()[-1])
-    except (IndexError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Parser measurement did not emit JSON: {result.stdout}\n{result.stderr}") from exc
+async def measure(scene, dsn, *, profile_cleanup=False):
+    from sqlalchemy import event, text
+
+    from app.imports.retention import purge_payroll_work_import_details
+    from tests.payroll_runtime_fixtures import force_status
+
+    dimensions = ((20, 4, 7) if scene == "representative_csv" else
+                  (1000, 20, 10) if scene in ("rare_csv", "issue_heavy_csv") else (150, 20, 31))
+    async with application(dsn) as (client, engine, _app):
+        fixture = await seed_period(client, engine, dsn, drivers=dimensions[0], definitions=dimensions[1], days=dimensions[2])
+        tenant, period = fixture["tenant"], fixture["period"]
+        files = source_files(scene, fixture)
+        async with engine.connect() as db:
+            database_temp_before = dict((await db.execute(text("""SELECT temp_files,temp_bytes
+                FROM pg_stat_database WHERE datname=current_database()"""))).mappings().one())
+        temporary_before = set(Path(tempfile.gettempdir()).iterdir())
+        initial_memory = memory_snapshot()
+        phases = Phases()
+        phases.install()
+        sql_count = 0
+        sql_seconds = 0
+        sql_writes = {}
+        cleanup_plans = []
+        def transaction_begin(conn):
+            conn.info["measured_transaction_begin"] = time.perf_counter()
+        def transaction_commit(conn):
+            locked = conn.info.pop("measured_import_lock", None)
+            started = conn.info.pop("measured_transaction_begin", None)
+            if locked is not None and started is not None:
+                now = time.perf_counter()
+                phases.values["publication_transaction_to_commit_dispatch"] = now - started
+                phases.values["period_lock_to_commit_dispatch"] = now - locked
+        def before(conn, _cursor, statement, parameters, _context, _many):
+            if conn.info.get("cleanup_probe"):
+                return statement, parameters
+            conn.info["measurement_started"] = time.perf_counter()
+            if profile_cleanup and statement.strip().lower().startswith("delete from import.payrollworkpreviewgroups"):
+                conn.info["cleanup_probe"] = True
+                try:
+                    child = conn.exec_driver_sql("""EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+                        SELECT 1 FROM ONLY import.payrollworkrecords r
+                        WHERE r.previewgroupid=(SELECT previewgroupid FROM import.payrollworkpreviewgroups
+                            WHERE importid=$1 AND companyid=$2 LIMIT 1)
+                          AND r.importid=$1 AND r.companyid=$2 FOR KEY SHARE OF r""", parameters).scalar_one()
+                    cleanup_plans.append({"child_lookup": child})
+                finally:
+                    conn.info.pop("cleanup_probe", None)
+                return "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + statement, parameters
+            return statement, parameters
+        def after(conn, _cursor, statement, _params, _context, _many):
+            nonlocal sql_count, sql_seconds
+            if conn.info.get("cleanup_probe"):
+                return
+            sql_count += 1
+            elapsed = time.perf_counter() - conn.info.pop("measurement_started")
+            sql_seconds += elapsed
+            normalized = statement.strip().lower()
+            if profile_cleanup and normalized.startswith("explain") and "delete from import.payrollworkpreviewgroups" in normalized:
+                cleanup_plans.append({"group_delete": [row[0] for row in _cursor.fetchall()]})
+            if normalized.startswith(("delete from import.", "update import.", "insert into import.")):
+                key = " ".join(normalized.split()[:3])
+                sql_writes[key] = sql_writes.get(key, 0) + elapsed
+        event.listen(engine.sync_engine, "before_cursor_execute", before, retval=True)
+        event.listen(engine.sync_engine, "after_cursor_execute", after)
+        event.listen(engine.sync_engine, "begin", transaction_begin)
+        event.listen(engine.sync_engine, "commit", transaction_commit)
+        try:
+            ordinary_path = f"/payroll/periods/{period['payroll_period_id']}"
+            upload, ingress = await timed_request(client, ordinary_path, tenant.admin,
+                lambda: client.post(f"/payroll/periods/{period['payroll_period_id']}/imports",
+                    files=[("file", (name, data, "application/octet-stream")) for name, data in files],
+                    headers={**tenant.admin, "Idempotency-Key": str(uuid4())}), phases)
+            iid = upload["import_id"]
+            if scene.startswith("monthly_daily"):
+                units = []
+                for file in upload["files"]:
+                    for unit in file["units"]:
+                        candidates = unit["inspection"]["filename_date_candidates" if file["type"] == "csv" else "unit_date_candidates"]
+                        assert len(candidates) == 1, candidates
+                        units.append({"source_unit_id": unit["source_unit_id"], "selected": True,
+                                      "date_source": {"kind": "filename" if file["type"] == "csv" else "sheet", "value": candidates[0]}})
+                response = await client.put(f"/payroll/imports/{iid}/interpretation",
+                    json={"expected_revision": upload["revision"], "units": units}, headers=tenant.admin)
+                assert response.status_code == 200, response.text
+                upload = response.json()
+            definitions = {definition.code: definition.payroll_period_definition_id for definition in fixture["definitions"]}
+            for layout in upload["layouts"]:
+                headers = []
+                offset = 0
+                while True:
+                    inspected = await client.get(f"/payroll/imports/{iid}", params={
+                        "header_layout_id": layout["layout_id"], "header_offset": offset, "header_limit": 25},
+                        headers=tenant.admin)
+                    assert inspected.status_code == 200, inspected.text
+                    page = inspected.json()["header_page"]
+                    headers.extend(item["label"] for item in page["items"])
+                    if page["next_offset"] is None:
+                        break
+                    offset = page["next_offset"]
+                mapping = {str(index): ("DriverNumber" if header == "DriverNumber" else "WorkDate" if header == "WorkDate"
+                    else f"Definition:{definitions[header]}") for index, header in enumerate(headers, 1)}
+                response = await client.put(f"/payroll/imports/{iid}/layouts/{layout['layout_id']}/mapping",
+                    json={"expected_revision": upload["revision"], "column_mapping": mapping}, headers=tenant.admin)
+                assert response.status_code == 200, response.text
+                upload = response.json()
+            sql_count = 0
+            sql_seconds = 0
+            sql_writes.clear()
+            preview, initial = await timed_request(client, ordinary_path, tenant.admin,
+                lambda: client.post(f"/payroll/imports/{iid}/preview", json={"expected_revision": upload["revision"]}, headers=tenant.admin), phases)
+            initial["sqlalchemy_calls_including_probe_reads"] = sql_count
+            initial["sqlalchemy_seconds_including_probe_reads"] = sql_seconds
+            initial["sql_write_seconds_by_statement"] = dict(sql_writes)
+            sql_count = 0
+            sql_seconds = 0
+            sql_writes.clear()
+            refreshed, refresh = await timed_request(client, ordinary_path, tenant.admin,
+                lambda: client.post(f"/payroll/imports/{iid}/preview", json={"expected_revision": preview["revision"]}, headers=tenant.admin), phases)
+            refresh["sqlalchemy_calls_including_probe_reads"] = sql_count
+            refresh["sqlalchemy_seconds_including_probe_reads"] = sql_seconds
+            refresh["sql_write_seconds_by_statement"] = dict(sql_writes)
+            for key in ("mapping_fingerprint", "content_fingerprint", "plan_fingerprint", "counts"):
+                assert refreshed["preview"][key] == preview["preview"][key], key
+            params = {"cid": tenant.company_id, "iid": iid, "pid": period["payroll_period_id"]}
+            async with engine.connect() as db:
+                counts = dict((await db.execute(text("""SELECT
+                    (SELECT count(*) FROM import.payrollworkrecords WHERE importid=:iid) AS normalized_rows,
+                    (SELECT count(*) FROM import.payrollworkpreviewgroups WHERE importid=:iid) AS grid_rows,
+                    (SELECT count(*) FROM import.importissues WHERE importid=:iid) AS relational_issues,
+                    (SELECT count(*) FROM payroll.payrolldraftlines WHERE payrollperiodid=:pid) AS canonical_lines,
+                    (SELECT count(*) FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid=:pid AND evidencedomain='SOURCE') AS source_events,
+                    (SELECT count(*) FROM import.filesources WHERE importid=:iid) AS files,
+                    (SELECT count(*) FROM import.filesourceunits WHERE importid=:iid) AS units,
+                    (SELECT count(*) FROM import.sourcelayouts WHERE importid=:iid) AS layouts"""), params)).mappings().one())
+            assert counts["canonical_lines"] == counts["source_events"] == 0
+            query = {"expected_revision": refreshed["revision"], "plan_fingerprint": refreshed["preview"]["plan_fingerprint"]}
+            response_sizes = {}
+            for name in ("rows", "issues", "source-records"):
+                response = await client.get(f"/payroll/imports/{iid}/{name}", params=query, headers=tenant.admin)
+                assert response.status_code == 200, response.text
+                response_sizes[name] = len(response.content)
+                assert len(response.content) <= 2_000_000
+            force_status(tenant, period["payroll_period_id"], "Locked")
+            sql_writes.clear()
+            started = time.perf_counter()
+            async with engine.begin() as db:
+                await purge_payroll_work_import_details(db, company_id=tenant.company_id,
+                    period_id=period["payroll_period_id"], actor_id=tenant.owner)
+            purge = time.perf_counter() - started
+            purge_statements = dict(sql_writes)
+            async with engine.connect() as db:
+                assert await db.scalar(text("SELECT count(*) FROM import.payrollworkrecords WHERE importid=:iid"), params) == 0
+                assert await db.scalar(text("SELECT count(*) FROM import.filesources WHERE importid=:iid AND filecontent IS NOT NULL"), params) == 0
+                database_temp_after = dict((await db.execute(text("""SELECT temp_files,temp_bytes
+                    FROM pg_stat_database WHERE datname=current_database()"""))).mappings().one())
+            return {"scenario": scene, "python": platform.python_version(), "platform": platform.platform(),
+                "transport": "HTTPX ASGITransport, real disposable PostgreSQL, production guards enabled",
+                "dimensions": {"drivers": dimensions[0], "definitions": dimensions[1], "days": dimensions[2]},
+                "file_bytes": sum(len(data) for _, data in files), "initial_memory": initial_memory,
+                "ingress": ingress, "preview": initial, "refresh": refresh, "counts": counts,
+                "preview_counts": preview["preview"]["counts"], "purge_seconds": purge,
+                "purge_sql_write_seconds": purge_statements,
+                "page_response_bytes": response_sizes, "final_memory": memory_snapshot(),
+                "database_temp_before": database_temp_before, "database_temp_after": database_temp_after,
+                "cleanup_plans": cleanup_plans,
+                "temporary_files_left": sorted(str(path) for path in set(Path(tempfile.gettempdir()).iterdir()) - temporary_before)}
+        finally:
+            phases.restore()
+            event.remove(engine.sync_engine, "before_cursor_execute", before)
+            event.remove(engine.sync_engine, "after_cursor_execute", after)
+            event.remove(engine.sync_engine, "begin", transaction_begin)
+            event.remove(engine.sync_engine, "commit", transaction_commit)
 
 
-def _workbook_file(path: Path, *, rows: int, columns: int, row_labels: bool = True) -> None:
-    from openpyxl import Workbook
-
-    workbook = Workbook(write_only=True)
-    worksheet = workbook.create_sheet("Payroll")
-    if row_labels:
-        header = ["Driver Number", "Work Date"] + [f"Quantity {index}" for index in range(1, columns - 1)]
-    else:
-        header = ["Value"] * columns
-    worksheet.append(header)
-    for row_index in range(1, rows):
-        values = [f"{row_index:05d}", "2026-10-20"] if row_labels else []
-        values.extend([1] * (columns - len(values)))
-        worksheet.append(values)
-    workbook.save(path)
-
-
-def _text_heavy_workbook(path: Path, *, rows: int = 118, columns: int = 50, text_bytes: int = 8_000) -> None:
-    from openpyxl import Workbook
-
-    workbook = Workbook(write_only=True)
-    selected = workbook.create_sheet("Selected")
-    selected.append(["Driver Number", "Work Date", "Quantity"])
-    selected.append(["0012", "2026-10-20", 1])
-    heavy = workbook.create_sheet("TextHeavy")
-    heavy.sheet_state = "hidden"
-    value = "x" * text_bytes
-    for _row in range(rows):
-        heavy.append([value] * columns)
-    workbook.save(path)
-
-
-def _csv_file(path: Path, *, rows: int, columns: int) -> None:
-    with path.open("w", encoding="utf-8", newline="") as stream:
-        writer = csv.writer(stream, lineterminator="\n")
-        writer.writerow(["Driver Number", "Work Date"] + [f"Quantity {index}" for index in range(1, columns - 1)])
-        for row_index in range(1, rows):
-            writer.writerow([f"{row_index:05d}", "2026-10-20"] + [1] * (columns - 2))
-
-
-def _append_empty_members(path: Path, total_members: int) -> None:
-    with zipfile.ZipFile(path, "r") as archive:
-        member_count = len(archive.infolist())
-    if member_count > total_members:
-        raise ValueError(f"Workbook already has {member_count} members, requested total is {total_members}.")
-    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_STORED) as archive:
-        for index in range(total_members - member_count):
-            archive.writestr(f"benchmark-padding/member-{index:04d}.bin", b"")
-
-
-def _append_nested_xml(path: Path, *, depth: int) -> None:
-    document = b"<n>" + b"<n>" * (depth - 1) + b"</n>" * depth
-    with zipfile.ZipFile(path, "a", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("custom/structural-depth.xml", document)
-
-
-def _file_facts(path: Path, *, rows: int, columns: int, file_type: str) -> dict[str, Any]:
-    facts: dict[str, Any] = {
-        "filename": path.name,
-        "file_bytes": path.stat().st_size,
-        "shape": {"rows": rows, "columns": columns, "rectangular_cells": rows * columns},
-        "zip_members": 0,
-        "actual_decompressed_bytes": 0,
-    }
-    if file_type == "xlsx":
-        from xml.parsers import expat
-
-        with zipfile.ZipFile(path, "r") as archive:
-            facts["zip_members"] = len(archive.infolist())
-            decompressed = 0
-            max_xml_depth = 0
-            max_xml_depth_member = None
-            for info in archive.infolist():
-                if info.is_dir():
-                    continue
-                parser = None
-                depth_state = {"current": 0, "max": 0}
-                if info.filename.lower().endswith((".xml", ".rels")):
-                    parser = expat.ParserCreate()
-
-                    def start_element(_name: str, _attributes: dict[str, str]) -> None:
-                        depth_state["current"] += 1
-                        depth_state["max"] = max(depth_state["max"], depth_state["current"])
-
-                    def end_element(_name: str) -> None:
-                        depth_state["current"] -= 1
-
-                    parser.StartElementHandler = start_element
-                    parser.EndElementHandler = end_element
-                with archive.open(info) as member:
-                    while chunk := member.read(128 * 1024):
-                        decompressed += len(chunk)
-                        if parser is not None:
-                            parser.Parse(chunk, False)
-                    if parser is not None:
-                        parser.Parse(b"", True)
-                        if depth_state["max"] > max_xml_depth:
-                            max_xml_depth = depth_state["max"]
-                            max_xml_depth_member = info.filename
-            facts["actual_decompressed_bytes"] = decompressed
-            facts["max_xml_depth"] = max_xml_depth
-            facts["max_xml_depth_member"] = max_xml_depth_member
-    else:
-        facts["actual_decompressed_bytes"] = facts["file_bytes"]
-    return facts
-
-
-def _generate_cases(directory: Path) -> list[dict[str, Any]]:
-    cases = []
-
-    representative = directory / "representative-1000x10.xlsx"
-    _workbook_file(representative, rows=1_000, columns=10)
-    cases.append({
-        **_file_facts(representative, rows=1_000, columns=10, file_type="xlsx"),
-        "kind": "representative_xlsx",
-        "file_type": "xlsx",
-        "path": str(representative),
-    })
-
-    near_xlsx = directory / "near-upper-dense-20000x50.xlsx"
-    _workbook_file(near_xlsx, rows=20_000, columns=50)
-    cases.append({
-        **_file_facts(near_xlsx, rows=20_000, columns=50, file_type="xlsx"),
-        "kind": "near_upper_dense_xlsx",
-        "file_type": "xlsx",
-        "path": str(near_xlsx),
-    })
-
-    near_csv = directory / "near-upper-dense-20000x50.csv"
-    _csv_file(near_csv, rows=20_000, columns=50)
-    cases.append({
-        **_file_facts(near_csv, rows=20_000, columns=50, file_type="csv"),
-        "kind": "near_upper_dense_csv",
-        "file_type": "csv",
-        "path": str(near_csv),
-    })
-
-    text_heavy = directory / "text-heavy-5900x8000.xlsx"
-    _text_heavy_workbook(text_heavy)
-    cases.append({
-        **_file_facts(text_heavy, rows=118, columns=50, file_type="xlsx"),
-        "kind": "whole_workbook_text_heavy_xlsx",
-        "file_type": "xlsx",
-        "unselected_sheet_shape": {"rows": 118, "columns": 50, "rectangular_cells": 5_900},
-        "cell_text_bytes": 8_000,
-        "path": str(text_heavy),
-    })
-
-    member_stress = directory / "member-stress-4096.xlsx"
-    _workbook_file(member_stress, rows=2, columns=3)
-    _append_empty_members(member_stress, 4_096)
-    cases.append({
-        **_file_facts(member_stress, rows=2, columns=3, file_type="xlsx"),
-        "kind": "member_ceiling_4096_xlsx",
-        "file_type": "xlsx",
-        "path": str(member_stress),
-    })
-
-    structural_limit = directory / "structural-depth-256.xlsx"
-    _workbook_file(structural_limit, rows=2, columns=3)
-    _append_nested_xml(structural_limit, depth=256)
-    cases.append({
-        **_file_facts(structural_limit, rows=2, columns=3, file_type="xlsx"),
-        "kind": "structural_depth_boundary_256_xlsx",
-        "file_type": "xlsx",
-        "path": str(structural_limit),
-    })
-
-    structural_over = directory / "structural-depth-257.xlsx"
-    _workbook_file(structural_over, rows=2, columns=3)
-    _append_nested_xml(structural_over, depth=257)
-    cases.append({
-        **_file_facts(structural_over, rows=2, columns=3, file_type="xlsx"),
-        "kind": "structural_depth_over_limit_257_xlsx",
-        "file_type": "xlsx",
-        "expected_parser_error_code": "IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED",
-        "path": str(structural_over),
-    })
-
-    for case in cases:
-        if case["file_bytes"] > 10_000_000:
-            raise ValueError(f"Generated supported-shape file exceeds 10 MB: {case['filename']}.")
-        if case["actual_decompressed_bytes"] > 50_000_000:
-            raise ValueError(f"Generated supported-shape workbook exceeds 50 MB: {case['filename']}.")
-    return cases
-
-
-def _find_postgres_bin() -> str:
-    import glob
-
-    candidates = sorted(glob.glob(r"C:\Program Files\PostgreSQL\*\bin"), reverse=True)
-    for candidate in candidates:
-        if Path(candidate, "initdb.exe").is_file():
-            return candidate
-    raise RuntimeError("PostgreSQL initdb.exe was not found under C:\\Program Files\\PostgreSQL.")
-
-
-@contextmanager
-def _private_database():
-    sys.path.insert(0, str(BACKEND))
-    os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@127.0.0.1:1/configuration_only")
-    os.environ.setdefault("SECRET_KEY", "c2-import-benchmark-test-secret-not-for-production-000000000000")
-    os.environ.setdefault("ENVIRONMENT", "test")
-    from tests.conftest import _stop_test_postgresql_safely
-    from tests.database_templates import SchemaDatabases
-    from tests.postgresql_compat import create_test_postgresql
-
-    os.environ["PATH"] = _find_postgres_bin() + os.pathsep + os.environ.get("PATH", "")
-    cluster = create_test_postgresql()
-    cluster.start()
-    databases = SchemaDatabases(cluster.dsn(), ROOT)
-    try:
-        with databases.database("import_benchmark") as dsn:
-            yield dsn
-    finally:
-        databases.close()
-        _stop_test_postgresql_safely(cluster)
-
-
-async def _application_benchmarks(dsn: dict, cases: list[dict[str, Any]]) -> dict[str, Any]:
-    import httpx
-    from httpx import ASGITransport
-    from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
-
-    from app.config import get_settings
-    from app.dependencies import get_db
-    from app.imports import service
-    from app.main import create_app
-    from tests.payroll_runtime_fixtures import build_payroll_tenant, open_period_with_grid
-
-    database_url = (
-        f"postgresql+asyncpg://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']}"
-    )
-    os.environ["DATABASE_URL"] = database_url
-    os.environ["SECRET_KEY"] = "c2-import-benchmark-test-secret-not-for-production-000000000000"
-    os.environ["ENVIRONMENT"] = "test"
-    get_settings.cache_clear()
-    engine = create_async_engine(database_url, echo=False)
-    app = create_app()
-    app.state.engine = engine
-
-    async def _override_get_db() -> AsyncConnection:
-        async with engine.begin() as connection:
-            yield connection
-
-    app.dependency_overrides[get_db] = _override_get_db
-    tenant = build_payroll_tenant(dsn)
-    result: dict[str, Any] = {"http_transport": "HTTPX ASGITransport against create_app()"}
-    try:
-        async with httpx.AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://benchmark.test"
-        ) as client:
-            period, _grid = await open_period_with_grid(client, engine, tenant)
-            period_id = period["payroll_period_id"]
-            endpoint = UPLOAD_PATH_TEMPLATE.format(period_id=period_id)
-            get_endpoint = ORDINARY_GET_PATH_TEMPLATE.format(period_id=period_id)
-            app_cases = [
-                case for case in cases
-                if case["kind"] in {"near_upper_dense_xlsx", "whole_workbook_text_heavy_xlsx"}
-            ]
-            scenario_results = []
-            original_inspect = service.inspect_file
-            for case in app_cases:
-                started = threading.Event()
-                completed = threading.Event()
-                parser_temp: dict[str, list[str]] = {}
-
-                def measured_inspect(*args, **kwargs):
-                    previous_tempdir = tempfile.tempdir or tempfile.gettempdir()
-                    try:
-                        with tempfile.TemporaryDirectory(
-                            prefix="flussra-import-http-parser-", dir=previous_tempdir
-                        ) as parser_tempdir:
-                            tempfile.tempdir = parser_tempdir
-                            before = _temp_snapshot()
-                            started.set()
-                            try:
-                                return original_inspect(*args, **kwargs)
-                            finally:
-                                parser_temp["created"] = sorted(_temp_snapshot() - before)
-                    finally:
-                        tempfile.tempdir = previous_tempdir
-                        completed.set()
-
-                service.inspect_file = measured_inspect
-                data = Path(case["path"]).read_bytes()
-                body = _multipart_body(data, case["filename"])
-                headers = {
-                    **tenant.admin,
-                    "Content-Type": f"multipart/form-data; boundary={BOUNDARY}",
-                    "Idempotency-Key": str(uuid4()),
-                }
-
-                async def send_upload():
-                    began = time.perf_counter()
-                    response = await client.post(endpoint, content=body, headers=headers)
-                    return response, time.perf_counter() - began
-
-                upload_task = asyncio.create_task(send_upload())
-                await asyncio.wait_for(asyncio.to_thread(started.wait, 30), timeout=35)
-                get_started = time.perf_counter()
-                get_response = await client.get(get_endpoint, headers=tenant.admin)
-                get_seconds = time.perf_counter() - get_started
-                parser_still_running_at_get_complete = not completed.is_set()
-                upload_response, upload_seconds = await upload_task
-                service.inspect_file = original_inspect
-                if upload_response.status_code != 200:
-                    raise RuntimeError(
-                        f"Benchmark upload for {case['filename']} returned "
-                        f"{upload_response.status_code}: {upload_response.text}"
-                    )
-                if get_response.status_code != 200:
-                    raise RuntimeError(
-                        f"Authorized concurrent GET returned {get_response.status_code}: "
-                        f"{get_response.text}"
-                    )
-                scenario_results.append({
-                    "kind": case["kind"],
-                    "http_upload_seconds": round(upload_seconds, 6),
-                    "http_upload_status": upload_response.status_code,
-                    "http_response_bytes": len(upload_response.content),
-                    "parser_running_during_get": parser_still_running_at_get_complete,
-                    "ordinary_authorized_get_path": get_endpoint,
-                    "ordinary_authorized_get_status": get_response.status_code,
-                    "ordinary_authorized_get_seconds": round(get_seconds, 6),
-                    "parser_temp_files_created": parser_temp.get("created", []),
-                })
-            result["http_scenarios"] = scenario_results
-    finally:
-        service.inspect_file = original_inspect
-        app.dependency_overrides.clear()
-        await engine.dispose()
-    return result
-
-
-def _multipart_body(data: bytes, filename: str) -> bytes:
-    return (
-        f"--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; "
-        f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n".encode()
-        + data
-        + f"\r\n--{BOUNDARY}--\r\n".encode()
-    )
-
-
-def _run(output_path: Path) -> dict[str, Any]:
-    import openpyxl
-    import starlette
-
-    evidence: dict[str, Any] = {
-        "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "environment": {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "starlette": starlette.__version__,
-            "openpyxl": openpyxl.__version__,
-            "temp_directory": tempfile.gettempdir(),
-        },
-        "generation_seconds": {},
-        "cases": [],
-    }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="flussra-import-benchmark-") as temporary_directory:
-        generation_start = time.perf_counter()
-        cases = _generate_cases(Path(temporary_directory))
-        evidence["generation_seconds"]["all_cases"] = round(time.perf_counter() - generation_start, 6)
-        for case in cases:
-            parser_result = _run_inspection_child(Path(case["path"]), case["filename"])
-            expected_error = case.get("expected_parser_error_code")
-            actual_error = parser_result.get("error", {}).get("code")
-            if actual_error != expected_error:
-                raise RuntimeError(
-                    f"Parser outcome for {case['filename']} was {actual_error!r}; "
-                    f"expected {expected_error!r}."
-                )
-            if expected_error and parser_result["error"].get("status_code") != 422:
-                raise RuntimeError(
-                    f"Expected a 422 parser refusal for {case['filename']}, got {parser_result['error']!r}."
-                )
-            case["parser_result"] = parser_result
-        ordinary_xlsx = [
-            case for case in cases
-            if case["file_type"] == "xlsx"
-            and case["kind"] not in {
-                "structural_depth_boundary_256_xlsx",
-                "structural_depth_over_limit_257_xlsx",
-            }
-        ]
-        accepted_depth = next(
-            case for case in cases if case["kind"] == "structural_depth_boundary_256_xlsx"
-        )
-        rejected_depth = next(
-            case for case in cases if case["kind"] == "structural_depth_over_limit_257_xlsx"
-        )
-        evidence["xml_depth_measurement"] = {
-            "guard_limit_elements": 256,
-            "ordinary_generated_max_depth": max(case["max_xml_depth"] for case in ordinary_xlsx),
-            "ordinary_generated_max_depth_member": max(
-                ordinary_xlsx, key=lambda case: case["max_xml_depth"]
-            )["max_xml_depth_member"],
-            "accepted_boundary_depth": accepted_depth["max_xml_depth"],
-            "rejected_one_over_depth": rejected_depth["max_xml_depth"],
-            "one_over_error": rejected_depth["parser_result"]["error"]["code"],
-            "one_over_parser_seconds": rejected_depth["parser_result"]["parser_seconds"],
-        }
-        with _private_database() as dsn:
-            evidence["application"] = asyncio.run(_application_benchmarks(dsn, cases))
-        for case in cases:
-            case.pop("path")
-            evidence["cases"].append(case)
-    output_path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return evidence
-
-
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--inspect-child", nargs=2, metavar=("PATH", "FILENAME"), help=argparse.SUPPRESS)
+    parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")
+    parser.add_argument("--profile-cleanup", action="store_true",
+                        help="Instrument real group deletion/FK lookup with EXPLAIN ANALYZE (extra overhead).")
+    parser.add_argument("--output", type=Path, default=ROOT / ".artifacts/import-batch-benchmark.json")
     args = parser.parse_args()
-    if args.inspect_child:
-        result = _measure_inspection_child(Path(args.inspect_child[0]), args.inspect_child[1])
-        print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
-        return 0
-    evidence = _run(args.output.resolve())
-    print(json.dumps(evidence, indent=2, ensure_ascii=False))
-    print(f"Raw benchmark evidence: {args.output.resolve()}")
-    return 0
+    if args.profile_cleanup and args.scenario == "all":
+        parser.error("Use --profile-cleanup with one explicit scenario.")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.scenario == "all":
+        results = []
+        for scene in SCENARIOS:
+            path = args.output.with_name(args.output.stem + "-" + scene + ".json")
+            subprocess.run([sys.executable, "-m", "scripts.benchmark_import_files", "--scenario", scene,
+                            "--output", str(path)], check=True, env=os.environ.copy())
+            results.append(json.loads(path.read_text(encoding="utf-8")))
+        args.output.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    else:
+        with private_database() as dsn:
+            result = asyncio.run(measure(args.scenario, dsn, profile_cleanup=args.profile_cleanup))
+        args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(json.dumps(result), flush=True)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

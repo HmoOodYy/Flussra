@@ -162,7 +162,7 @@ One grid value can cite contributing source records/columns. Every supplied defi
 - GET /payroll/periods/{period_id}/imports/template.xlsx: dynamic frozen-definition template, optionally a selected definition subset; no fixed domain columns.
 - POST /payroll/imports/{id}/cancel: whole uncompleted batch only.
 
-Current page policy: grid default 25/max 100; issues default 50/max 200; source records default 25/max 100, with cell_offset/cell_limit (default 32/max 50). Serialized responses, including root metadata, are at most 2,000,000 UTF-8 bytes; a short page exposes its next offset. No whole-workbook response. Severity filters cover errors/warnings/conflicts and counts cover the complete Import. Issue pages include the offending retained value. Source-cell pages prevent one large source row from requiring an unlimited response.
+Current page policy: grid default 25/max 100; issues default 50/max 200; source records default 25/max 100, with cell_offset/cell_limit (default 32/max 50). Source-cell pages also project only their associated normalized values and column issues, with whole-record values_count/issue_count; row-level issues remain visible. Thus a single large invalid source record remains fully reachable across bounded pages. Serialized responses, including root metadata, are at most 2,000,000 UTF-8 bytes; a short page exposes its next offset. No whole-workbook response. Severity filters cover errors/warnings/conflicts and counts cover the complete Import. Issue pages include the offending retained value.
 
 Mutating operations require payroll.entry and same-Company/Branch access, non-driver actor, editable period and live Import. Reads require payroll.view or payroll.entry with the same subject/scope boundaries. Register every route in the authorization inventory. No decision, confirmation, exclusion, Status-removal, apply or processing-status endpoint is exposed.
 
@@ -227,3 +227,68 @@ Synchronous-first remains current architecture. No authoritative request/proxy b
 Historical unmerged A2 evidence: 939,953-cell CSV publication was about 100.75 s (68 s after COPY), refresh about 97 s publication, process peak about 1.25 GB before compact in-memory changes, and purge about 23–25 s. Guard/FK work per persisted value dominated. These explain this refoundation; they are not the new product acceptance workload.
 
 No A3 UI or public Slice B decisions/apply are included. Final acceptance requires reviewed measurements, retained safety/canonical invariants, and a satisfactory bulk-write feasibility result.
+
+## 11. Measured backend evidence and remaining gate
+
+Measured 2026-10-26 on Windows 11 x64, 12 logical processors, Python 3.12.10 and PostgreSQL 18.4. The scripts use a disposable production-schema PostgreSQL cluster, real application services through HTTPX ASGITransport, ordinary authenticated period GET probes, and production constraints/guards/audit/evidence. Each Import workload has a fresh process, so working-set peaks include interpreter/fixture overhead but do not carry forward another scenario's peak. These are development-host observations, not network/proxy measurements or statistical production SLOs; repeated runs varied with host load/cache state.
+
+Final isolated-workload pass (seconds; peak working set in decimal MB):
+
+| Workload | Source rows / quantity candidates | Preview request | Refresh request | Publication transaction* | Refresh transaction* | Purge component | Peak MB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Representative CSV: 20 Drivers, 7 days, 4 definitions | 140 / 560 | 0.28 | 0.26 | 0.13 | 0.12 | 0.07 | 127.7 |
+| Monthly CSV: 62 daily files, 2 heterogeneous layout groups, 150 Drivers, 31 days, 20 definitions | 9,300 / 93,000 | 14.64 | 16.66 | 6.34 | 8.37 | 2.21 | 355.3 |
+| Monthly XLSX: 31 daily worksheets, same design-center facts | 4,650 / 93,000 | 16.58 | 18.19 | 3.68 | 5.34 | 1.33 | 318.4 |
+| Rare CSV: 1,000 Drivers, 10 days, 20 definitions | 10,000 / 200,000 | 22.38 | 27.03 | 7.86 | 15.04 | 3.47 | 552.1 |
+| Issue-heavy CSV: same rare shape, every quantity invalid | 10,000 / 200,000 | 35.07 | 27.24 | 12.74 | 8.65 | 2.12 | 755.8 |
+
+*Transaction timing is connection begin through COMMIT dispatch, including final context recheck/publication; it excludes the COMMIT round trip. The raw evidence separately records lock-to-COMMIT-dispatch and lock-to-response intervals. Purge measures the Import-owned cleanup component under a finalized-period lock, not financial snapshot/ledger finalization; real finalization and rollback are separately covered by focused integration tests.
+
+First-preview phase attribution (seconds; context is both initial read and final recheck and therefore overlaps the publication transaction):
+
+| Workload | Upload request | File materialization | Both context reads | Normalize/compare/hash | Serialize/prepare outside write transaction | Guarded publication |
+|---|---:|---:|---:|---:|---:|---:|
+| Representative CSV | 0.22 | <0.01 | 0.04 | 0.04 | 0.01 | 0.09 |
+| Monthly CSV | 0.49 | 0.45 | 0.29 | 5.67 | 1.74 | 6.02 |
+| Monthly XLSX | 3.92 | 6.90 | 0.33 | 4.18 | 1.48 | 3.40 |
+| Rare CSV | 0.35 | 0.74 | 4.06 | 8.83 | 3.14 | 5.09 |
+| Issue-heavy CSV | 0.46 | 0.94 | 5.53 | 13.02 | 5.48 | 9.57 |
+
+The monthly CSV combines both layout families into 4,650 Driver/day grid rows. The rare/issue-heavy scenarios publish 10,000 normalized records and 10,000 grid groups, not 200,000 relational cell/issue rows. Per-value issues stay in record JSON; generic ImportIssues has zero rows in these scenarios. Guarded COPY uses 1,000-row chunks (46, 26 and 51 calls for monthly CSV, monthly XLSX and rare workloads respectively). All preview/refresh cases leave canonical DraftLines and SOURCE evidence unchanged. Responses stay within 2,000,000 bytes; invocation temp snapshots and database temp statistics recorded no newly retained files/spill bytes.
+
+Ordinary authenticated GET median latency during first preview was approximately 6–8 ms. Observed maxima were 0.06 s representative, 0.61 s monthly CSV, 0.52 s monthly XLSX, 0.56 s rare and 1.77 s issue-heavy; refresh maxima were 0.02/0.56/0.57/0.54/0.92 s respectively. Thread offload therefore preserves concurrency but does not eliminate CPU/GIL/GC latency spikes. Full high-workload concurrency and production memory capacity are not certified by these single-workload measurements.
+
+### 11.1 Diagnosed costs and remediation
+
+- Source parsing uses one openpyxl workbook per selected physical XLSX and row-bounded XML metadata, including exact numeric/cached-value lexemes; typed date/time/duration handling remains distinct.
+- Complete normalization/comparison and canonical hashing now dominate application CPU and peak memory. Per-row payload serialization runs off-thread before the mutation transaction, then discards duplicate raw/semantic/value Python structures. No second full serialized candidate matrix is held during publication.
+- Binary COPY streams guarded relational source/record/group/match rows in bounded chunks. Group issue counts are computed before publication and inserted directly. The model scales by source records and meaningful ownership identities rather than guarded quantity cells.
+- EXPLAIN ANALYZE identified a cold-statistics FK planner trap during refresh/purge: a broad Import-scoped btree lookup repeatedly visited uncommitted deleted child rows instead of constraining the group key. In the 10,000-group profile, the ownership FK consumed about 10.43 s and the Import writable guard about 0.28 s. The corrected `0095` uses a BRIN Import-scope lookup for appended records while retaining selective group/source btrees; the same FK checks fell to about 0.16 s with every constraint/guard active. Scope-leading covering variants were measured and rejected because they moved or retained the point-lookup cost. BRIN locality and index tuning should be revisited if future staging churn changes the physical workload.
+- Refresh still atomically retires/replaces all derived detail; finalization still owns one-way purge. No partial preview, disabled guard, deferred constraint or lowered product capability is used to improve timing.
+
+The historical 939,953-cell workload and its 100.75 s publication/approximately 25 s purge are retired product-acceptance shapes. The new measured scenarios intentionally contain fewer facts and a different persistence grain; the numbers are not a same-input speedup claim.
+
+### 11.2 Canonical bulk feasibility
+
+The internal Payroll-owned authority was measured with 93,000 reviewed targets, real source constraints/Status guards, ordinary audit and immutable SOURCE evidence enabled:
+
+| Operation | Total seconds | Locked seconds | SQL calls + COPY batches | Actual changes |
+|---|---:|---:|---:|---:|
+| Create | 15.97 | 15.95 | 303 + 93 | 93,000 |
+| Update | 30.26 | 30.18 | 303 + 93 | 93,000 |
+| Unchanged | 2.04 | 1.96 | 20 + 93 | 0 |
+| Void | 19.45 | 19.38 | 298 + 93 | 93,000 |
+
+Peak process working set was approximately 387.3 MB. The three mutating operations produced 279,000 ordinary audit rows and 279,000 immutable SOURCE events; unchanged values created neither. A pathological outer current-state join was replaced with an inner set-wise read, and measured empty/no-op DML batches were removed: create/update/unchanged/void fell from 28.94/46.98/32.90/29.09 s to the table above. The corrected current-state reads took roughly 0.35–0.44 s after source existed. The boundary is feasible without the interactive per-cell loop, but its atomic write duration is a real deployment-budget consideration. It is not a public Import apply workflow.
+
+### 11.3 Acceptance state and reproduction
+
+**Synchronous HTTP suitability is not established. A3 remains gated.** No authoritative request/proxy deadline or per-process memory budget exists in the checked repository configuration (`backend/app/config.py`, `backend/app/main.py`, `scripts/dev_backend.ps1`). The measured rare/issue-heavy latency, publication lock duration, CPU spikes and memory/admission envelope must be assessed against that deployment authority before product exposure. No latency threshold, durable-worker requirement or lower product limit is invented here. If the deployment budget later rules out these bounded synchronous workloads, the next task must explicitly design durable execution/claims/retries/revision-safe publication before A3.
+
+The operating defaults in §8 include the verified 62-file/31-sheet and 200,000-candidate shapes with headroom; they remain protective configurable ceilings, not certification of every possible maximum combination or business limits. Saved external aliases remain DWR-023 NOT YET. A3 UI and public Slice B decisions/confirmation/apply remain unimplemented.
+
+Private publication-context invalidation is deliberately conservative across the selected-date canonical read: an unrelated period edit can require a retry even when the public supplied-fact plan would be unchanged. Public comparisons and semantic fingerprints remain limited to mapped/supplied facts. Narrower invalidation can be assessed with real concurrent-edit workload evidence; it is not a reason to weaken stale-publication checks.
+
+Final focused verification passed 211 tests in 74.74 s across the Import modules, canonical quantity batch, isolation enforcement and route authorization inventory. The final source-projection/current-format and semantic-fixture changes additionally passed all 34 affected checks. Fresh direct-SQL/Alembic comparison at the single `0095` head reported zero unexplained catalog differences; populated canonical payroll/evidence preservation, canonical reset/seed, configured CI test Ruff, changed backend Ruff, compileall, diff and local documentation links were checked. The full backend suite was not run; this does not claim independent-review/full-CI acceptance.
+
+From `backend`, using Python 3.12 and the repository's canonical temporary-directory configuration, reproduce with `python -m scripts.benchmark_import_files --scenario all` and `python -m scripts.benchmark_quantity_batch --drivers 150 --definitions 20 --days 31`. Use `--scenario rare_csv --profile-cleanup` for the real FK/guard EXPLAIN profile (instrumentation adds overhead). Raw JSON/logs default to ignored `.artifacts/`; the tables above retain the engineering evidence in the authoritative design.
