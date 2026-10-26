@@ -860,9 +860,22 @@ Durable Driver Stage 1 identity design.
 The meaning of an external driver identity depends on the import contract. Keeping an undefined column or an unused alias table would preserve ambiguity.
 
 **Current State:**  
-Neither structure exists after Stage 1. Migration `0094` retires the dormant `import.ImportRows.MatchedDriverID` predecessor along with its unused import/integration tables, refusing populated predecessors. The replacement PayrollWork schema has company-scoped Driver matches and multiple identifier associations per source record; A1 stages files only. A2/Slice B still own matching and confirmation behavior. No saved alias or external-ID system is built.
+Neither dormant alias structure exists after Durable Driver Stage 1. Merged A1
+(`337e3f7`, PR #74, migration `0094`) establishes safe File ingress and retires
+the dormant predecessor. The [C2 refoundation design](FLUSSRA_C2_IMPORT_DESIGN.md)
+replaces disposable single-file/cell staging with Import batches, source units,
+layout-specific mappings and compact normalized records. It retains
+Company-scoped permanent DriverNumber/EmployeeKey resolution before target
+Branch/date eligibility. Known but ineligible Drivers remain known; unique
+roster-name matches are proposals only. Multiple files/layouts do not create
+new identity authorities. Per-import matches are staging under finalization
+retention. Public confirmations/choices remain Slice B.
 
-Update 2026-10-25: C2 A1 implementation establishes safe staging and the replacement persistence foundation. This entry remains unresolved; schema availability does not implement its matching/alias capability or constitute acceptance of A1.
+The unmerged A2 branch is correctness/performance evidence only. Its existence,
+or the corrected schema alone, does not deliver saved external aliases.
+Remembering source-system + external-key -> Driver across Imports remains the
+separate later capability. This entry stays NOT YET until that capability has
+its own implementation and verification.
 
 **Issue Resolved?:** NOT YET
 
