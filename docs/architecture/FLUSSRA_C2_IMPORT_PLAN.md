@@ -1,6 +1,6 @@
 # FLUSSRA C2 IMPORT PLAN
 
-**Status:** Agreed product direction (2026-10-24), with Slice A delivery and operational decisions finalized on 2026-10-25. A1 is accepted and merged through PR #74 (`337e3f7`). A2 is implemented locally with focused verification passing, but its workload gate is blocked by measured staging/retention cost; independent review remains pending. A3 and Slice B have not started. The [implementation design](FLUSSRA_C2_IMPORT_DESIGN.md) specifies the sequential mission gates and must satisfy the C2 gate in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` §10.<br>
+**Status:** Agreed product direction (2026-10-24), with Slice A delivery and operational decisions finalized on 2026-10-25. A1 is accepted and merged through PR #74 (`337e3f7`). Independent A2 review identified identity, fingerprint and workload findings. Identity/canonicalization remediation has focused verification, but the synchronous workload gate remains blocked; remediation re-review remains pending. A3 and Slice B have not started. The [implementation design](FLUSSRA_C2_IMPORT_DESIGN.md) specifies the sequential mission gates and must satisfy the C2 gate in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` §10.<br>
 **Scope:** what Flussra Import is, where it starts, the rules it never breaks, what the first version contains, and what follows.<br>
 **Terms:** *Pay Items* are the company's PayDefinitions as shown in the UI. A period's *frozen Pay Items* are the definitions frozen into that period at creation. *Daily entries* are the period's Daily Grid source rows.
 
@@ -186,20 +186,41 @@ Slice A remains one feature milestone, split into **three sequential, independen
 
 A1 owns the existing D7 finalization cleanup before any upload is exposed as an available product workflow. Detailed data from never-completed or cancelled imports must be purged too. A2/A3 reuse and verify that lifecycle; Slice B adds completed-import provenance verification without moving apply into Slice A. Retained metadata must not fabricate completion or applied changes.
 
-A2's Python 3.12 workload gate remains **blocked**: the current `0095` supported
-near-upper 939,953-cell CSV preview took **122.872 seconds**, including
-**100.747 seconds of staging/persistence**, with a **24.846-second** single-import
-purge. Before the measured child-FK index fix, the XLSX equivalent took
-**166 seconds** and purging five measured imports together took **231 seconds**.
-The lookup fix improves retirement without weakening guards; ordinary
-authenticated reads remained responsive and output/retention checks passed.
-These facts do not
-satisfy the intended short-write synchronous contract. See
+A2's Python 3.12 workload gate remains **blocked after remediation**. Stable
+DriverNumber/EmployeeKey now resolve through Company permanent identity before
+target Branch/date eligibility. Semantic canonicalization version 2 excludes
+all generated surrogate IDs and audit timestamps from Mapping/Row/Content/Plan
+fingerprints; relational IDs remain ownership/application references.
+
+For the supported **19,999 × 50 / 939,953-cell** CSV shape, the original
+**122.872 s** mapping / **100.747 s** publication / **1.25 GB** peak baseline
+became **97.638 s** mapping / **67.99 s** publication / **397,651,968 bytes**
+peak in the final isolated run. Serialization/preparation takes another
+**9.74 s outside** the mutation transaction. Upper CSV refresh still takes
+**126.47 s**, including **97.36 s** publication and **28.71 s** old-detail
+clearing. The final isolated XLSX took **215.436 s** mapping,
+**110.886 s** publication, **197.605 s** refresh and **442,318,848 bytes** peak.
+Its slower result is retained alongside the earlier intermediate measurement;
+the variation's cause was not isolated. Same-import retention-hook purge took
+**23.283 / 23.451 s** for CSV/XLSX. No full financial-finalization latency is
+claimed by that hook benchmark.
+
+Bounded off-thread preparation, compact shared cell context and ordinary
+binary COPY materially reduce avoidable allocation/transfer and CSV lock time.
+Every detail guard and FK still executes, and `0094`/`0095` remain unchanged.
+Guard/FK insertion probes and complete refresh/retention measurements show
+substantial remaining serialized database work. These transactions still fail
+D10's short-write intent. See
 [design §2.1](FLUSSRA_C2_IMPORT_DESIGN.md#21-synchronous-processing-contract-d10)
-for exact shapes, environment, raw evidence and limitations. No limits were
-lowered and no asynchronous architecture or weakened guard was introduced.
-An explicit performance/design amendment and A2 acceptance are required before
-A3 can start; A2 code availability alone does not pass its mission gate.
+for phase timings, baseline comparisons, ordinary authorized-read responsiveness,
+raw evidence and limitations. Page/response bounds, supported product limits,
+atomic publication and zero canonical payroll/evidence writes are unchanged.
+
+Unsuitable synchronous evidence blocks A2 acceptance and therefore A3.
+Successful further synchronous remediation needs no design amendment.
+Introducing background processing requires an explicit design amendment first;
+a slow initial implementation does not automatically require one. No
+asynchronous architecture, partial preview or weaker guard closes this gate.
 
 [DWR-023](FLUSSRA_DEFERRED_WORK_REGISTER_EN.md#dwr-023--external-driver-identifiers-and-aliases-are-deferred-to-c2-import) is a design input for A2's company-scoped stable-identifier → permanent Driver → effective Branch/date assignment resolution. Name-only cases remain proposals until Slice B confirmation. The retired dormant import tables are not the new matching authority. L3 still defers saved source-system aliases across imports; this mission split neither creates a generic alias framework nor marks that deferred implementation complete.
 

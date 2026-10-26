@@ -860,16 +860,20 @@ Durable Driver Stage 1 identity design.
 The meaning of an external driver identity depends on the import contract. Keeping an undefined column or an unused alias table would preserve ambiguity.
 
 **Current State:**  
-Neither structure exists after Stage 1. Merged A1 migration `0094` retired the dormant `import.ImportRows.MatchedDriverID` predecessor along with its unused import/integration tables, refusing populated predecessors. The replacement PayrollWork schema has company-scoped Driver matches and multiple identifier associations per source record. Local A2 implements exact Company/period-roster `DriverNumber` and `EmployeeKey` resolution to a permanent Driver and canonical date-effective assignment. Exact unique roster names are unconfirmed proposals; ambiguous/unknown identifiers and disagreement remain visible errors. Per-import matches have no user confirmations or decisions. A2 validation/workload acceptance and independent review remain pending. Slice B owns choices/confirmations, and saved cross-import source-system aliases remain unimplemented.
+Neither structure exists after Stage 1. Merged A1 migration `0094` retired the dormant `import.ImportRows.MatchedDriverID` predecessor along with its unused import/integration tables, refusing populated predecessors. The replacement PayrollWork schema has company-scoped Driver matches and multiple identifier associations per source record. Local A2 resolves `DriverNumber` and `EmployeeKey` through Company-scoped permanent Driver identity independently of period-roster membership, then evaluates the target Branch/date assignment and canonical payroll eligibility. A known Company Driver outside that target remains known with an assignment/eligibility error, while cross-Company identities stay undisclosed. Exact unique roster names are unconfirmed proposals; ambiguous/unknown identifiers and disagreement remain visible errors. Per-import matches have no user confirmations or decisions. Independent A2 review identified correctness and workload findings; focused remediation verification passes, but workload acceptance and remediation re-review remain pending. Slice B owns choices/confirmations, and saved cross-import source-system aliases remain unimplemented.
 
 Update 2026-10-25: C2 A1 implementation establishes safe staging and the replacement persistence foundation. This entry remains unresolved; schema availability does not implement its matching/alias capability or constitute acceptance of A1.
 
 Update 2026-10-25 (preview): A1 is accepted and merged through PR #74. Local A2
 provides per-import stable-identifier resolution and unconfirmed name proposals,
 with focused identity/eligibility, no-payroll-write and retention checks passing.
-Its synchronous workload gate is blocked by measured bulk staging cost; the
-measured FK lookup fix is forward migration `0095`, preserving `0094` and all
-guards. Independent A2 review and all Slice B confirmations remain downstream.
+The reviewed identity/canonicalization findings are remediated; canonicalization
+version 2 uses business meaning instead of generated IDs. Bounded preparation
+and guarded bulk publication reduce CSV time and peak memory, but measured
+upper mapping/refresh write transactions still block synchronous acceptance.
+The measured FK lookup fix remains migration `0095`; remediation adds no
+migration and preserves `0094` and every guard. Remediation re-review and all
+Slice B confirmations remain downstream.
 Saved aliases across imports have not been delivered, so this entry stays
 `NOT YET`.
 

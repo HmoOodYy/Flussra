@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import csv
 import ctypes
 import ctypes.wintypes
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,7 @@ DEFAULT_OUTPUT = ROOT / ".artifacts" / "import-benchmark.json"
 DEFAULT_PREVIEW_OUTPUT = ROOT / ".artifacts" / "import-preview-benchmark.json"
 DEFAULT_GUARD_PROFILE_OUTPUT = ROOT / ".artifacts" / "import-preview-guard-profile.json"
 DEFAULT_NEAR_UPPER_PREVIEW_OUTPUT = ROOT / ".artifacts" / "import-preview-near-upper.json"
+DEFAULT_PERSISTENCE_DIAGNOSTIC_OUTPUT = ROOT / ".artifacts" / "import-persistence-diagnostic.json"
 BOUNDARY = "flussra-import-benchmark"
 UPLOAD_PATH_TEMPLATE = "/payroll/periods/{period_id}/imports"
 ORDINARY_GET_PATH_TEMPLATE = "/payroll/periods/{period_id}/day-grid"
@@ -717,9 +720,131 @@ async def _foreign_key_delete_probe(engine, *, company_id: int, import_id: int) 
     return evidence
 
 
+async def _foreign_key_insert_probe(engine, *, company_id: int, import_id: int) -> dict[str, Any]:
+    """Profile real target INSERT triggers/FKs, then roll back the sampled rows."""
+    from sqlalchemy import text
+
+    columns = (
+        "sourcerecordid, importid, companyid, branchid, payrollperiodid, sourcecolumnindex, "
+        "workdate, driverassignmentid, payrollperioddefinitionid, paydefinitionid, ratedefinitionid, "
+        "rawvalue, quantity, isblank, outcome, currentvalue, hasstatus, heldstatuskeyid, isdayoff"
+    )
+    parameters = {"iid": import_id, "cid": company_id, "sample_count": 2048}
+    evidence: dict[str, Any] = {"rolled_back": True, "requested_rows": parameters["sample_count"]}
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        started = time.perf_counter()
+        try:
+            await connection.execute(text(f"""
+                CREATE TEMP TABLE benchmark_import_cell_insert_probe ON COMMIT DROP AS
+                SELECT {columns}
+                FROM import.payrollworkcells
+                WHERE companyid = :cid AND importid = :iid
+                ORDER BY sourcerecordid, sourcecolumnindex
+                LIMIT :sample_count
+            """), parameters)
+            sample_count = await connection.scalar(text(
+                "SELECT count(*) FROM pg_temp.benchmark_import_cell_insert_probe"
+            ))
+            evidence["sample_rows"] = sample_count
+            if sample_count != parameters["sample_count"]:
+                raise RuntimeError(
+                    f"Insert trigger probe found {sample_count} rows; expected {parameters['sample_count']}."
+                )
+            deleted = await connection.execute(text("""
+                DELETE FROM import.payrollworkcells target
+                USING pg_temp.benchmark_import_cell_insert_probe sample
+                WHERE target.sourcerecordid = sample.sourcerecordid
+                  AND target.sourcecolumnindex = sample.sourcecolumnindex
+            """))
+            evidence["deleted_rows_for_probe"] = deleted.rowcount
+            if deleted.rowcount != sample_count:
+                raise RuntimeError(
+                    f"Insert trigger probe removed {deleted.rowcount} rows; expected {sample_count}."
+                )
+            evidence["setup_seconds"] = round(time.perf_counter() - started, 6)
+            explain_started = time.perf_counter()
+            raw_plan = (await connection.execute(text(f"""
+                EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+                INSERT INTO import.payrollworkcells ({columns})
+                SELECT {columns} FROM pg_temp.benchmark_import_cell_insert_probe
+            """))).scalar_one()
+            plan = raw_plan[0] if isinstance(raw_plan, list) else raw_plan
+            evidence["insert_seconds"] = round(time.perf_counter() - explain_started, 6)
+            evidence["plan"] = plan.get("Plan")
+            evidence["triggers"] = plan.get("Triggers", [])
+            evidence["execution_time_ms"] = plan.get("Execution Time", 0)
+            inserted_rows = await connection.scalar(text("""
+                SELECT count(*)
+                FROM import.payrollworkcells target
+                JOIN pg_temp.benchmark_import_cell_insert_probe sample
+                  ON target.sourcerecordid = sample.sourcerecordid
+                 AND target.sourcecolumnindex = sample.sourcecolumnindex
+            """))
+            evidence["inserted_rows"] = inserted_rows
+            if inserted_rows != sample_count:
+                raise RuntimeError(
+                    f"Insert trigger probe restored {inserted_rows} rows; expected {sample_count}."
+                )
+        finally:
+            await transaction.rollback()
+    return evidence
+
+
+def _deep_python_size(value: Any) -> tuple[int, float]:
+    """Estimate retained Python object bytes for bounded diagnostic samples only."""
+    import sys
+
+    started = time.perf_counter()
+    seen: set[int] = set()
+    pending = [value]
+    total = 0
+    while pending:
+        item = pending.pop()
+        item_id = id(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        total += sys.getsizeof(item)
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            pending.extend(item)
+        elif hasattr(type(item), "__slots__"):
+            pending.extend(getattr(item, slot) for slot in type(item).__slots__)
+    return total, time.perf_counter() - started
+
+
+def _select_preview_cases(generated: list[dict[str, Any]], *, profile_only: bool,
+                          near_upper_csv_only: bool, persistence_diagnostic: bool,
+                          diagnostic_with_upper: bool, diagnostic_upper_only: bool,
+                          diagnostic_xlsx_only: bool) -> list[dict[str, Any]]:
+    if profile_only:
+        allowed = {"issue_volume_1000x50_47000_errors"}
+    elif near_upper_csv_only:
+        allowed = {"near_upper_19999x50_csv"}
+    elif persistence_diagnostic:
+        if diagnostic_xlsx_only:
+            allowed = {"near_upper_19999x50_xlsx"}
+        elif diagnostic_upper_only:
+            allowed = {"near_upper_19999x50_csv", "near_upper_19999x50_xlsx"}
+        else:
+            allowed = {"representative_1000x10", "issue_volume_1000x50_47000_errors"}
+        if diagnostic_with_upper and not diagnostic_upper_only:
+            allowed |= {"near_upper_19999x50_csv", "near_upper_19999x50_xlsx"}
+    else:
+        return generated
+    return [case for case in generated if case["kind"] in allowed]
+
+
 async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
                                           profile_only: bool = False,
-                                          near_upper_csv_only: bool = False) -> dict[str, Any]:
+                                          near_upper_csv_only: bool = False,
+                                          persistence_diagnostic: bool = False,
+                                          diagnostic_with_upper: bool = False,
+                                          diagnostic_upper_only: bool = False,
+                                          diagnostic_xlsx_only: bool = False) -> dict[str, Any]:
     import httpx
     from httpx import ASGITransport
     from sqlalchemy import text
@@ -727,12 +852,12 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
 
     from app.config import get_settings
     from app.dependencies import get_db
-    from app.imports import preview_service
+    from app.imports import preview_service, preview_store
     from app.imports.retention import purge_payroll_work_import_details
     from app.main import create_app
     from tests.payroll_runtime_fixtures import build_payroll_tenant, force_status
 
-    if profile_only:
+    if profile_only or persistence_diagnostic:
         _enable_guard_function_tracking(dsn)
 
     database_url = (
@@ -752,6 +877,7 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
 
     app.dependency_overrides[get_db] = override_get_db
     tenant = build_payroll_tenant(dsn)
+    diagnostic_originals = None
     try:
         async with httpx.AsyncClient(
             transport=ASGITransport(app=app), base_url="http://benchmark.test"
@@ -817,16 +943,21 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
                 if (path.stat().st_size > 10_000_000
                         or generated[-1]["actual_decompressed_bytes"] > 50_000_000):
                     raise RuntimeError(f"Generated benchmark input exceeds an accepted file cap: {path.name}.")
-            if profile_only:
-                generated = [case for case in generated
-                             if case["kind"] == "issue_volume_1000x50_47000_errors"]
-            elif near_upper_csv_only:
-                generated = [case for case in generated
-                             if case["kind"] == "near_upper_19999x50_csv"]
+            generated = _select_preview_cases(
+                generated, profile_only=profile_only, near_upper_csv_only=near_upper_csv_only,
+                persistence_diagnostic=persistence_diagnostic,
+                diagnostic_with_upper=diagnostic_with_upper,
+                diagnostic_upper_only=diagnostic_upper_only,
+                diagnostic_xlsx_only=diagnostic_xlsx_only,
+            )
 
             result: dict[str, Any] = {
                 "setup": setup,
                 "guard_profile_only": profile_only,
+                "persistence_diagnostic": persistence_diagnostic,
+                "diagnostic_with_upper": diagnostic_with_upper,
+                "diagnostic_upper_only": diagnostic_upper_only,
+                "diagnostic_xlsx_only": diagnostic_xlsx_only,
                 "ordinary_get_path": PREVIEW_ORDINARY_GET_PATH_TEMPLATE.format(
                     period_id=period["payroll_period_id"]
                 ),
@@ -835,6 +966,156 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
             ordinary_get_path = result["ordinary_get_path"]
             observers: list[dict[str, float]] = []
             app.state.import_preview_observer = lambda timings: observers.append(dict(timings))
+            active_diagnostic = contextvars.ContextVar("import_diagnostic_operation", default=None)
+            diagnostic_phase = contextvars.ContextVar("import_diagnostic_phase", default="persist")
+            diagnostic_lock = threading.Lock()
+
+            def record_metric(operation, phase, table, key, value):
+                if operation is None:
+                    return
+                bucket = operation["database"].setdefault(f"{phase}:{table}", {})
+                with diagnostic_lock:
+                    bucket[key] = bucket.get(key, 0) + value
+
+            class TimedConnection:
+                def __init__(self, connection):
+                    self.connection = connection
+
+                def __getattr__(self, name):
+                    return getattr(self.connection, name)
+
+                async def execute(self, statement, parameters=None, *args, **kwargs):
+                    sql = str(statement)
+                    match = re.search(
+                        r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+import\.([a-z0-9_]+)",
+                        sql, re.IGNORECASE,
+                    )
+                    table = match.group(1).lower() if match else "other"
+                    operation = active_diagnostic.get()
+                    phase = diagnostic_phase.get()
+                    started = time.perf_counter()
+                    result_proxy = await self.connection.execute(statement, parameters, *args, **kwargs)
+                    elapsed = time.perf_counter() - started
+                    record_metric(operation, phase, table, "execute_calls", 1)
+                    record_metric(operation, phase, table, "execute_wall_seconds", elapsed)
+                    record_metric(operation, phase, table, "sql_text_bytes", len(sql.encode("utf-8")))
+                    if isinstance(parameters, dict):
+                        for value in parameters.values():
+                            if isinstance(value, str):
+                                record_metric(operation, phase, table, "bound_string_bytes",
+                                              len(value.encode("utf-8")))
+                            elif isinstance(value, (bytes, bytearray, memoryview)):
+                                record_metric(operation, phase, table, "bound_binary_bytes", len(value))
+                    rowcount = getattr(result_proxy, "rowcount", None)
+                    if isinstance(rowcount, int) and rowcount > 0:
+                        record_metric(operation, phase, table, "rows_affected", rowcount)
+                    return result_proxy
+
+            if persistence_diagnostic:
+                original_copy = preview_store.copy_prepared
+                original_clear = preview_store.clear_derived_state
+                original_persist = preview_service.persist_preview
+                original_prepare = preview_service.prepare_preview
+                original_pickle_dump = preview_store.pickle.dump
+                diagnostic_originals = (original_copy, original_clear, original_persist, original_prepare,
+                                        original_pickle_dump)
+
+                class TimedDriver:
+                    def __init__(self, driver):
+                        self.driver = driver
+
+                    async def copy_records_to_table(self, table, *, records, **kwargs):
+                        count = 0
+
+                        def counted():
+                            nonlocal count
+                            for item in records:
+                                count += 1
+                                yield item
+
+                        started = time.perf_counter()
+                        result = await self.driver.copy_records_to_table(table, records=counted(), **kwargs)
+                        operation = active_diagnostic.get()
+                        record_metric(operation, "copy", table, "execute_wall_seconds", time.perf_counter() - started)
+                        record_metric(operation, "copy", table, "execute_calls", 1)
+                        record_metric(operation, "copy", table, "rows_affected", count)
+                        return result
+
+                async def diagnostic_copy(driver, table, *args):
+                    started = time.perf_counter()
+                    try:
+                        return await original_copy(TimedDriver(driver), table, *args)
+                    finally:
+                        record_metric(active_diagnostic.get(), "copy", table, "copy_with_batch_read_seconds",
+                                      time.perf_counter() - started)
+
+                def timed_pickle_dump(value, stream, *args, **kwargs):
+                    operation = active_diagnostic.get()
+                    if operation is None:
+                        return original_pickle_dump(value, stream, *args, **kwargs)
+                    started = time.perf_counter()
+                    cpu_started = time.thread_time()
+                    byte_started = stream.tell()
+                    try:
+                        return original_pickle_dump(value, stream, *args, **kwargs)
+                    finally:
+                        elapsed = time.perf_counter() - started
+                        cpu_elapsed = time.thread_time() - cpu_started
+                        bucket = operation.setdefault("pickle_by_stream", {}).setdefault(
+                            id(stream), {"batch_count": 0, "wall_seconds": 0.0,
+                                         "thread_cpu_seconds": 0.0, "serialized_bytes": 0},
+                        )
+                        bucket["batch_count"] += 1
+                        bucket["wall_seconds"] += elapsed
+                        bucket["thread_cpu_seconds"] += cpu_elapsed
+                        bucket["serialized_bytes"] += stream.tell() - byte_started
+
+                def diagnostic_prepare(value):
+                    started = time.perf_counter()
+                    prepared = original_prepare(value)
+                    operation = active_diagnostic.get()
+                    if operation is not None:
+                        operation["preparation_seconds"] = time.perf_counter() - started
+                        operation["prepared_stream_bytes"] = {}
+                        operation["prepared_stream_spooled_to_disk"] = {}
+                        operation["prepare_pickle_by_table"] = {}
+                        pickle_stats = operation.get("pickle_by_stream", {})
+                        for table, (_, stream) in prepared.streams.items():
+                            stream.seek(0, 2)
+                            operation["prepared_stream_bytes"][table] = stream.tell()
+                            operation["prepared_stream_spooled_to_disk"][table] = getattr(stream, "_rolled", None)
+                            operation["prepare_pickle_by_table"][table] = pickle_stats.get(
+                                id(stream), {"batch_count": 0, "wall_seconds": 0.0,
+                                              "thread_cpu_seconds": 0.0, "serialized_bytes": 0},
+                            )
+                            stream.seek(0)
+                    return prepared
+
+                async def diagnostic_clear(db, cid, iid, *, reset_mapping=True):
+                    phase_token = diagnostic_phase.set("clear")
+                    started = time.perf_counter()
+                    try:
+                        return await original_clear(db, cid, iid, reset_mapping=reset_mapping)
+                    finally:
+                        operation = active_diagnostic.get()
+                        if operation is not None:
+                            operation["clear_derived_state_seconds"] = time.perf_counter() - started
+                        diagnostic_phase.reset(phase_token)
+
+                async def diagnostic_persist(db, cid, bid, pid, iid, preview):
+                    operation = active_diagnostic.get()
+                    started = time.perf_counter()
+                    try:
+                        return await original_persist(TimedConnection(db), cid, bid, pid, iid, preview)
+                    finally:
+                        if operation is not None:
+                            operation["persist_preview_seconds"] = time.perf_counter() - started
+
+                preview_store.copy_prepared = diagnostic_copy
+                preview_store.pickle.dump = timed_pickle_dump
+                preview_service.prepare_preview = diagnostic_prepare
+                preview_store.clear_derived_state = diagnostic_clear
+                preview_service.persist_preview = diagnostic_persist
 
             for case in generated:
                 data = Path(case["path"]).read_bytes()
@@ -870,26 +1151,96 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
                 completed = threading.Event()
                 phase_events = {
                     name: (threading.Event(), threading.Event())
-                    for name in ("materialization", "compute", "persistence")
+                    for name in ("materialization", "compute", "preparation", "persistence")
                 }
                 original_materialize = preview_service.materialize
                 original_build_preview = preview_service.build_preview
+                original_prepare_preview = preview_service.prepare_preview
                 original_persist_preview = preview_service.persist_preview
+                collect_representations = case["kind"] in {
+                    "representative_1000x10", "issue_volume_1000x50_47000_errors"
+                }
+                diagnostic_results = []
+
+                def new_diagnostic_operation(label):
+                    return {
+                        "operation": label,
+                        "database": {},
+                        "representations": {},
+                        "collect_representations": collect_representations,
+                    }
+
+                def finish_diagnostic_operation(operation, guard_start, guard_end):
+                    representations = operation["representations"]
+                    sizes = {}
+                    if operation["collect_representations"]:
+                        for label, value in representations.items():
+                            size, traversal = _deep_python_size(value)
+                            sizes[label] = {
+                                "estimated_deep_python_bytes": size,
+                                "measurement_traversal_seconds": round(traversal, 6),
+                            }
+                    representations.clear()
+                    return {
+                        "operation": operation["operation"],
+                        "clear_derived_state_seconds": round(
+                            operation.get("clear_derived_state_seconds", 0.0), 6),
+                        "persist_preview_seconds": round(
+                            operation.get("persist_preview_seconds", 0.0), 6),
+                        "database_by_phase_and_table": operation["database"],
+                        "preparation_seconds": operation.get("preparation_seconds"),
+                        "prepared_stream_bytes": operation.get("prepared_stream_bytes"),
+                        "prepared_stream_spooled_to_disk": operation.get("prepared_stream_spooled_to_disk"),
+                        "prepare_pickle_by_table": operation.get("prepare_pickle_by_table"),
+                        "representation_memory": {
+                            "deep_size_estimated": operation["collect_representations"],
+                            "objects": sizes,
+                            "prepared_json_bytes_by_table": {
+                                key.split(":", 1)[-1]: value.get("serialized_json_bytes", 0)
+                                for key, value in operation["database"].items()
+                                if key.startswith("insert:")
+                            },
+                        },
+                        "detail_guard_stats": {
+                            "before": guard_start,
+                            "after": guard_end,
+                            "delta": ({
+                                key: guard_end["values"][key] - guard_start["values"][key]
+                                for key in ("calls", "total_time", "self_time")
+                            } if guard_start and guard_end else None),
+                        },
+                    }
 
                 def measured_materialize(*args, **kwargs):
                     started.set()
                     phase_events["materialization"][0].set()
                     try:
-                        return original_materialize(*args, **kwargs)
+                        value = original_materialize(*args, **kwargs)
+                        operation = active_diagnostic.get()
+                        if operation is not None and operation["collect_representations"]:
+                            operation["representations"]["materialized_rows"] = value
+                        return value
                     finally:
                         completed.set()
+                        phase_events["materialization"][1].set()
 
                 def measured_build_preview(*args, **kwargs):
                     phase_events["compute"][0].set()
                     try:
-                        return original_build_preview(*args, **kwargs)
+                        value = original_build_preview(*args, **kwargs)
+                        operation = active_diagnostic.get()
+                        if operation is not None and operation["collect_representations"]:
+                            operation["representations"]["preview_model"] = value
+                        return value
                     finally:
                         phase_events["compute"][1].set()
+
+                def measured_prepare_preview(*args, **kwargs):
+                    phase_events["preparation"][0].set()
+                    try:
+                        return original_prepare_preview(*args, **kwargs)
+                    finally:
+                        phase_events["preparation"][1].set()
 
                 async def measured_persist_preview(*args, **kwargs):
                     phase_events["persistence"][0].set()
@@ -900,11 +1251,16 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
 
                 preview_service.materialize = measured_materialize
                 preview_service.build_preview = measured_build_preview
+                preview_service.prepare_preview = measured_prepare_preview
                 preview_service.persist_preview = measured_persist_preview
                 observers.clear()
+                diagnostic_initial = new_diagnostic_operation("initial_mapping") if persistence_diagnostic else None
+                diagnostic_token = (active_diagnostic.set(diagnostic_initial)
+                                    if diagnostic_initial is not None else None)
                 guard_before = (await _guard_function_stats(engine, reset=True)
-                                if profile_only else None)
+                                if profile_only or persistence_diagnostic else None)
                 mapping_start = time.perf_counter()
+                print(f"[benchmark] {case['kind']} mapping start", file=sys.stderr, flush=True)
                 mapping_task = asyncio.create_task(client.put(
                     f"/payroll/imports/{import_id}/mapping",
                     json={"expected_revision": 1, "column_mapping": mapping},
@@ -932,15 +1288,23 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
                 finally:
                     preview_service.materialize = original_materialize
                     preview_service.build_preview = original_build_preview
+                    preview_service.prepare_preview = original_prepare_preview
                     preview_service.persist_preview = original_persist_preview
                 mapping_seconds = time.perf_counter() - mapping_start
-                guard_after = await _guard_function_stats(engine) if profile_only else None
+                print(f"[benchmark] {case['kind']} mapping complete ({mapping_seconds:.3f}s, HTTP {mapped.status_code})",
+                      file=sys.stderr, flush=True)
+                guard_after = (await _guard_function_stats(engine)
+                               if profile_only or persistence_diagnostic else None)
                 if mapped.status_code != 200:
                     raise RuntimeError(f"Preview benchmark mapping failed: {mapped.status_code} {mapped.text}")
                 if not observers:
                     raise RuntimeError("The preview timing observer did not report this mapping operation.")
                 if any(item["status"] != 200 for item in phase_gets):
                     raise RuntimeError(f"A concurrent phase GET failed: {phase_gets!r}")
+                if diagnostic_initial is not None:
+                    diagnostic_results.append(finish_diagnostic_operation(
+                        diagnostic_initial, guard_before, guard_after,
+                    ))
                 plan = mapped.json()["fingerprints"]["plan"]
                 revision = mapped.json()["revision"]
                 rows_page = await client.get(
@@ -958,11 +1322,40 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
                     raise RuntimeError(
                         f"Preview page failed: rows={rows_page.status_code}, issues={issues_page.status_code}"
                     )
+                initial_phase_seconds = observers[-1]
+                refresh_result = None
+                if persistence_diagnostic:
+                    diagnostic_refresh = new_diagnostic_operation("refresh")
+                    active_diagnostic.set(diagnostic_refresh)
+                    observers.clear()
+                    refresh_guard_before = await _guard_function_stats(engine, reset=True)
+                    refresh_started = time.perf_counter()
+                    print(f"[benchmark] {case['kind']} refresh start", file=sys.stderr, flush=True)
+                    refreshed = await client.post(
+                        f"/payroll/imports/{import_id}/refresh",
+                        json={"expected_revision": revision}, headers=tenant.admin,
+                    )
+                    refresh_seconds = time.perf_counter() - refresh_started
+                    print(f"[benchmark] {case['kind']} refresh complete ({refresh_seconds:.3f}s, HTTP {refreshed.status_code})",
+                          file=sys.stderr, flush=True)
+                    refresh_guard_after = await _guard_function_stats(engine)
+                    if refreshed.status_code != 200:
+                        raise RuntimeError(
+                            f"Preview diagnostic refresh failed: {refreshed.status_code} {refreshed.text}"
+                        )
+                    diagnostic_results.append(finish_diagnostic_operation(
+                        diagnostic_refresh, refresh_guard_before, refresh_guard_after,
+                    ))
+                    refresh_result = {
+                        "status": refreshed.status_code,
+                        "seconds": round(refresh_seconds, 6),
+                        "phase_seconds": observers[-1] if observers else None,
+                    }
                 case_result = {
                     "kind": case["kind"], "file_bytes": len(data),
                     "upload_seconds": round(upload_seconds, 6), "upload_status": uploaded.status_code,
                     "mapping_seconds": round(mapping_seconds, 6), "mapping_status": mapped.status_code,
-                    "mapping_phase_seconds": observers[-1],
+                    "mapping_phase_seconds": initial_phase_seconds,
                     "concurrent_ordinary_authorized_gets": phase_gets,
                     "row_page": {
                         "status": rows_page.status_code, "requested_limit": 100,
@@ -987,6 +1380,11 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
                     "content_fingerprint": mapped.json()["fingerprints"]["content"],
                     "plan_fingerprint": plan,
                 }
+                if persistence_diagnostic:
+                    case_result["persistence_diagnostic_operations"] = diagnostic_results
+                    case_result["refresh"] = refresh_result
+                    case_result["diagnostic_process_memory_after"] = _working_set()
+                    active_diagnostic.reset(diagnostic_token)
                 if profile_only:
                     before_values = guard_before["values"]
                     after_values = guard_after["values"]
@@ -1063,25 +1461,34 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
             # The near-upper scenario intentionally creates five invalid rows
             # so that the actual 200-item Error page is exercised with data.
             period_id = period["payroll_period_id"]
+            insert_probe_case = max(generated, key=lambda case: case["data_rows"])
+            fk_insert_probe = (await _foreign_key_insert_probe(
+                engine, company_id=tenant.company_id, import_id=insert_probe_case["import_id"],
+            ) if profile_only or persistence_diagnostic else None)
             force_status(tenant, period_id, "Locked")
             fk_delete_probe = None
-            if profile_only:
-                profiled_import = next(
-                    case["import_id"] for case in generated
-                    if case["kind"] == "issue_volume_1000x50_47000_errors"
+            if profile_only or persistence_diagnostic:
+                probe_case = next(
+                    (case for case in generated
+                     if case["kind"] == "issue_volume_1000x50_47000_errors"),
+                    max(generated, key=lambda case: case["data_rows"]),
                 )
                 fk_delete_probe = await _foreign_key_delete_probe(
-                    engine, company_id=tenant.company_id, import_id=profiled_import,
+                    engine, company_id=tenant.company_id, import_id=probe_case["import_id"],
                 )
-            purge_guard_before = await _guard_function_stats(engine, reset=True) if profile_only else None
+            purge_guard_before = (await _guard_function_stats(engine, reset=True)
+                                  if profile_only or persistence_diagnostic else None)
             purge_started = time.perf_counter()
+            print(f"[benchmark] retention purge start ({len(generated)} import(s))", file=sys.stderr, flush=True)
             async with engine.begin() as connection:
                 await purge_payroll_work_import_details(
                     connection, company_id=tenant.company_id, period_id=period_id,
                     actor_id=tenant.owner,
                 )
             purge_seconds = time.perf_counter() - purge_started
-            purge_guard_after = await _guard_function_stats(engine) if profile_only else None
+            print(f"[benchmark] retention purge complete ({purge_seconds:.3f}s)", file=sys.stderr, flush=True)
+            purge_guard_after = (await _guard_function_stats(engine)
+                                 if profile_only or persistence_diagnostic else None)
             imports = []
             detail_tables = (
                 "importsourcerecords", "filesourcerecords", "importissues", "payrollworkrecords",
@@ -1111,7 +1518,8 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
                 "seconds": round(purge_seconds, 6), "period_status": "Locked",
                 "imports": imports,
             }
-            if profile_only:
+            if profile_only or persistence_diagnostic:
+                result["purge"]["foreign_key_insert_probe"] = fk_insert_probe
                 result["purge"]["foreign_key_delete_probe"] = fk_delete_probe
                 before_values = purge_guard_before["values"]
                 after_values = purge_guard_after["values"]
@@ -1128,11 +1536,19 @@ async def _preview_application_benchmarks(dsn: dict, directory: Path, *,
             return result
     finally:
         app.dependency_overrides.clear()
+        if diagnostic_originals is not None:
+            (preview_store.copy_prepared, preview_store.clear_derived_state,
+             preview_service.persist_preview, preview_service.prepare_preview,
+             preview_store.pickle.dump) = diagnostic_originals
         await engine.dispose()
 
 
 def _run_preview_only(output_path: Path, *, profile_only: bool = False,
-                      near_upper_csv_only: bool = False) -> dict[str, Any]:
+                      near_upper_csv_only: bool = False,
+                      persistence_diagnostic: bool = False,
+                      diagnostic_with_upper: bool = False,
+                      diagnostic_upper_only: bool = False,
+                      diagnostic_xlsx_only: bool = False) -> dict[str, Any]:
     import openpyxl
     import starlette
 
@@ -1144,6 +1560,18 @@ def _run_preview_only(output_path: Path, *, profile_only: bool = False,
             "temp_directory": tempfile.gettempdir(),
         },
         "scope": "A2 real PayrollWork mapping, persistence, bounded pages, ordinary reads and retention purge",
+        "persistence_diagnostic": persistence_diagnostic,
+        "diagnostic_with_upper": diagnostic_with_upper,
+        "diagnostic_upper_only": diagnostic_upper_only,
+        "diagnostic_xlsx_only": diagnostic_xlsx_only,
+        "diagnostic_measurement_notes": ({
+            "db_execute_proxy": True,
+            "binary_copy_and_owned_spool_instrumented": True,
+            "representation_deep_size_enabled_only_for_representative_and_issue_heavy_shapes": True,
+            "representation_size_traversal_runs_after_request_phase": True,
+            "tracemalloc_enabled": False,
+            "detail_guard_tracking": persistence_diagnostic,
+        } if persistence_diagnostic else None),
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="flussra-import-preview-benchmark-") as directory:
@@ -1152,6 +1580,10 @@ def _run_preview_only(output_path: Path, *, profile_only: bool = False,
                 _preview_application_benchmarks(
                     dsn, Path(directory), profile_only=profile_only,
                     near_upper_csv_only=near_upper_csv_only,
+                    persistence_diagnostic=persistence_diagnostic,
+                    diagnostic_with_upper=diagnostic_with_upper,
+                    diagnostic_upper_only=diagnostic_upper_only,
+                    diagnostic_xlsx_only=diagnostic_xlsx_only,
                 )
             )
     output_path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -1236,21 +1668,46 @@ def main() -> int:
                         help="Profile the detail trigger around a generated 47k-issue mapping and purge.")
     parser.add_argument("--near-upper-csv-only", action="store_true",
                         help="Measure only the 19,999-row by 50-column CSV preview and retention case.")
+    parser.add_argument("--persistence-diagnostic", action="store_true",
+                        help="Instrument representative and 47k-issue mapping/refresh/purge persistence.")
+    parser.add_argument("--diagnostic-with-upper", action="store_true",
+                        help="Also instrument the 19,999-row by 50-column CSV and XLSX mapping/refresh cases.")
+    parser.add_argument("--diagnostic-upper-only", action="store_true",
+                        help="Instrument only the 19,999-row by 50-column CSV and XLSX mapping/refresh cases.")
+    parser.add_argument("--diagnostic-xlsx-only", action="store_true",
+                        help="Instrument only the 19,999-row by 50-column XLSX mapping, refresh and purge case.")
     parser.add_argument("--inspect-child", nargs=2, metavar=("PATH", "FILENAME"), help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.diagnostic_with_upper and not args.persistence_diagnostic:
+        parser.error("--diagnostic-with-upper requires --persistence-diagnostic")
+    if args.diagnostic_upper_only and not args.persistence_diagnostic:
+        parser.error("--diagnostic-upper-only requires --persistence-diagnostic")
+    if args.diagnostic_xlsx_only and not args.persistence_diagnostic:
+        parser.error("--diagnostic-xlsx-only requires --persistence-diagnostic")
+    if args.diagnostic_xlsx_only and (
+        args.diagnostic_upper_only or args.diagnostic_with_upper
+        or args.near_upper_csv_only or args.guard_profile_only
+    ):
+        parser.error("--diagnostic-xlsx-only cannot be combined with another diagnostic scenario selector")
     if args.inspect_child:
         result = _measure_inspection_child(Path(args.inspect_child[0]), args.inspect_child[1])
         print(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         return 0
-    preview_only = args.preview_only or args.guard_profile_only or args.near_upper_csv_only
+    preview_only = (args.preview_only or args.guard_profile_only or args.near_upper_csv_only
+                    or args.persistence_diagnostic)
     output_path = args.output or (
         DEFAULT_GUARD_PROFILE_OUTPUT if args.guard_profile_only else
         DEFAULT_NEAR_UPPER_PREVIEW_OUTPUT if args.near_upper_csv_only else
+        DEFAULT_PERSISTENCE_DIAGNOSTIC_OUTPUT if args.persistence_diagnostic else
         DEFAULT_PREVIEW_OUTPUT if preview_only else DEFAULT_OUTPUT
     )
     evidence = (_run_preview_only(
         output_path.resolve(), profile_only=args.guard_profile_only,
         near_upper_csv_only=args.near_upper_csv_only,
+        persistence_diagnostic=args.persistence_diagnostic,
+        diagnostic_with_upper=args.diagnostic_with_upper,
+        diagnostic_upper_only=args.diagnostic_upper_only,
+        diagnostic_xlsx_only=args.diagnostic_xlsx_only,
     ) if preview_only
                 else _run(output_path.resolve()))
     print(json.dumps(evidence, indent=2, ensure_ascii=False))

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from copy import deepcopy
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -57,9 +59,10 @@ def _preview_row(source_row: int, *, number="0012", name="Ada Driver", employee=
 
 
 def _context(definitions=None, *, days=None, roster=None, lines=None, entries=None, live_days=None):
-    return {
+    result = {
         "definitions": definitions or [_definition()],
-        "period": {"id": 9, "company_id": 3, "branch_id": 5,
+        "period": {"id": 9, "company_id": 3, "branch_id": 5, "company_code": "CO", "branch_code": "BR",
+                   "period_code": "BR-20261001", "period_type": "Monthly",
                    "start": date(2026, 10, 1), "end": date(2026, 10, 31)},
         "days": days or [{"workdate": date(2026, 10, 20), "isconfiguredoffday": False}],
         "roster": roster if roster is not None else [{
@@ -74,8 +77,13 @@ def _context(definitions=None, *, days=None, roster=None, lines=None, entries=No
         }],
         "live_days": live_days if live_days is not None else {(31, date(2026, 10, 20))},
         "lines": lines or [],
-        "entries": entries or [],
+        "entries": [{"statuscode": "SICK", **item} for item in entries or []],
     }
+    result["roster"] = [{"effectivefromat": datetime(2026, 1, 1, tzinfo=UTC), "effectivetoat": None,
+                         "endreason": None, "branchtimezoneidsnapshot": "UTC", **item} for item in result["roster"]]
+    result["drivers"] = list({item["driverid"]: item for item in [{"driverid": 21, "drivernumber": "0012",
+                              "employeekey": "E-12", "drivername": "Ada Driver"}, *result["roster"]]}.values())
+    return result
 
 
 def _materialized(*rows, nonempty=(1, 2, 3, 4, 5), headers=None):
@@ -394,3 +402,74 @@ def test_preview_surfaces_invalid_values_day_off_held_status_and_skipped_rows():
     assert preview["rows"][-1]["skipped"] is True
     assert preview["counts"]["skipped"] == 1
     assert preview["rows"][-1]["work_cells"][0]["outcome"] == "Blank"
+
+
+@pytest.mark.parametrize("identifiers", [{"1": "DriverNumber"}, {"2": "EmployeeKey"},
+                                        {"1": "DriverNumber", "2": "EmployeeKey"}])
+def test_permanent_identity_remains_known_without_period_assignment(identifiers):
+    mapping = {**identifiers, "4": "WorkDate", "5": target_key(_definition())}
+    preview = build_preview(_materialized(_preview_row(2), nonempty=tuple(map(int, mapping))),
+                            mapping, _context(roster=[], live_days=set()))
+    assert {(item["resolution"], item["driver_id"]) for item in preview["rows"][0]["identifiers"]} == {("Exact", 21)}
+    assert {item["code"] for item in preview["issues"]} == {"IMPORT_ASSIGNMENT_UNRESOLVED"}
+    assert preview["rows"][0]["work_cells"][0]["outcome"] == "Invalid"
+
+
+def _identities(preview):
+    return (preview["mapping_fingerprint"], tuple(row["fingerprint"] for row in preview["rows"]),
+            preview["content_fingerprint"], preview["plan_fingerprint"])
+
+
+def test_unresolved_name_does_not_erase_agreed_permanent_stable_identity():
+    preview = build_preview(_materialized(_preview_row(2)), _mapping(), _context(roster=[], live_days=set()))
+    assert {(item["kind"], item["resolution"]) for item in preview["rows"][0]["identifiers"]} == {
+        ("DriverNumber", "Exact"), ("EmployeeKey", "Exact"), ("DriverName", "Unresolved")}
+    assert {item["code"] for item in preview["issues"]} == {"IMPORT_DRIVER_UNRESOLVED", "IMPORT_ASSIGNMENT_UNRESOLVED"}
+    assert preview["rows"][0]["work_cells"][0]["outcome"] == "Invalid"
+
+
+def test_semantic_fingerprints_ignore_all_surrogate_ids_and_audit_times():
+    day = date(2026, 10, 20)
+    context = _context(lines=[{"driverassignmentid": 31, "workdate": day,
+                               "payrollperioddefinitionid": 17, "quantity": Decimal("3")}],
+                       entries=[{"driverassignmentid": 31, "workdate": day, "statuskeyid": 700,
+                                 "statuscode": "SICK", "isoffreason": True}])
+    source = _materialized(_preview_row(2))
+    original = build_preview(source, _mapping(), context)
+    changed = deepcopy(context)
+    changed["period"].update(id=900, company_id=300, branch_id=500, created_at=datetime.now(UTC))
+    changed["definitions"] = [replace(context["definitions"][0], payroll_period_definition_id=1700,
+                                      pay_definition_id=11700, rate_definition_id=21700)]
+    for item in changed["drivers"]:
+        item["driverid"] = 2100
+    for item in changed["roster"]:
+        item.update(driverid=2100, driverassignmentid=3100, updated_at=datetime.now(UTC))
+    changed["live_days"] = {(3100, day)}
+    changed["lines"][0].update(driverassignmentid=3100, payrollperioddefinitionid=1700)
+    changed["entries"][0].update(driverassignmentid=3100, statuskeyid=70000)
+    renumbered = build_preview(source, _mapping(changed["definitions"][0]), changed)
+    assert _identities(renumbered) == _identities(original)
+    assert renumbered["rows"][0]["work_cells"][0]["assignment_id"] == 3100
+
+
+@pytest.mark.parametrize("domain", ["period", "definition", "assignment", "status"])
+def test_business_meaning_changes_the_correct_fingerprint_domains(domain):
+    context = _context(entries=[{"driverassignmentid": 31, "workdate": date(2026, 10, 20),
+                                 "statuskeyid": 700, "statuscode": "SICK", "isoffreason": True}])
+    source = _materialized(_preview_row(2))
+    original = build_preview(source, _mapping(), context)
+    changed = deepcopy(context)
+    if domain == "period":
+        changed["period"]["branch_code"] = "OTHER"
+    elif domain == "definition":
+        changed["definitions"] = [replace(context["definitions"][0], unit="deliveries")]
+    elif domain == "assignment":
+        changed["roster"][0]["effectivefromat"] -= timedelta(days=1)
+    else:
+        changed["entries"][0]["statuscode"] = "ABSENT"
+    revised = build_preview(source, _mapping(), changed)
+    assert revised["plan_fingerprint"] != original["plan_fingerprint"]
+    if domain in ("assignment", "status"):
+        assert _identities(revised)[:3] == _identities(original)[:3]
+    else:
+        assert all(left != right for left, right in zip(_identities(revised), _identities(original), strict=True))

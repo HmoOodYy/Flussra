@@ -1,5 +1,6 @@
 """Import uses permanent identities and canonical date-specific eligibility."""
 from datetime import date, timedelta
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -12,6 +13,7 @@ from app.payroll.eligibility import (
     lifecycle_eligible_assignment_days,
 )
 from app.payroll.period_read import get_period_by_id
+from tests.builders.workforce import create_workforce_driver
 from tests.compensation_api_fixtures import (  # noqa: F401
     p3c_application,
     p3c_database_engine,
@@ -21,7 +23,9 @@ from tests.compensation_database_fixtures import p3b_database  # noqa: F401
 from tests.db_state import DRIVER_ASSIGNMENT_HISTORY_TRIGGER, suspended_test_triggers
 from tests.payroll_runtime_fixtures import (
     assign_weekly_setup,
+    build_payroll_tenant,
     create_period,
+    make_user,
     rated_definition,
     set_employment,
     setup_anchor,
@@ -87,6 +91,69 @@ async def test_existing_source_rescue_allows_only_exact_date_existing_quantity_c
     assert issues.status_code == 200, issues.text
     codes = {item["code"] for item in issues.json()["items"]}
     assert {"IMPORT_NEW_SOURCE_NOT_ELIGIBLE", "IMPORT_ASSIGNMENT_UNRESOLVED"} <= codes
+    assert await _payroll_snapshot(p3c_engine, period["payroll_period_id"]) == before
+
+
+async def test_company_identity_precedes_period_roster_and_never_discloses_another_company(
+    p3c_client, p3c_engine, tenant, p3b_dsn,
+):
+    period = await _period(p3c_client, p3c_engine, tenant)
+    source = await _payroll_inputs(p3c_engine, tenant, period)
+    manager = make_user(tenant, ["employees.manage"])["Authorization"].split()[1]
+    other = build_payroll_tenant(p3b_dsn)
+    foreign_manager = make_user(other, ["employees.manage"])["Authorization"].split()[1]
+    # Workforce legitimately appends eligible new assignments to editable
+    # periods. Use a future window to ensure this Driver is outside this roster;
+    # the other local Driver has no assignment in the target Branch at all.
+    after_period = date.fromisoformat(period["end_date"]) + timedelta(days=3)
+    identities = [await create_workforce_driver(p3c_client, token, branch, label, f"IMP-{uuid4().hex[:10]}",
+                  effective_from_at=f"{after_period}T00:00:00Z" if label == "Late Driver" else "2020-01-01T00:00:00Z")
+                  for token, branch, label in ((manager, tenant.branch_b, "Other branch"),
+                                               (manager, tenant.branch_a, "Late Driver"),
+                                               (foreign_manager, other.branch_a, "Foreign Driver"))]
+    async with p3c_engine.connect() as db:
+        keys = [(await db.execute(text("SELECT employeekey FROM core.employees WHERE employeeid = :eid"),
+                                  {"eid": item["employee_id"]})).scalar_one() for item in identities]
+        assert await db.scalar(text("""SELECT count(*) FROM payroll.payrollperioddrivereligibility
+            WHERE payrollperiodid = :pid AND driverassignmentid = ANY(CAST(:ids AS integer[]))"""),
+            {"pid": period["payroll_period_id"], "ids": [item["driver_assignment_id"] for item in identities[:2]]}) == 0
+    day = source["dates"][0]
+    data = ("DriverNumber,EmployeeKey,WorkDate,Quantity\n" + "".join(
+        f"{item['driver_number']},{key},{day},1\n" for item, key in zip(identities, keys, strict=True)) +
+        f"{identities[0]['driver_number']},{keys[1]},{day},1\n").encode()
+    uploaded = await _upload(p3c_client, tenant, period, data)
+    assert uploaded.status_code == 200, uploaded.text
+    iid = uploaded.json()["import_id"]
+    target = await _definition_target(p3c_client, tenant, iid)
+    before = await _payroll_snapshot(p3c_engine, period["payroll_period_id"])
+    revision = 1
+    for kinds in (("DriverNumber", "Ignore"), ("Ignore", "EmployeeKey"), ("DriverNumber", "EmployeeKey")):
+        mapped = await p3c_client.put(f"/payroll/imports/{iid}/mapping", headers=tenant.admin,
+            json={"expected_revision": revision, "column_mapping": {
+                "1": kinds[0], "2": kinds[1], "3": "WorkDate", "4": target}})
+        assert mapped.status_code == 200, mapped.text
+        revision += 1
+        rows = await page(p3c_client, tenant, iid, mapped.json())
+        for index in (0, 1):
+            assert {(item["resolution"], item["driver_id"]) for item in rows[index]["identifiers"]} == {
+                ("Exact", identities[index]["driver_id"])}
+            assert rows[index]["cells"][0]["driver_assignment_id"] is None
+        assert {(item["resolution"], item["driver_id"]) for item in rows[2]["identifiers"]} == {("Unresolved", None)}
+        issues = await p3c_client.get(f"/payroll/imports/{iid}/issues", headers=tenant.admin,
+            params={"expected_revision": revision, "plan_fingerprint": mapped.json()["fingerprints"]["plan"]})
+        assert issues.status_code == 200, issues.text
+        by_row = {index: {item["code"] for item in issues.json()["items"] if item["source_row"] == index}
+                  for index in range(2, 6)}
+        assert by_row[2] == by_row[3] == {"IMPORT_ASSIGNMENT_UNRESOLVED"}
+        assert by_row[4] == {"IMPORT_DRIVER_UNRESOLVED"}
+        if "Ignore" not in kinds:
+            assert by_row[5] == {"IMPORT_DRIVER_DISAGREEMENT"}
+        refreshed = await p3c_client.post(f"/payroll/imports/{iid}/refresh", headers=tenant.admin,
+                                         json={"expected_revision": revision})
+        assert refreshed.status_code == 200, refreshed.text
+        revision += 1
+        assert refreshed.json()["fingerprints"] == mapped.json()["fingerprints"]
+        assert await page(p3c_client, tenant, iid, refreshed.json()) == rows
     assert await _payroll_snapshot(p3c_engine, period["payroll_period_id"]) == before
 
 

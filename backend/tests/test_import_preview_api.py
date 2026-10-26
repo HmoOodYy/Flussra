@@ -282,6 +282,9 @@ async def test_preview_resolves_each_identity_name_proposals_unknown_values_and_
     await create_workforce_driver(
         p3c_client, token, tenant.branch_a, "A2 Import Alpha", f"A2C-{uuid4().hex[:8]}"
     )
+    branch_identity = await create_workforce_driver(
+        p3c_client, token, tenant.branch_b, "Other Branch Driver", f"OTHER-{uuid4().hex[:8]}"
+    )
     period = await _period(p3c_client, p3c_engine, tenant)
     first = await _payroll_inputs(p3c_engine, tenant, period, first_identity["driver_assignment_id"])
     second = await _payroll_inputs(p3c_engine, tenant, period, second_identity["driver_assignment_id"])
@@ -291,7 +294,7 @@ async def test_preview_resolves_each_identity_name_proposals_unknown_values_and_
             FROM core.drivers d JOIN core.employees e
               ON e.employeeid = d.employeeid AND e.companyid = d.companyid
             WHERE d.companyid = :cid AND d.driverid = :did
-        """), {"cid": tenant.company_id, "did": tenant.driver_b_id})).mappings().one()
+        """), {"cid": tenant.company_id, "did": branch_identity["driver_id"]})).mappings().one()
     data = (
         "Driver Number,Employee Key,Driver Name,Work Date,Regular\n"
         f"{first['drivernumber']},{first['employeekey']},{first['drivernamesnapshot']},{first['dates'][0].isoformat()},4\n"
@@ -328,7 +331,8 @@ async def test_preview_resolves_each_identity_name_proposals_unknown_values_and_
     assert {(item["identifier_kind"], item["resolution"]) for item in unique_name["identifiers"]} == {
         ("DriverNumber", "Exact"), ("EmployeeKey", "Exact"), ("DriverName", "Proposed")}
     assert unique_name["cells"][0]["outcome"] == "New"
-    assert {item["resolution"] for item in foreign_branch["identifiers"]} == {"Unresolved"}
+    assert {(item["identifier_kind"], item["resolution"]) for item in foreign_branch["identifiers"]} == {
+        ("DriverNumber", "Exact"), ("EmployeeKey", "Exact"), ("DriverName", "Unresolved")}
     assert {item["resolution"] for item in unknown["identifiers"]} == {"Unresolved"}
     assert {item["identifier_kind"] for item in unknown["identifiers"]} == {
         "DriverNumber", "EmployeeKey", "DriverName"}

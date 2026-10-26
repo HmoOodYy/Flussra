@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from app.access.permissions import check_any_permission, check_permission
 from app.imports.errors import ImportFailure
 from app.imports.files import inspect_file
+from app.imports.mapping import CANONICALIZATION_VERSION
 from app.imports.staging import clear_derived_state
 from app.imports.transport import FilePayload, receive_file
 from app.payroll.mutation_lock import _lock_period_for_mutation
@@ -88,7 +89,8 @@ _METADATA = """
 def check_versions(row) -> None:
     if (row["importkind"] != "PayrollWork" or row["sourcekind"] != "File"
             or any(row[key] != 1 for key in (
-                "contractversion", "file_version", "target_version", "canonicalizationversion"))):
+                "contractversion", "file_version", "target_version"))
+            or row["canonicalizationversion"] != CANONICALIZATION_VERSION):
         raise failure("IMPORT_CONTRACT_UNSUPPORTED", "This staged Import version is unsupported. Reset/re-upload the file.")
 
 
@@ -125,7 +127,7 @@ def metadata(row) -> dict:
 
 
 def creation_fingerprint(payload: FilePayload, cid: int, uid: int, bid: int, pid: int) -> str:
-    identity = {"contract": 1, "file_contract": 1, "target_contract": 1, "canonicalization": 1,
+    identity = {"contract": 1, "file_contract": 1, "target_contract": 1, "canonicalization": CANONICALIZATION_VERSION,
                 "company": cid, "creator": uid, "branch": bid, "period": pid,
                 "kind": "PayrollWork", "source": "File", "filename": payload.filename,
                 "sha256": payload.file_sha256, "size": payload.file_size}
@@ -192,9 +194,9 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
             # Target association precedes File detail so the target guard can
             # recheck editability/retention for every subsequent File mutation.
             await db.execute(text("""
-                INSERT INTO import.payrollworkimports (importid, companyid, branchid, payrollperiodid)
-                VALUES (:iid, :cid, :bid, :pid)
-            """), {"iid": iid, "cid": cid, "bid": period.branch_id, "pid": pid})
+                INSERT INTO import.payrollworkimports (importid, companyid, branchid, payrollperiodid, canonicalizationversion)
+                VALUES (:iid, :cid, :bid, :pid, :version)
+            """), {"iid": iid, "cid": cid, "bid": period.branch_id, "pid": pid, "version": CANONICALIZATION_VERSION})
             await db.execute(text("""
                 INSERT INTO import.filesources (importid, companyid, originalfilename, filetype,
                     filesizebytes, filehashsha256, filecontent, sheetname, headerrownumber, dateorder, encoding, delimiter, inspectionmetadata)

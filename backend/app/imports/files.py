@@ -8,8 +8,9 @@ import json
 import posixpath
 import re
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from copy import copy
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
 from xml.etree.ElementTree import ParseError
@@ -48,6 +49,27 @@ _BASE_HEADER_LABELS = {
     "date",
 }
 _CELL_REF = re.compile(r"^([A-Z]{1,3})([1-9][0-9]*)$")
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class FileCell(Mapping):
+    """Compact source value; the public File payload retains the same fields."""
+
+    value: Any
+    kind: str
+    formula: bool
+    missing_cache: bool
+
+    def __getitem__(self, key):
+        if key not in ("value", "kind", "formula", "missing_cache"):
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __iter__(self):
+        return iter(("value", "kind", "formula", "missing_cache"))
+
+    def __len__(self):
+        return 4
 
 
 def inspect_file(
@@ -199,7 +221,7 @@ def read_mapped_file(data: bytes, filename: str, columns: Iterable[int], **setti
     Formula text is never retained or evaluated; its cached value and type are.
     """
     inspection = inspect_file(data, filename, **settings)
-    selected = sorted(set(columns))
+    selected = [(index, str(index)) for index in sorted(set(columns))]
     rows: list[dict] = []
     nonempty: set[int] = set()
     header = inspection["header_row_number"]
@@ -213,7 +235,7 @@ def read_mapped_file(data: bytes, filename: str, columns: Iterable[int], **setti
         if number <= header:
             return
         cells = {}
-        for index in selected:
+        for index, key in selected:
             value = values[index - 1] if index <= len(values) else None
             if native_dates and index in native_dates:
                 value = native_dates[index]
@@ -224,10 +246,9 @@ def read_mapped_file(data: bytes, filename: str, columns: Iterable[int], **setti
                     "duration" if isinstance(value, timedelta) else
                     "boolean" if isinstance(value, bool) else
                     "number" if isinstance(value, (int, float)) else "text")
-            cells[str(index)] = {"value": value.isoformat() if isinstance(value, (date, datetime, time)) else
-                                 str(value) if kind in ("number", "duration") else value,
-                                 "kind": kind, "formula": formula,
-                                 "missing_cache": formula and value is None}
+            cells[key] = FileCell(value.isoformat() if isinstance(value, (date, datetime, time)) else
+                                  str(value) if kind in ("number", "duration") else value,
+                                  kind, formula, formula and value is None)
         rows.append({"source_row": number, "cells": cells})
 
     if inspection["file_type"] == "csv":

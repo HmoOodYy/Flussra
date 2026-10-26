@@ -12,13 +12,14 @@ from app.imports.mapping import (
     encoded,
     fingerprint,
     infer_date_order,
+    normalized_identifier,
     parse_date,
     suggest_mapping,
     targets,
 )
 from app.imports.payroll_context import context_identity, load_context
 from app.imports.preview_model import build_preview
-from app.imports.preview_store import persist_preview
+from app.imports.preview_store import persist_preview, prepare_preview
 from app.imports.service import (
     admission,
     authorize,
@@ -54,6 +55,10 @@ def materialize(content, filename, mapping, period, labels, settings):
                                 period.start_date, period.end_date, settings["date_order"])
     result["work_dates"] = sorted({day for row in active if (day := parse_date(row["cells"][date_column], order))
                                    and period.start_date <= day <= period.end_date})
+    result["stable_identifiers"] = {kind: sorted({normalized_identifier(kind, row["cells"][column]["value"])
+        for row in active for column, target in mapping.items() if target == kind
+        and not row["cells"][column]["missing_cache"] and not blank(row["cells"][column])})
+        for kind in ("DriverNumber", "EmployeeKey")}
     return result
 
 
@@ -139,37 +144,47 @@ async def map_or_refresh(request, engine, cid, uid, iid, body, *, refresh=False)
         async with engine.begin() as db:
             await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
             period = await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
-            context = await load_context(db, cid, period, dates=materialized["work_dates"])
+            context = await load_context(db, cid, period, dates=materialized["work_dates"], identifiers=materialized["stable_identifiers"])
         timings["current_context_seconds"] = perf_counter() - context_start
         compute_start = perf_counter()
         preview = await anyio.to_thread.run_sync(partial(build_preview, materialized, mapping, context, settings["date_order"]))
         context_hash = await anyio.to_thread.run_sync(partial(context_fingerprint, context))
         timings["validation_comparison_seconds"] = perf_counter() - compute_start
-        persist_start = perf_counter()
-        async with engine.begin() as db:
-            locked = await lock_mutable(db, cid, uid, iid, body.expected_revision)
-            period = await authorize(db, cid, uid, locked["payrollperiodid"], mutate=True)
-            current_context = await load_context(db, cid, period, dates=materialized["work_dates"])
-            current_hash = await anyio.to_thread.run_sync(partial(context_fingerprint, current_context))
-            if current_hash != context_hash:
-                raise failure("IMPORT_PREVIEW_CONTEXT_CHANGED", "Payroll or eligibility changed while previewing. Retry mapping/refresh.")
-            await persist_preview(db, cid, row["branchid"], row["payrollperiodid"], iid, preview)
+        preparation_start = perf_counter()
+        prepared = await anyio.to_thread.run_sync(partial(prepare_preview, preview))
+        try:
+            context_scope = {"dates": materialized["work_dates"], "identifiers": materialized["stable_identifiers"]}
             inspection = materialized["inspection"]
-            inspection["mapped_date_interpretation"] = preview["interpretation"]
-            inspection["date_order"] = preview["interpretation"]["date_order"]
-            inspection["date_order_state"] = preview["interpretation"]["date_order_state"]
-            await db.execute(text("""
-                UPDATE import.filesources SET sheetname = :sheet, headerrownumber = :header, dateorder = :date,
-                    encoding = :encoding, delimiter = :delimiter, inspectionmetadata = CAST(:inspection AS jsonb)
-                WHERE importid = :iid AND companyid = :cid
-            """), {"iid": iid, "cid": cid, "sheet": inspection["selected_sheet"], "header": inspection["header_row_number"],
-                   "date": preview["interpretation"]["date_order"], "encoding": inspection["encoding"], "delimiter": inspection["delimiter"],
-                   "inspection": encoded(inspection)})
-            await db.execute(text("""
-                UPDATE import.imports SET revision = revision + 1, status = 'NeedsReview',
-                    updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
-            """), {"iid": iid, "cid": cid, "uid": uid})
-            result = await enrich_metadata(db, cid, await load(db, cid, iid))
+            preview = prepared.metadata
+            # Publication retains bounded streams, not the file/model/JSON copies.
+            del materialized, context, content
+            timings["serialization_preparation_seconds"] = perf_counter() - preparation_start
+            persist_start = perf_counter()
+            async with engine.begin() as db:
+                locked = await lock_mutable(db, cid, uid, iid, body.expected_revision)
+                period = await authorize(db, cid, uid, locked["payrollperiodid"], mutate=True)
+                current_context = await load_context(db, cid, period, **context_scope)
+                current_hash = await anyio.to_thread.run_sync(partial(context_fingerprint, current_context))
+                if current_hash != context_hash:
+                    raise failure("IMPORT_PREVIEW_CONTEXT_CHANGED", "Payroll or eligibility changed while previewing. Retry mapping/refresh.")
+                await persist_preview(db, cid, row["branchid"], row["payrollperiodid"], iid, prepared)
+                inspection["mapped_date_interpretation"] = preview["interpretation"]
+                inspection["date_order"] = preview["interpretation"]["date_order"]
+                inspection["date_order_state"] = preview["interpretation"]["date_order_state"]
+                await db.execute(text("""
+                    UPDATE import.filesources SET sheetname = :sheet, headerrownumber = :header, dateorder = :date,
+                        encoding = :encoding, delimiter = :delimiter, inspectionmetadata = CAST(:inspection AS jsonb)
+                    WHERE importid = :iid AND companyid = :cid
+                """), {"iid": iid, "cid": cid, "sheet": inspection["selected_sheet"], "header": inspection["header_row_number"],
+                       "date": preview["interpretation"]["date_order"], "encoding": inspection["encoding"], "delimiter": inspection["delimiter"],
+                       "inspection": encoded(inspection)})
+                await db.execute(text("""
+                    UPDATE import.imports SET revision = revision + 1, status = 'NeedsReview',
+                        updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
+                """), {"iid": iid, "cid": cid, "uid": uid})
+                result = await enrich_metadata(db, cid, await load(db, cid, iid))
+        finally:
+            prepared.close()
         timings["staging_persistence_seconds"] = perf_counter() - persist_start
         timings["total_seconds"] = perf_counter() - started
         # Invocation-only benchmark hook. No job state or client timings contract.

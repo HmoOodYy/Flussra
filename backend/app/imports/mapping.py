@@ -1,17 +1,19 @@
-"""Version-one PayrollWork mapping and semantic identities; no database access."""
+"""PayrollWork mapping and versioned semantic identities; no database access."""
 from __future__ import annotations
 
 import hashlib
 import json
 import re
 import unicodedata
-from datetime import date, datetime
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 
 from app.imports.errors import ImportFailure
 from app.payroll.definition_calculation import is_method_operational, quantity_error
 
 IDENTIFIERS = {"DriverNumber", "EmployeeKey", "DriverName"}
+CANONICALIZATION_VERSION = 2
 NUMBER = re.compile(r"^-?\d+(?:\.\d+)?$", re.ASCII)
 DATE_PARTS = re.compile(r"^(\d{1,4})[/.-](\d{1,2})[/.-](\d{1,4})$", re.ASCII)
 
@@ -21,7 +23,7 @@ def canonical(value):
         return format(value.normalize(), "f") if value else "0"
     if isinstance(value, (date, datetime)):
         return value.isoformat()
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): canonical(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [canonical(item) for item in value]
@@ -35,7 +37,37 @@ def encoded(value) -> str:
 
 
 def fingerprint(kind: str, value) -> str:
-    return hashlib.sha256(encoded({"version": 1, "kind": kind, "value": value}).encode("utf-8")).hexdigest()
+    return hashlib.sha256(encoded({"version": CANONICALIZATION_VERSION, "kind": kind, "value": value}).encode("utf-8")).hexdigest()
+
+
+def definition_meaning(definition) -> dict:
+    """Frozen business/input meaning; relational ownership IDs are not identity."""
+    return {"code": definition.code, "name": definition.name, "input_type": definition.input_type,
+            "unit": definition.unit, "method": definition.calculation_method,
+            "method_version": definition.calculation_method_version,
+            "rate_shape": definition.rate_shape, "active": definition.is_active}
+
+
+def period_meaning(period) -> dict:
+    return {key: period[key] for key in ("company_code", "branch_code", "period_code", "period_type", "start", "end")}
+
+
+def driver_meaning(driver) -> dict:
+    number = normalized_identifier("DriverNumber", driver["drivernumber"])
+    employee = normalized_identifier("EmployeeKey", driver["employeekey"])
+    return {"driver_number": number or None, "employee_key": employee or None,
+            "name": normalized_identifier("DriverName", driver["drivername"]) if not number and not employee else None}
+
+
+def assignment_meaning(assignment, driver, branch_code) -> dict:
+    # Effective instants are business boundaries, unlike generated audit times.
+    def instant(value):
+        return value.astimezone(UTC).isoformat() if value is not None else None
+
+    return {"driver": driver_meaning(driver), "branch_code": branch_code,
+            "effective_from": instant(assignment["effectivefromat"]),
+            "effective_to": instant(assignment["effectivetoat"]),
+            "end_reason": assignment["endreason"], "time_zone": assignment["branchtimezoneidsnapshot"]}
 
 
 def target_key(definition) -> str:

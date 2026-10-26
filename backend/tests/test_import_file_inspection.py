@@ -260,7 +260,9 @@ def test_materialized_xlsx_time_duration_and_formula_cache_are_json_safe() -> No
     assert cells["4"]["value"] is None and cells["4"]["formula"] is True
     assert cells["4"]["missing_cache"] is True
     assert 5 in materialized["nonempty_columns"]
-    assert json.loads(json.dumps(materialized))["rows"][0]["cells"]["2"]["value"] == "2:00:00"
+    from app.imports.mapping import encoded
+
+    assert json.loads(encoded(materialized))["rows"][0]["cells"]["2"]["value"] == "2:00:00"
 
 
 @pytest.mark.parametrize("malformation", ["duplicate_cell", "duplicate_row_coordinate"])

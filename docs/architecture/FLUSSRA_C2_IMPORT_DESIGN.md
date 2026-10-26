@@ -1,6 +1,6 @@
 # FLUSSRA C2 IMPORT DESIGN — PAYROLL WORK DATA, VERSION 1
 
-**Status:** Implementation design, with the agreed Slice A mission contract finalized on 2026-10-25. Implements [the C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md); point IDs (R, S, O, L, F, N, D) refer to that plan. A1 is accepted and merged through PR #74 (`337e3f7`). A2 is implemented locally, with focused verification passing; workload acceptance is blocked by the measured staging/retention cost (§2.1), and independent review remains pending. A3 and Slice B have not started.<br>
+**Status:** Implementation design, with the agreed Slice A mission contract finalized on 2026-10-25. Implements [the C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md); point IDs (R, S, O, L, F, N, D) refer to that plan. A1 is accepted and merged through PR #74 (`337e3f7`). Independent A2 review identified permanent-identity, semantic-fingerprint and workload findings. The correctness findings are remediated with focused verification; synchronous workload acceptance remains blocked (§2.1), and remediation re-review remains pending. A3 and Slice B have not started.<br>
 **Scope:** importing ordinary work quantities from an `.xlsx` or `.csv` file into one Draft (Prepared), Open or Returned payroll period. Status, Bonus, People and Rate imports are out of scope (O1–O3); the engine and tables below are shaped so they can be added without a second engine (F1, F2, F7).<br>
 **Prerequisite:** the Day Grid workspace (`GET /payroll/periods/{id}/entry-overview`, `frontend/src/pages/payroll/entry/`) is merged to `main` before Slice A starts. Facts in §1 marked † come from that work.
 
@@ -118,32 +118,133 @@ cleared. That is combined retention cost for these five workloads, not a
 per-file figure. Per-detail guards remained enabled throughout; total staging
 time must not be misreported as isolated trigger time.
 
-**A2 workload acceptance is blocked.** Near-upper staging occupies the period's
-write transaction for roughly 101–104 seconds in the baseline. This does not satisfy the intended short-write
-synchronous contract. Functional previews, responsiveness and bounded output do
-not close that gate. Limits, guard semantics and synchronous architecture are
-unchanged; no queue, truncation or partial result substitutes for acceptance.
-An explicit performance/design amendment is required before A2 acceptance or
-A3 begins. Deployment/proxy timeout and memory budgets also remain external
-verification gaps. Upper timings precede the final semantic-hash and typed-array
-eligibility refinements and `0095`; unchanged guarded staging work establishes
-the blocker. Post-index timings must be distinguished from that baseline.
+#### Remediation measurements and current acceptance
 
-**Current `0095` upper verification:** a fresh single-import CSV run at the
-same 19,999 × 50 source shape (939,953 quantity cells, 2,923,224 file bytes)
-took **0.527 s** to upload and **122.872 s** to map: materialization **1.453 s**,
-context **1.191 s**, validation/comparison **19.039 s**, staging/persistence
-**100.747 s**. Peak process working set was **1,247,842,304 bytes**, with no
-temporary files observed. Authenticated 200/572-byte period-summary reads
-completed during the three active work phases in **0.482 / 1.340 / 0.218 s**.
-The 100-row response was **1,312,290 bytes**; the 200-error response was
-**41,306 bytes**. Its real single-import purge took **24.846 s**; all seven
-detail tables were empty and durable identities survived. Raw evidence:
-`backend/.artifacts/validation/a2-preview-upper-csv-0095.json` and matching `.log`.
-This verifies current-code upper behavior without repeating unrelated parser
-cases. It confirms that the index fix does not close the synchronous workload
-gate. The previous 230.81 s figure is explicitly a pre-index, five-import cost,
-not this current single-import purge result.
+The original post-`0095` single-import CSV evidence remains a baseline:
+**122.872 s** mapping, **100.747 s** staging/publication, **1,247,842,304 bytes**
+peak working set and **24.846 s** purge
+(`backend/.artifacts/validation/a2-preview-upper-csv-0095.json`).
+
+Before remediation, profiling implementation `39d6ac3` on the same Python 3.12
+infrastructure reproduced the supported upper shape: **19,999 data rows × 50
+source columns, 939,953 mapped quantity cells**. The following are HTTP request
+wall times; publication includes the mutation transaction, context recheck and
+commit, and excludes the separately measured preparation phase.
+
+| Workload | Before mapping / publication | Final mapping / publication | Before → final refresh / publication |
+|---|---:|---:|---:|
+| Representative CSV, 999 data rows × 10 columns, 7 mapped definitions | 3.964 / 2.346 s | 3.965 / 2.134 s | 4.229 / 2.788 → 4.224 / 2.534 s |
+| Issue-heavy CSV, 1,000 rows × 50 columns, 47,000 invalid quantities/issues | 11.669 / 9.179 s | 10.297 / 6.672 s | 13.915 / 11.282 → 13.044 / 9.335 s |
+| Near-upper CSV, 939,953 quantity cells | 116.483 / 95.666 s | 97.638 / 67.992 s | 147.291 / 126.249 → 126.47 / 97.36 s |
+| Near-upper XLSX, same row/column/cell shape | 155.935 / 97.521 s | 215.436 / 110.886 s | 180.272 / 123.698 → 197.605 / 97.538 s |
+
+Final isolated upper phase timings:
+
+| Phase | CSV | XLSX |
+|---|---:|---:|
+| File inspection/materialization | 2.44 s | 58.30 s |
+| Canonical context read | 1.02 s | 1.66 s |
+| Validation/comparison and identity hashes | 16.42 s | 28.44 s |
+| Serialization/preparation outside mutation transaction | 9.74 s | 16.11 s |
+| Staging/publication transaction | 67.99 s | 110.89 s |
+| Absolute process peak working set | 397,651,968 bytes | 442,318,848 bytes |
+| Same-import retention-hook purge | 23.283 s | 23.451 s |
+
+These final upper runs each used one input/import in a fresh process. The fresh
+pre-remediation CSV peak was **1,250,729,984 bytes**; its following XLSX case
+reached a cumulative **1,295,409,152 bytes**. An intermediate two-format run
+measured **96.70 / 136.65 s** mapping and approximately **68.92 / 69.12 s**
+publication for CSV/XLSX. The final isolated XLSX was slower across application
+and database phases. The cause of this variation was not isolated; the faster
+intermediate result is not substituted for final evidence or a latency promise.
+Even that faster result fails the short-write gate.
+
+Measured causes and remediation:
+
+- **Parsing/materialization:** XLSX still performs the bounded File inspection
+  and cached-value/native-date reads. Safety validation remains intact. Compact
+  immutable source cells and shared column keys reduce memory; CSV materialization
+  increased from 1.43 to 2.44 s in the final comparison.
+- **Validation/comparison:** row targets and frozen definitions are shared by
+  compact cell results. Eligibility is evaluated once per row, and a bounded
+  per-request cache reuses common parsed quantities. Row-wise canonical hashing
+  avoids a second complete plan representation.
+- **Serialization/application memory:** the old work-cell transfer alone made
+  **1,880 JSON batches / 281,406,327 UTF-8 JSON bytes**, taking **9.76 s**
+  serializing and **71.29 s** in driver SQL execution in the fresh baseline.
+  Typed tuples/JSON fields are now prepared off-thread before acquiring mutation
+  locks, in invocation-owned spooled streams. Each stream retains at most 1 MiB
+  before rolling to disk; batches contain at most 2,048 rows and approximately
+  1 MiB of text/scalar data plus one bounded row. The final CSV prepared about
+  **123.64 MB** across streams, including **72.56 MB** source payload and
+  **48.81 MB** work cells. These are spool sizes, not binary wire-byte counts.
+  Source records, work records and work cells rolled to disk; every stream was
+  closed/deleted after success or rejection/failure. No durable job is created.
+  Pickle is only an internal typed-tuple format written and read within the same
+  invocation; uploaded bytes are never deserialized as pickle.
+- **Database insertion/round trips:** ordinary binary COPY writes the actual
+  guarded tables on the caller-owned connection/transaction. Generated source
+  and match IDs are reserved from their real sequences in two set-based queries;
+  source ordinals correlate rows without per-row queries or RETURNING payloads.
+  The CSV used **459 cell COPY batches**, **59.83 s** driver COPY wall time,
+  **60.34 s** including bounded stream reads; XLSX used 459 batches and
+  **99.57 s** initially (**60.40 s** on refresh). Driver timings include protocol
+  encoding, execution and constraints; they are not isolated server CPU.
+- **Guards/FKs:** every existing guard and FK remains enabled. CSV initial
+  publication invoked the detail guard **1,045,902 times / 26.68 s**. A separate,
+  fully rolled-back real-table INSERT probe of **2,048 cells** took **138.5 ms**,
+  including **54.731 ms** in the detail guard and **65.585 ms** across RI triggers.
+  The sample identifies substantial FK cost as well as guard cost; it is not
+  extrapolated into a claimed exact full-workload FK duration. No new measured
+  lookup deficiency justified another migration; `0094`/`0095` are unchanged.
+- **Refresh:** full derived-detail replacement remains atomic. Final CSV clearing
+  took **28.71 s**, including **24.47 s** deleting 939,953 old cells. Final XLSX
+  clearing took **29.36 s**. Rebuilding remains substantial even when the new
+  semantic fingerprints equal the old ones; no partial or stale detail is kept.
+- **Finalization purge:** the actual Import-owned retention hook purged each
+  isolated upper import in about 23 s and left all seven detail tables empty,
+  preserving accepted mapping/content identities and interpretation as designed.
+  CSV purge guard time was **19.53 s / 1,045,899 calls**. This is hook cost after
+  the benchmark puts its disposable period in Locked state, not timing of the
+  complete financial finalization workflow. Focused tests separately exercise
+  real finalization and rollback/serialization.
+
+Authenticated period-summary GETs returned **200 / 572 bytes** during active
+materialization, computation, preparation and publication, respectively:
+CSV **0.420 / 2.400 / 0.108 / 0.077 s**; XLSX
+**0.089 / 0.746 / 0.280 / 0.070 s**. This is one ordinary authorized read through
+ASGITransport, not a production networking/proxy or mutation-contention test.
+The final CSV 100-row page was **1,311,947 bytes**; its 200-error page was
+**41,306 bytes**. Complete counts were 19,999 rows and 939,953 cells
+(939,718 new + 235 invalid), with no truncation.
+
+Raw ignored artifacts under `backend/.artifacts/validation/`:
+`a2-persistence-diagnostic-baseline.json`,
+`a2-persistence-diagnostic-upper.json` (pre-remediation);
+`import-copy-upper.json` (intermediate);
+`import-remediation-upper-csv.json`,
+`import-remediation-upper-xlsx.json`,
+`import-remediation-representative.json` (final), with matching logs
+(the successful isolated XLSX log has the `-retry.log` suffix).
+The harness records per-table COPY/clear times, bounded pickle serialization,
+stream rollover and rollback-only insertion/parent-delete EXPLAIN probes.
+The failed XLSX selector attempt was a harness error before mapping; the
+corrected selector was verified and the complete isolated case rerun.
+
+**A2 ACCEPTANCE STILL BLOCKED.** The memory and CSV publication improvements
+are real, but period mutation transactions still last roughly **68–111 s**
+for first publication and **97–98 s** on upper refresh. Pure preparation has
+been moved out and is measured separately; the remaining locked work has not
+been hidden in another phase. Long serialized writes and refresh replacement
+still violate D10's short-write intent. Deployment/proxy timeout, memory and
+temporary-storage budgets remain unverified. No numeric latency target,
+reduced product limit, weakened guard, background job or partial preview is
+introduced to declare acceptance.
+
+Further successful synchronous remediation can close this gate without a
+design amendment. Unsuitable synchronous evidence blocks A2 acceptance and
+therefore A3; introducing background processing requires an **explicit design
+amendment first**. A slow implementation alone does not mandate that amendment.
 
 ## 3. Data model
 
@@ -204,7 +305,7 @@ Company-scoped composite foreign keys throughout, including actor and Branch own
 - **`import.FileSourceRecords`** — `SourceRecordID`/`ImportID`/`CompanyID` linked to the source-neutral record and File source; sheet and source-row coordinates, unique within that File import. Mapped File cell values are carried in the record payload only when A2 exists, not copied wholesale during A1.
 
 **Payroll work data**
-- **`import.PayrollWorkImports`** (1:1 with `Imports` of kind `PayrollWork`) — `ImportID`; `CompanyID`, `BranchID`, `PayrollPeriodID` with target composite ownership FK; target `ContractVersion` (1) and `CanonicalizationVersion` (1); durable accepted `ColumnMapping`, `MappingFingerprint` and `ContentFingerprint`; transient `PlanFingerprint` and preview counts; completed `ReviewSummary`. A2's mapping records source column index → target, including identifier roles and both `PayrollPeriodDefinitionID`/`PayDefinitionID` for definition targets, so S13/L1 can report/reuse the mapping without source rows. Mapping reuse itself remains deferred. No File requirement is imposed on the target's identity, so a later approved non-File source can use the same target contract.
+- **`import.PayrollWorkImports`** (1:1 with `Imports` of kind `PayrollWork`) — `ImportID`; `CompanyID`, `BranchID`, `PayrollPeriodID` with target composite ownership FK; target `ContractVersion` (1) and current `CanonicalizationVersion` (2); durable accepted `ColumnMapping`, `MappingFingerprint` and `ContentFingerprint`; transient `PlanFingerprint` and preview counts; completed `ReviewSummary`. A2's mapping records source column index → target, including identifier roles and both `PayrollPeriodDefinitionID`/`PayDefinitionID` for definition targets, so S13/L1 can report/reuse the mapping without source rows. Mapping reuse itself remains deferred. No File requirement is imposed on the target's identity, so a later approved non-File source can use the same target contract.
 - **`import.PayrollWorkRecords`** — source-record/import/company identity; mapped `RowFingerprint`; target skipped/excluded state. Payroll-specific empty-quantity and decision state is not generic source-record authority.
 - **`import.PayrollWorkDriverMatches`** — import/company-scoped normalized identifier kind/value, optional permanent Driver FK, match/proposal resolution and Slice B confirmation actor/time. Saved aliases remain deferred.
 - **`import.PayrollWorkRecordIdentifiers`** — source-record/import/company identity + source column index → Driver-match identity. Multiple identifier columns on one source record can point to distinct match records, so A2 can detect disagreement rather than overwrite a singular row→match reference.
@@ -223,7 +324,7 @@ Every read returns the current `revision`. Interpretation and cancel requests re
 
 Creation requires an `Idempotency-Key` UUID header. Within the Company, the key binds the creator, target kind/source kind and versions, Branch/period, original filename and exact file bytes (SHA-256 and size). Multipart boundaries, transfer chunking and claimed MIME headers are not identity. The versioned `CreationFingerprint` is SHA-256 over canonical creation identity, not the file SHA alone. Same key/same identity returns the same Import's current bounded metadata without restoring cancelled/purged detail; different identity returns HTTP 409 `IMPORT_IDEMPOTENCY_CONFLICT`. A new key deliberately creates a second Import even for identical bytes. Always reauthorize; this is transport retry protection, distinct from later S11 completed-content duplicate protection. A retry can return already-persisted metadata after finalization, but cannot create new detail in a non-editable period.
 
-Envelope, File source and PayrollWork target contract versions are explicitly persisted as 1. PayrollWork `CanonicalizationVersion=1` is the home for A2 row/mapping/content/plan algorithms; changing normalization requires an explicit new supported contract, never silent reinterpretation. Creation identity canonicalization is versioned by the envelope contract. Unsupported stored versions fail closed with stable `IMPORT_CONTRACT_UNSUPPORTED`, requiring reset/re-upload; no obsolete-version adapters, dual processing or speculative compatibility machinery are added.
+Envelope, File source and PayrollWork target contract versions are explicitly persisted as 1. The current A2 row/mapping/content/plan algorithms use explicit PayrollWork `CanonicalizationVersion=2` (the immutable `0094` foundation retains its original positive-version default); changing normalization requires an explicit new supported contract, never silent reinterpretation. Creation identity canonicalization is versioned by the envelope contract. Unsupported stored versions fail closed with stable `IMPORT_CONTRACT_UNSUPPORTED`, requiring reset/re-upload; no obsolete-version adapters, dual processing or speculative compatibility machinery are added.
 
 ### 3.3 Retention (D7)
 For PayrollWork/File, detailed provenance serves Import and Review while the period can still change; it is not permanent payroll data. Import owns purge operations/invariants; Payroll finalization calls the PayrollWork retention hook one-way, inside its existing period-locked finalization transaction. The generic Import core does not interpret payroll finalization as a universal lifecycle event. Future source/target kinds define their own retention trigger without replacing the core.
@@ -289,7 +390,7 @@ The resolution actions described in §§5.2, 5.4 and 5.5 are Slice B behavior. A
 Unreadable or unsafe file, limits exceeded, no header, missing required targets, two columns on one target, a non-empty column left unmapped.
 
 ### 5.2 Drivers
-- Each distinct identifier becomes one driver match, resolved to a permanent Driver among the drivers on the period's roster: by `DriverNumber`, then `EmployeeKey`, then an exact normalized full name held by exactly one roster Driver (counted by Driver, not by assignment). Messages never reveal drivers or branches outside the period.
+- Each distinct identifier becomes one per-import Driver match. Stable `DriverNumber` and `EmployeeKey` resolve through the Company-scoped permanent Driver authority independently of period-roster membership; EmployeeKey follows the Employee/Driver relationship. Multiple supplied identifiers must agree on that Driver. Only afterward does the resolver seek an eligible target Branch/WorkDate assignment using the period snapshot, live lifecycle and exact-date existing-source rescue. A known Company Driver without an eligible assignment/date is `Exact` identity plus `IMPORT_ASSIGNMENT_UNRESOLVED`, not an unknown stable identifier. An unresolved/ambiguous name keeps its validation error without erasing agreed stable identity or suppressing separate target-eligibility assessment; no name is confirmed. Cross-Company identities remain unresolved and undisclosed; no other-Branch assignment details are returned. Exact normalized names held by exactly one roster Driver (counted by Driver, not assignment) remain proposals only.
 - A name match is **proposed** and needs confirmation (S5, R13); one confirmation covers every row with that identifier, and proposals can be confirmed together.
 - No match, or a name shared by several Drivers → error; the user may choose the Driver for that identifier (`UserChosen`).
 - Several identifier columns mapped and disagreeing on a row → error.
@@ -401,12 +502,15 @@ Summary `rows`/`skipped` count source rows. `new`, `unchanged`, `invalid`,
 replace these whole-import counts. Decision fields, confirmation fields and
 row/cell exclusions remain unset.
 
-#### Implemented canonicalization version 1
+#### Implemented canonicalization version 2
 
 Hashes are SHA-256 over compact UTF-8 JSON with sorted keys, explicit
-`version=1` and a domain `kind`; no generated staging IDs, timestamps, page
-parameters or filters enter them. Stable period/Driver/assignment/definition
-identities remain business target identities. Text identifiers are trimmed and
+`version=2` and a domain `kind`. No generated surrogate ID or audit timestamp
+from periods, definitions, permanent Drivers, assignments, Imports or staging
+enters any of the four semantic contracts; page parameters and filters are also
+excluded. Relational IDs still persist for ownership and application references.
+The prior staged canonicalization version fails closed and requires reset/re-upload;
+there is no disposable-data compatibility adapter. Text identifiers are trimmed and
 case-sensitive; names use NFKC, collapsed whitespace and case-folding. Blank
 optional identifier columns do not create an identifier; an input row still
 needs at least one supplied identifier. Numeric identifiers retain their
@@ -414,6 +518,10 @@ shortest stored numeric representation and issue a warning, without padding.
 
 `MappingFingerprint` covers the period, accepted sheet/header/effective date
 order/CSV decoding context, column roles and operational frozen definitions.
+Its period meaning is Company/Branch business codes, period code/type and date
+bounds. A definition target is represented by its frozen code/name, input type,
+unit, calculation method/version, rate shape and active flag, with deterministic
+business ordering, never its period/master/RateDefinition surrogate ID.
 Selection-versus-detection display state is not semantic identity.
 `RowFingerprint` covers that mapping identity, normalized identifiers, canonical
 date and per-definition quantities; invalid input retains its typed source
@@ -426,9 +534,17 @@ changing interpretation/mapping context does. The File SHA remains independent.
 `PlanFingerprint` covers mapping/content, sorted per-row plan hashes (resolved
 identities, quantities, current values, outcomes, skipped state and exception discovery),
 sorted issue identities and explicit unresolved decision/confirmation state.
+A resolved permanent Driver means trimmed DriverNumber/EmployeeKey (normalized
+name only if neither stable key exists). An assignment means that Driver,
+target Branch code, effective-from/to business instants normalized to UTC,
+end reason and captured Branch timezone. Effective window instants are business
+boundaries, not generated audit timestamps. Held off-Status meaning uses its
+Company-scoped business code and off semantic, never StatusKeyID.
 Relevant payroll/eligibility changes enter through those resolved results;
-unrelated period rows do not change this semantic identity. A separate complete
-read-context hash conservatively guards the computation-to-publication race.
+unrelated period rows do not change this semantic identity. A separate, unpublished complete
+read-context token retains relational IDs to conservatively reject stale FK
+references during the computation-to-publication race; it is not a semantic
+Mapping/Row/Content/Plan fingerprint.
 Raw numeric spelling does not
 make equivalent valid quantities different plans. Each source row is hashed
 separately to avoid allocating another million-cell copy solely for hashing.
@@ -443,8 +559,9 @@ although the entry validator retains a bounds-only no-day-row fallback, merged
 `0094` detail has a mandatory `(period, WorkDate)` day FK. Import must neither
 invent day rows nor write payroll to accommodate that invalid structure.
 
-Parsing and computation run outside database transactions. Before publishing,
-the short-write path reauthorizes and locks period before Import, rechecks the
+Parsing, computation and bounded stream preparation run outside database
+transactions. Before publication, the writer reauthorizes and locks period
+before Import, rechecks the
 revision and reloads/hashes the canonical context. A change returns 409
 `IMPORT_PREVIEW_CONTEXT_CHANGED` atomically, requiring retry; no stale preview
 or payroll write is persisted. Bulk detail insertion and finalization purge
@@ -562,7 +679,7 @@ The Day Grid workspace and the C2 product/design documents are prerequisites. **
 
 **Non-goals:** column mapping and business preview computation; Driver matching or user confirmation; conflict/exception/exclusion decisions; payroll writes, calculation, SourceType mutation, commit, receipt/history UI; saved external aliases; queues or background import jobs or polling/status APIs; the connected UI (A3).
 
-**Completion/acceptance gate:** files can be safely uploaded, inspected, interpreted and staged without changing payroll or any canonical payroll facts. Each hard limit has an enforcement point and actionable failure. Failed ingestion leaves no partial file/import; failed reinterpretation preserves prior accepted state. The original file is retained only under D7. Finalization purges its detail even if it never advanced beyond `NeedsMapping`, without fabricating completion or affecting payroll outcomes. Benchmark evidence supports the synchronous limits; unsuitable evidence stops acceptance pending an explicit design amendment.
+**Completion/acceptance gate:** files can be safely uploaded, inspected, interpreted and staged without changing payroll or any canonical payroll facts. Each hard limit has an enforcement point and actionable failure. Failed ingestion leaves no partial file/import; failed reinterpretation preserves prior accepted state. The original file is retained only under D7. Finalization purges its detail even if it never advanced beyond `NeedsMapping`, without fabricating completion or affecting payroll outcomes. Benchmark evidence supports the synchronous limits; unsuitable evidence stops acceptance until synchronous remediation passes. Introducing background processing requires an explicit design amendment; a slow implementation alone does not.
 
 **Verification:** focused parser tests for accepted/refused content, malformed archives/XML, all caps at and beyond the boundary, workbook versus selected-sheet scope, UTF-8 text-byte limits, misleading dimensions, hidden sheets, encodings, header changes, text identifiers and formulas with/without caches. API/database checks prove tenant isolation, non-driver refusal, allowed staging/cancel transitions, atomic rejection, zero canonical-payroll mutations, required cleanup and its rollback behavior, and serialization with finalization. Verify a fresh `0094` chain, current schema constraints, canonical seed/reset and SQL/Alembic equivalence. Record measured benchmark inputs/environment/timing/resources and the review result. Verify inspection responses/samples are bounded. A1 is handed off with these contracts and evidence, not a partially functioning decision/apply path.
 
@@ -572,7 +689,7 @@ The Day Grid workspace and the C2 product/design documents are prerequisites. **
 
 **Scope:** exact automatic/manual column mapping and explicit Ignore; DWR-023's current-design per-import resolution (§5.2); date interpretation, typed/domain validation, eligibility and duplicate detection; stable mapped row/import/context fingerprints; set-based current-value reads and comparison (§6); preview refresh and completed-file duplicate notices; bounded template generation; the paginated rows/issues, summary counts and error/warning/conflict filters in §6.1. Expose invalid rows, unresolved identities, warnings, conflicts, incoming values and current values accurately. Detecting an outcome is not accepting a decision.
 
-**Non-goals:** user-chosen Driver matches or confirmations; keep/replace choices, exception acceptance, row/cell exclusions and other resolution actions; payroll mutation/commit, evidence application, SourceType changes, receipt/history; saved source-system aliases across imports; connected UI (A3); asynchronous processing.
+**Non-goals:** user-chosen Driver matches or confirmations; keep/replace choices, exception acceptance, row/cell exclusions and other resolution actions; payroll mutation/commit, evidence application, SourceType changes, receipt/history; saved source-system aliases across imports; connected UI (A3); background/asynchronous request processing. Bounded in-process thread offload remains permitted while the same synchronous request waits.
 
 **Completion/acceptance gate:** preview accurately represents the payroll facts that would be affected, including invalid rows, unresolved identities, warnings, conflicts and current-value comparisons. Every result carries the interpretation and preview identity used. Summary, filtering and paging agree with the complete import; no page/filter changes the hash scope or silently drops issues. Numeric default/max page sizes and response bounds are chosen, measured, documented and enforced before acceptance. Refresh handles relevant live changes without applying or deciding anything. Template output obeys the ingestion contract. The extended bounded workload remains suitable for synchronous requests.
 
