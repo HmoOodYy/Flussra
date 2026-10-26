@@ -150,9 +150,12 @@ async def apply_reviewed_quantities(
              c.quantity, c.expected_present, c.expected_quantity) for index, c in enumerate(batch)
         ))
     await db.execute(text(f"ANALYZE {table}"))
+    # Missing targets are inferred from absent ordinals below. An inner join
+    # lets PostgreSQL start from either side, including immediately after a
+    # large create when canonical-table statistics have not caught up yet.
     before_rows = (await db.execute(text(f"""
         SELECT x.ordinal, d.draftlineid, d.quantity, d.sourcetype, d.status, d.notes
-        FROM {table} x LEFT JOIN payroll.payrolldraftlines d ON d.companyid = :cid
+        FROM payroll.payrolldraftlines d JOIN {table} x ON d.companyid = :cid
             AND d.branchid = :bid AND d.payrollperiodid = :pid
             AND d.driverassignmentid = x.assignment_id AND d.workdate = x.work_date
             AND d.payrollperioddefinitionid = x.definition_id AND d.status <> 'Void'
@@ -206,7 +209,9 @@ async def apply_reviewed_quantities(
                        d.quantity, d.sourcetype, d.status, d.notes"""
     for lower in range(0, len(changes), batch_size):
         bind = {**params, "lower": lower, "upper": lower + batch_size}
-        returned.extend((await db.execute(text(f"""
+        batch = changes[lower:lower + batch_size]
+        if any(not change.expected_present and change.quantity > 0 for change in batch):
+            returned.extend((await db.execute(text(f"""
             INSERT INTO payroll.payrolldraftlines AS d
                 (companyid, branchid, payrollperiodid, driverassignmentid, workdate,
                  payrollperioddefinitionid, quantity, sourcetype, status, addedbyuserid)
@@ -214,8 +219,10 @@ async def apply_reviewed_quantities(
                 x.quantity, 'Import', 'Active', :uid FROM {table} x
             WHERE x.ordinal >= :lower AND x.ordinal < :upper AND x.quantity > 0 AND NOT x.expected_present
             RETURNING {common_return}
-        """), bind)).mappings().all())
-        returned.extend((await db.execute(text(f"""
+            """), bind)).mappings().all())
+        if any(change.expected_present and change.quantity > 0
+               and change.quantity != change.expected_quantity for change in batch):
+            returned.extend((await db.execute(text(f"""
             UPDATE payroll.payrolldraftlines d SET quantity = x.quantity, sourcetype = 'Import'
             FROM {table} x WHERE x.ordinal >= :lower AND x.ordinal < :upper AND x.expected_present AND x.quantity > 0
                 AND d.companyid = :cid AND d.branchid = :bid AND d.payrollperiodid = :pid
@@ -223,15 +230,17 @@ async def apply_reviewed_quantities(
                 AND d.payrollperioddefinitionid = x.definition_id AND d.status <> 'Void'
                 AND d.quantity IS DISTINCT FROM x.quantity
             RETURNING {common_return}
-        """), bind)).mappings().all())
-        returned.extend((await db.execute(text(f"""
+            """), bind)).mappings().all())
+        if any(change.expected_present and change.quantity == 0
+               and change.expected_quantity != 0 for change in batch):
+            returned.extend((await db.execute(text(f"""
             UPDATE payroll.payrolldraftlines d SET status = 'Void', sourcetype = 'Import'
             FROM {table} x WHERE x.ordinal >= :lower AND x.ordinal < :upper AND x.expected_present AND x.quantity = 0
                 AND d.companyid = :cid AND d.branchid = :bid AND d.payrollperiodid = :pid
                 AND d.driverassignmentid = x.assignment_id AND d.workdate = x.work_date
                 AND d.payrollperioddefinitionid = x.definition_id AND d.status <> 'Void' AND d.quantity <> 0
             RETURNING {common_return}
-        """), bind)).mappings().all())
+            """), bind)).mappings().all())
 
     by_key = {c.key: index for index, c in enumerate(changes)}
     mutations = []

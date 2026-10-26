@@ -37,7 +37,7 @@ def payroll_tenant(p3b_dsn):
 
 
 async def _fixture(client, engine, tenant, **overrides):
-    await rated_definition(client, tenant, code="PARTIAL", name="Other quantity")
+    await rated_definition(client, tenant, definition_code="PARTIAL", definition_name="Other quantity")
     period, _ = await open_period_with_grid(client, engine, tenant, **overrides)
     async with engine.connect() as db:
         definition_ids = list((await db.execute(text("""SELECT payrollperioddefinitionid
@@ -128,6 +128,39 @@ async def test_bulk_evidence_failure_rolls_back_source_and_audit(p3c_client, p3c
     async with p3c_engine.connect() as db:
         assert await db.scalar(text("SELECT count(*) FROM payroll.payrolldraftlines WHERE companyid=:cid"), {"cid": tenant.company_id}) == 0
         assert await db.scalar(text("SELECT count(*) FROM audit.auditlog WHERE companyid=:cid AND actioncode='DRAFT_LINE_ADDED'"), {"cid": tenant.company_id}) == 0
+
+
+async def test_mixed_batch_changes_only_supplied_values_and_preserves_noop_lineage_and_notes(p3c_client, p3c_engine, tenant):
+    period, definitions, day = await _fixture(p3c_client, p3c_engine, tenant)
+    created = await p3c_client.post(f"/payroll/periods/{period['payroll_period_id']}/lines", headers=tenant.admin,
+        json={"driver_assignment_id": tenant.driver_a, "work_date": day.isoformat(),
+              "payroll_period_definition_id": definitions[0], "quantity": "2", "notes": "operator context"})
+    assert created.status_code == 201, created.text
+    async with p3c_engine.connect() as db:
+        original = (await db.execute(text("""SELECT sourcetype,notes FROM payroll.payrolldraftlines
+            WHERE companyid=:cid AND payrollperiodid=:pid"""), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})).one()
+        event_count = await db.scalar(text("SELECT count(*) FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid=:pid"),
+                                      {"pid": period["payroll_period_id"]})
+    noop = await _apply(p3c_engine, tenant, period, [_change(tenant, day, definitions[0], "2.0", "2")])
+    assert noop.unchanged == 1 and not noop.changed
+    async with p3c_engine.connect() as db:
+        assert (await db.execute(text("""SELECT sourcetype,notes FROM payroll.payrolldraftlines
+            WHERE companyid=:cid AND payrollperiodid=:pid"""), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})).one() == original
+        assert await db.scalar(text("SELECT count(*) FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid=:pid"),
+                               {"pid": period["payroll_period_id"]}) == event_count
+    await _apply(p3c_engine, tenant, period, [_change(tenant, day + timedelta(days=1), definitions[0], "2")])
+    result = await _apply(p3c_engine, tenant, period, [
+        _change(tenant, day, definitions[0], "3", "2"),
+        _change(tenant, day + timedelta(days=1), definitions[0], "0", "2"),
+        _change(tenant, day, definitions[1], "7"),
+        _change(tenant, day + timedelta(days=2), definitions[1], "0"),
+    ])
+    assert (result.created, result.updated, result.voided, result.unchanged) == (1, 1, 1, 1)
+    async with p3c_engine.connect() as db:
+        state = (await db.execute(text("""SELECT quantity,sourcetype,notes FROM payroll.payrolldraftlines
+            WHERE companyid=:cid AND payrollperiodid=:pid AND workdate=:day AND payrollperioddefinitionid=:def"""),
+            {"cid": tenant.company_id, "pid": period["payroll_period_id"], "day": day, "def": definitions[0]})).one()
+        assert state == (Decimal("3"), "Import", "operator context")
 
 
 async def test_lifecycle_rescue_updates_exact_existing_target_but_never_creates_new_source(p3c_client, p3c_engine, tenant):
