@@ -37,5 +37,3 @@ async def authorize(db: AsyncConnection, cid: int, uid: int, pid: int, *, mutate
     else:
         await check_any_permission(cid, uid, period.branch_id, ["payroll.view", "payroll.entry"], db)
     return period
-
-

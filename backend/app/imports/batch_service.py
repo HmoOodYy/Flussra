@@ -879,4 +879,3 @@ async def cancel_import(engine: AsyncEngine, cid: int, uid: int, iid: int, expec
                 WHERE importid = :iid AND companyid = :cid
             """), {"uid": uid, "iid": iid, "cid": cid})
         return await metadata(db, cid, iid)
-

@@ -80,5 +80,3 @@ def test_date_provider_rejects_noncanonical_or_unselected_values(source):
     with pytest.raises(ImportFailure):
         _normalize_date_source(source, {"filename_date_candidates": [], "unit_date_candidates": []},
                                date(2026, 10, 20), expand_import_fixed=False)
-
-
