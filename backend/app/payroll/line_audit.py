@@ -4,9 +4,40 @@ Audit-log writer shared by ordinary source mutations, Bonus events, and Day Grid
 Writes audit rows in the caller's transaction; it does not validate or lock source state.
 """
 import json
+from collections.abc import Iterable
+from itertools import islice
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
+
+
+async def write_quantity_audit_batch(
+    db: AsyncConnection, *, company_id: int, branch_id: int, user_id: int,
+    changes: Iterable[dict], correlation_id: str, batch_size: int = 1000,
+) -> None:
+    """One ordinary audit row per actual change, on the owning transaction.
+
+    Decimal values remain exact strings in this bulk payload; no monetary
+    calculation or floating-point conversion participates in source auditing.
+    """
+    if batch_size < 1:
+        raise ValueError("Audit batch size must be positive.")
+    iterator = iter(changes)
+    reasons = {"DRAFT_LINE_ADDED": "Draft line added", "DRAFT_LINE_UPDATED": "Draft line updated",
+               "DRAFT_LINE_VOIDED": "Draft line voided"}
+    while chunk := list(islice(iterator, batch_size)):
+        payload = [{"entity_id": str(change["line_id"]), "action": change["audit_action"],
+                    "before": change["before"], "after": change["after"],
+                    "reason": reasons[change["audit_action"]]} for change in chunk]
+        await db.execute(text("""
+            INSERT INTO audit.auditlog(companyid, branchid, actoruserid, actioncode,
+                entityschema, entityname, entityid, oldvaluejson, newvaluejson, reason, sourcetype, correlationid)
+            SELECT :cid, :bid, :uid, x.action, 'payroll', 'PayrollDraftLines', x.entity_id,
+                x.before::text, x.after::text, x.reason, 'Application', CAST(:correlation AS uuid)
+            FROM jsonb_to_recordset(CAST(:rows AS jsonb))
+                AS x(entity_id text, action text, "before" jsonb, "after" jsonb, reason text)
+        """), {"cid": company_id, "bid": branch_id, "uid": user_id, "correlation": correlation_id,
+               "rows": json.dumps(payload, default=str, separators=(",", ":"), ensure_ascii=False)})
 
 
 async def _write_line_audit(
