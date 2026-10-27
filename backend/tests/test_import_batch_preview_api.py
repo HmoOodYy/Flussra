@@ -829,7 +829,9 @@ async def test_inferred_date_order_survives_refresh_and_finalization_purge(p3c_c
     assert retained.status_code == 200, retained.text
     retained_unit = retained.json()["files"][0]["units"][0]
     assert retained.json()["files"][0]["content_purged_at"] is not None
-    assert retained_unit["inspection"] == {}
+    assert retained_unit["inspection"] == {"available": False}
+    assert retained.json()["header_structure"]["available"] is False
+    assert retained.json()["header_structure"]["combined_column_count"] is None
     assert retained_unit["date_order"] == "DMY"
     async with p3c_engine.connect() as db:
         stored_order = await db.scalar(text("""

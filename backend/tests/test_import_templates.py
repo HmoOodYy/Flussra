@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from app.imports.errors import ImportFailure
 from app.imports.template import generate_template
 from app.payroll.definition_calculation import PeriodDefinition
+from app.product_policy import ProductPolicy
 
 
 def _definition(code="REGULAR", name="Regular work", definition_id=11):
@@ -81,3 +82,13 @@ def test_template_refuses_ambiguous_generated_headers(definitions):
         generate_template(_context(definitions))
 
     assert caught.value.code == "IMPORT_TEMPLATE_HEADERS_AMBIGUOUS"
+
+
+def test_template_uses_effective_combined_column_allowance():
+    context = _context()
+    with pytest.raises(ImportFailure) as caught:
+        generate_template(context, product_policy=ProductPolicy(max_import_combined_columns=4))
+    assert caught.value.code == "IMPORT_COMBINED_COLUMN_LIMIT_EXCEEDED"
+
+    payload = generate_template(context, product_policy=ProductPolicy(max_import_combined_columns=5))
+    assert payload.startswith(b"PK")

@@ -19,6 +19,7 @@ from app.imports.canonical import (
     canonical_source_unit,
     decode_canonical_file,
     extract_canonical_file,
+    inspect_canonical_headers,
 )
 from app.imports.contracts import (
     CANONICAL_FILE_VERSION,
@@ -30,6 +31,7 @@ from app.imports.contracts import (
     require_supported_import_contract,
 )
 from app.imports.errors import ImportFailure
+from app.imports.headers import analyze_header_sets, combined_column_count, describe_headers
 from app.imports.mapping import (
     canonical,
     definition_meaning,
@@ -231,21 +233,37 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
             "unit_name": unit["unitname"], "selected": unit["isselected"]})
 
     def unit_inspection(value):
+        if value is None or "header_cells" not in value:
+            return {"available": False}
         value = value or {}
         keys = ("row_count", "column_count", "cell_count", "headed_column_count", "imported_row_count",
+                "combined_column_count",
                 "header_row_number", "header_state", "date_order", "accepted_date_order",
                 "date_order_state", "encoding", "delimiter", "formula_count",
                 "formula_cached_value_count", "formula_empty_cache_count", "formula_missing_cache_count",
                 "cached_formula_count", "missing_cache_count", "filename_date_candidates", "unit_date_candidates",
-                "headerless_columns", "hidden_columns", "notices")
-        return {key: value[key] for key in keys if key in value}
+                "headerless_columns", "hidden_columns", "notices", "duplicate_header_signatures")
+        result = {"available": True, **{key: value[key] for key in keys if key in value}}
+        if "duplicate_header_signatures" in result:
+            result["duplicate_header_signatures"] = [
+                {key: signature[key] for key in ("signature", "count", "columns")}
+                for signature in result["duplicate_header_signatures"]]
+        return result
 
     def layout_inspection(value):
+        if value is None or "header_cells" not in value:
+            return {"available": False, "header_cells": [], "header_count": None,
+                    "headed_column_count": None, "duplicate_header_signatures": None,
+                    "header_cells_truncated": False}
         value = value or {}
         headers = value.get("header_cells", [])
         sample = [str(header)[:policy.max_header_label_chars]
                   for header in headers[:policy.layout_header_sample]]
-        return {"header_cells": sample, "header_count": len(headers),
+        duplicate_signatures = [{key: signature[key] for key in ("signature", "count", "columns")}
+                                 for signature in value.get("duplicate_header_signatures", [])]
+        return {"available": True, "header_cells": sample, "header_count": len(headers),
+                "headed_column_count": value.get("headed_column_count", sum(bool(str(header).strip()) for header in headers)),
+                "duplicate_header_signatures": duplicate_signatures,
                 "header_cells_truncated": len(headers) > len(sample)
                     or any(len(str(header)) > policy.max_header_label_chars
                            for header in headers[:policy.layout_header_sample])}
@@ -261,14 +279,49 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
         selected_layout = next((layout for layout in layouts if layout["sourcelayoutid"] == header_layout_id), None)
         if selected_layout is None:
             raise failure("IMPORT_LAYOUT_NOT_FOUND", "Source layout not found.", 404)
-        headers = (selected_layout["inspectionmetadata"] or {}).get("header_cells", [])
+        layout_meta = selected_layout["inspectionmetadata"]
+        if layout_meta is None or "header_cells" not in layout_meta:
+            header_page = {"available": False, "layout_id": header_layout_id,
+                           "offset": header_offset, "limit": header_limit, "total": None,
+                           "next_offset": None, "items": []}
+            headers = []
+        else:
+            headers = layout_meta.get("header_cells", [])
         header_cells = headers[header_offset:header_offset + header_limit]
-        header_page = {"layout_id": header_layout_id, "offset": header_offset, "limit": header_limit,
-                       "total": len(headers),
-                       "next_offset": (header_offset + len(header_cells)
-                                       if header_offset + len(header_cells) < len(headers) else None),
-                       "items": [{"source_column": header_offset + index + 1, "label": value}
-                                 for index, value in enumerate(header_cells)]}
+        if layout_meta is not None and "header_cells" in layout_meta:
+            by_column = {item["source_column"]: item for item in layout_meta.get("header_occurrences", [])}
+            header_page = {"available": True, "layout_id": header_layout_id,
+                           "offset": header_offset, "limit": header_limit,
+                           "total": len(headers),
+                           "next_offset": (header_offset + len(header_cells)
+                                           if header_offset + len(header_cells) < len(headers) else None),
+                           "items": [{"source_column": header_offset + index + 1, "label": value,
+                                      **{key: by_column[header_offset + index + 1][key]
+                                         for key in ("occurrence_ordinal", "occurrence_count", "occurrence_id",
+                                                     "duplicate_signature")
+                                         if header_offset + index + 1 in by_column
+                                         and by_column[header_offset + index + 1]["duplicate_signature"]}}
+                                     for index, value in enumerate(header_cells)]}
+    unit_headers = []
+    headers_available = bool(units)
+    for unit in units:
+        inspection = unit["inspectionmetadata"]
+        if inspection is None or "header_cells" not in inspection:
+            headers_available = False
+            break
+        details = describe_headers(inspection["header_cells"])
+        if not details["headed_column_count"]:
+            headers_available = False
+            break
+        unit_headers.append((unit, details))
+    header_structure = {"available": headers_available,
+        "combined_column_count": (combined_column_count([
+            item["header_cells"] for _unit, item in unit_headers]) if headers_available else None),
+        "file_count": len(files),
+        "headed_column_counts": ([{"source_unit_id": unit["sourceunitid"],
+                                   "file_ordinal": unit["fileordinal"],
+                                   "count": details["headed_column_count"]}
+                                  for unit, details in unit_headers] if headers_available else None)}
     result = {
         "import_id": row["importid"], "company_id": row["companyid"], "branch_id": row["branchid"],
         "period_id": row["payrollperiodid"], "import_kind": row["importkind"],
@@ -306,6 +359,7 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
                                 "next_offset": (target_offset + len(target_page)
                                     if target_offset + len(target_page) < target_count else None)},
         "header_page": header_page,
+        "header_structure": header_structure,
         "preview": {"mapping_fingerprint": row["mappingfingerprint"],
             "content_fingerprint": row["contentfingerprint"], "plan_fingerprint": row["planfingerprint"],
             "counts": row["previewcounts"], "summary": row["reviewsummary"]},
@@ -318,6 +372,23 @@ def _manifest_payload(payloads: list[FilePayload], inspected: list[dict]) -> lis
              "size": payload.file_size, "sha256": payload.file_sha256,
              "units": [{"name": unit["name"], "index": unit["index"]} for unit in info["source_units"]]}
             for ordinal, (payload, info) in enumerate(zip(payloads, inspected, strict=True), start=1)]
+
+
+def _attach_header_metadata(inspection: dict) -> dict:
+    details = describe_headers(inspection.get("header_cells", []))
+    inspection.update({key: details[key] for key in (
+        "header_cells", "headed_column_count", "header_occurrences", "duplicate_header_signatures")})
+    return details
+
+
+def _validate_header_policy(units: list[dict], maximum_columns: int) -> dict:
+    if not units or any(unit.get("inspectionmetadata") is None
+                         or "header_cells" not in unit["inspectionmetadata"] for unit in units):
+        raise ImportFailure("IMPORT_HEADER_METADATA_UNAVAILABLE",
+                            "Stored source headers are unavailable. Reset this Import and upload the files again.", 409)
+    return analyze_header_sets([
+        (unit.get("inspectionmetadata") or {}).get("header_cells", []) for unit in units
+    ], maximum_columns)
 
 
 def _date_candidates(label: str) -> list[str]:
@@ -429,14 +500,15 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
                        "sha256": info["canonical_sha256"]})
                 for unit in info["source_units"]:
                     inspection = unit["inspection"]
-                    structure = fingerprint("layout-structure", {
-                        "headers": [str(value).strip().casefold() for value in inspection.get("header_cells", [])],
-                        "column_count": inspection.get("column_count", 0),
-                    })
+                    header_details = _attach_header_metadata(inspection)
+                    structure = fingerprint("layout-structure", header_details["structure"])
                     inspection = {**inspection, "filename_date_candidates": _date_candidates(payload.filename),
                                   "unit_date_candidates": _date_candidates(unit["name"])}
                     unit["inspection"] = inspection
-                    structure_rows.setdefault(structure, {"headers": inspection.get("header_cells", []),
+                    structure_rows.setdefault(structure, {"headers": header_details["header_cells"],
+                                                           "header_occurrences": header_details["header_occurrences"],
+                                                           "headed_column_count": header_details["headed_column_count"],
+                                                           "duplicate_header_signatures": header_details["duplicate_header_signatures"],
                                                            "units": []})["units"].append((file_id, ordinal, unit, info["file_type"]))
             layout_ids = {}
             for structure, detail in structure_rows.items():
@@ -445,7 +517,10 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
                     VALUES (:iid, :cid, :structure, :label, CAST(:inspection AS jsonb)) RETURNING sourcelayoutid
                 """), {"iid": iid, "cid": cid, "structure": structure,
                        "label": f"Layout {len(layout_ids) + 1}",
-                       "inspection": _json({"header_cells": detail["headers"]})})).scalar_one()
+                       "inspection": _json({"header_cells": detail["headers"],
+                           "header_occurrences": detail["header_occurrences"],
+                           "headed_column_count": detail["headed_column_count"],
+                           "duplicate_header_signatures": detail["duplicate_header_signatures"]})})).scalar_one()
                 layout_ids[structure] = layout_id
             for structure, detail in structure_rows.items():
                 for file_id, ordinal, unit, file_type in detail["units"]:
@@ -475,14 +550,16 @@ def _inspect_batch(payloads: list[FilePayload], policy: ImportResourcePolicy, _l
         from app.product_policy import DEFAULT_PRODUCT_POLICY
         product_policy = DEFAULT_PRODUCT_POLICY
     total_decompressed = total_units = total_inspection = 0
-    result = []
+    probes = []
     for payload in payloads:
-        info = extract_canonical_file(payload.data, payload.filename,
-                                      resource_policy=policy, product_policy=product_policy)
+        info = inspect_canonical_headers(payload.data, payload.filename,
+                                         resource_policy=policy, product_policy=product_policy)
         if info["decompressed_bytes"] > policy.max_file_decompressed_bytes:
             raise ImportFailure("IMPORT_DECOMPRESSED_LIMIT_EXCEEDED", "A workbook exceeds its configured decompressed-byte limit.")
         total_decompressed += info["decompressed_bytes"]
         total_units += len(info["source_units"])
+        for unit in info["source_units"]:
+            _attach_header_metadata(unit["inspection"])
         safe_info = {key: value for key, value in info.items() if key != "canonical_payload"}
         total_inspection += len(_json(safe_info).encode("utf-8"))
         if total_decompressed > policy.max_total_decompressed_bytes:
@@ -491,7 +568,36 @@ def _inspect_batch(payloads: list[FilePayload], policy: ImportResourcePolicy, _l
             raise ImportFailure("IMPORT_SOURCE_UNIT_LIMIT_EXCEEDED", "Import exceeds its aggregate source-unit limit.")
         if total_inspection > policy.max_inspection_bytes:
             raise ImportFailure("IMPORT_INSPECTION_TOO_LARGE", "Import inspection metadata exceeds its configured limit.")
+        probes.append(info)
+
+    header_sets = [probe["inspection"]["header_cells"] for probe in probes]
+    combined = analyze_header_sets(header_sets, product_policy.max_import_combined_columns)
+    layout_structures = {fingerprint("layout-structure", details["structure"])
+                         for details in combined["file_header_details"]}
+    if len(layout_structures) > policy.max_layouts:
+        raise ImportFailure("IMPORT_LAYOUT_LIMIT_EXCEEDED",
+                            "The source batch exceeds the configured number of distinct header layouts.", 422)
+    result = []
+    total_final_inspection = 0
+    for payload, probe in zip(payloads, probes, strict=True):
+        info = extract_canonical_file(payload.data, payload.filename,
+                                      resource_policy=policy, product_policy=product_policy)
+        actual_headers = info["inspection"].get("header_cells", [])
+        if describe_headers(actual_headers)["structure"] != describe_headers(
+                probe["inspection"].get("header_cells", []))["structure"]:
+            raise ImportFailure("IMPORT_HEADER_INSPECTION_CHANGED",
+                                "File headers changed during bounded inspection. Retry the upload.", 409)
+        for unit in info["source_units"]:
+            details = _attach_header_metadata(unit["inspection"])
+            unit["inspection"]["combined_column_count"] = combined["combined_column_count"]
+            unit["inspection"]["header_cells"] = details["header_cells"]
+        info["combined_column_count"] = combined["combined_column_count"]
         info["canonical_format_version"] = CANONICAL_FILE_VERSION
+        safe_info = {key: value for key, value in info.items() if key != "canonical_payload"}
+        total_final_inspection += len(_json(safe_info).encode("utf-8"))
+        if total_final_inspection > policy.max_inspection_bytes:
+            raise ImportFailure("IMPORT_INSPECTION_TOO_LARGE",
+                                "Import inspection metadata exceeds its configured limit.")
         result.append(info)
     return result
 
@@ -569,6 +675,7 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
         async with engine.begin() as db:
             await _lock_mutable(db, cid, uid, iid, body.expected_revision)
             _current_files, current_units, _layouts = await load_sources(db, cid, iid)
+            _validate_header_policy(current_units, _product_policy(request).max_import_combined_columns)
             await clear_derived_state(db, cid, iid, reset_mapping=False)
             for item in body.units:
                 unit = next(u for u in units if u["sourceunitid"] == item.source_unit_id)
@@ -610,46 +717,15 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
 async def create_layout(request, engine, cid, uid, iid, body: RegroupRequest):
     async with engine.begin() as db:
         await _lock_mutable(db, cid, uid, iid, body.expected_revision)
-        if len(body.source_unit_ids) > _policy(request).max_source_units:
-            raise failure("IMPORT_SOURCE_UNIT_LIMIT_EXCEEDED", "Regroup exceeds the configured source-unit limit.", 422)
-        if len(set(body.source_unit_ids)) != len(body.source_unit_ids):
-            raise failure("IMPORT_SOURCE_UNIT_INVALID", "A source unit may appear only once in a regroup request.", 422)
-        files, units, layouts = await load_sources(db, cid, iid)
-        by_id = {u["sourceunitid"]: u for u in units}
-        if any(unit_id not in by_id for unit_id in body.source_unit_ids):
-            raise failure("IMPORT_SOURCE_UNIT_NOT_FOUND", "A source unit does not belong to this Import.", 404)
-        selected = [by_id[unit_id] for unit_id in body.source_unit_ids]
-        unit_structure = {layout["sourcelayoutid"]: layout["structurefingerprint"] for layout in layouts}
-        if len({unit_structure[u["sourcelayoutid"]] for u in selected}) != 1:
-            raise failure("IMPORT_LAYOUT_INCOMPATIBLE", "Only compatible source structures can share a layout.", 422)
-        structure = unit_structure[selected[0]["sourcelayoutid"]]
-        if len(layouts) >= _policy(request).max_layouts:
-            raise failure("IMPORT_LAYOUT_LIMIT_EXCEEDED", "Import exceeds its configured source-layout limit.", 422)
-        info = (await db.execute(text("""
-            SELECT inspectionmetadata FROM import.sourcelayouts
-            WHERE sourcelayoutid = :layout AND importid = :iid AND companyid = :cid
-        """), {"layout": selected[0]["sourcelayoutid"], "iid": iid, "cid": cid})).scalar_one()
-        layout_id = (await db.execute(text("""
-            INSERT INTO import.sourcelayouts (importid, companyid, structurefingerprint, label, inspectionmetadata)
-            VALUES (:iid, :cid, :structure, :label, CAST(:inspection AS jsonb)) RETURNING sourcelayoutid
-        """), {"iid": iid, "cid": cid, "structure": structure, "label": body.label,
-               "inspection": _json(info or {})})).scalar_one()
-        await clear_derived_state(db, cid, iid, reset_mapping=False)
-        for unit in selected:
-            await db.execute(text("""
-                UPDATE import.filesourceunits SET sourcelayoutid = :layout
-                WHERE sourceunitid = :unit AND importid = :iid AND companyid = :cid
-            """), {"layout": layout_id, "unit": unit["sourceunitid"], "iid": iid, "cid": cid})
-        await db.execute(text("""
-            UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
-                updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
-        """), {"uid": uid, "iid": iid, "cid": cid})
-        return await metadata(db, cid, iid, policy=_policy(request))
+        raise failure("IMPORT_LAYOUT_REGROUP_UNSUPPORTED",
+                      "Source structures are grouped automatically. Upload unrelated structures as separate Imports.", 422)
 
 
 async def accept_mapping(request, engine, cid, uid, iid, layout_id, body: MappingRequest):
     async with engine.begin() as db:
         row = await _lock_mutable(db, cid, uid, iid, body.expected_revision)
+        _files, units, _layouts = await load_sources(db, cid, iid)
+        _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
         layout = (await db.execute(text("""
             SELECT structurefingerprint FROM import.sourcelayouts
             WHERE importid = :iid AND companyid = :cid AND sourcelayoutid = :layout FOR UPDATE
@@ -834,6 +910,8 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
                 raise failure("IMPORT_REVISION_CONFLICT", "Import changed. Read its current revision and retry.")
             if period.status not in SOURCE_ENTRY_STATUSES or row["status"] not in ("NeedsMapping", "NeedsReview") or row["detailpurgedatutc"]:
                 raise failure("IMPORT_NOT_EDITABLE", "This Import is no longer editable.")
+            files, units, layouts = await load_sources(db, cid, iid)
+            _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
             files, units, layouts = await load_sources(db, cid, iid, include_canonical=True)
             started_rule_context = await current_rule_context(db, cid, iid)
             if any(file["contentpurgedatutc"] is not None for file in files):
@@ -902,17 +980,26 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             await persist_preview(db, company_id=cid, import_id=iid, branch_id=period.branch_id,
                                   period_id=period.payroll_period_id, result=result,
                                   rule_context_fingerprint=published_rule_context)
-            current_unit_ids = {unit["sourceunitid"] for unit in current_units}
+            current_units_by_id = {unit["sourceunitid"]: unit for unit in current_units}
             for source_unit_id, date_order, encoding, delimiter, inspection_json in inspection_updates:
-                if source_unit_id not in current_unit_ids:
+                if source_unit_id not in current_units_by_id:
                     raise failure("IMPORT_REVISION_CONFLICT", "Source units changed while the preview was being prepared.")
+                stored_inspection = current_units_by_id[source_unit_id]["inspectionmetadata"] or {}
+                prepared_inspection = json.loads(inspection_json)
+                for key in ("header_cells", "headed_column_count", "combined_column_count",
+                            "header_occurrences", "duplicate_header_signatures", "headerless_columns",
+                            "hidden_columns", "notices", "imported_row_count", "row_count",
+                            "column_count", "cell_count", "formula_count", "formula_cached_value_count",
+                            "formula_empty_cache_count", "formula_missing_cache_count"):
+                    if key in stored_inspection:
+                        prepared_inspection[key] = stored_inspection[key]
                 await db.execute(text("""
                     UPDATE import.filesourceunits SET dateorder = :date_order,
                         encoding = :encoding, delimiter = :delimiter,
                         inspectionmetadata = CAST(:inspection AS jsonb)
                     WHERE sourceunitid = :unit AND importid = :iid AND companyid = :cid
                 """), {"date_order": date_order, "encoding": encoding, "delimiter": delimiter,
-                       "inspection": inspection_json, "unit": source_unit_id, "iid": iid, "cid": cid})
+                       "inspection": _json(prepared_inspection), "unit": source_unit_id, "iid": iid, "cid": cid})
             # Store per-layout mapping identities without exposing generated IDs in their hashes.
             def_by_target = {target_key(d): d for d in definitions}
             for layout in current_layouts:

@@ -272,7 +272,7 @@ def _metadata(meta: dict, headers: list[dict], ignored: set[int], last_row: int,
     return result
 
 
-def _csv(data: bytes, resource: ImportResourcePolicy, product: ProductPolicy):
+def _csv(data: bytes, resource: ImportResourcePolicy, product: ProductPolicy, *, header_only: bool = False):
     meta = _inspect_csv(data, set(), 1, resource)
     reader = csv.reader(io.StringIO(data.decode(meta["encoding"]), newline=""),
                         delimiter=meta["delimiter"], strict=True)
@@ -280,6 +280,10 @@ def _csv(data: bytes, resource: ImportResourcePolicy, product: ProductPolicy):
     headers = _headers([{"column": index, "value": {"kind": "text", "value": label}}
                         for index, label in enumerate(raw_headers, 1)], product)
     columns = {item["column"] for item in headers}
+    if header_only:
+        counts = {key: 0 for key in ("formula_count", "formula_cached_value_count",
+                                     "formula_empty_cache_count", "formula_missing_cache_count")}
+        return _metadata(meta, headers, set(), 1, counts, resource), b"", "CSV", "visible", 0
     writer = _BoundedJson(product.max_import_canonical_file_bytes)
     writer.start("csv", "CSV", headers)
     ignored = set()
@@ -305,7 +309,7 @@ def _csv(data: bytes, resource: ImportResourcePolicy, product: ProductPolicy):
     return _metadata(meta, headers, ignored, last_row, counts, resource), writer.finish(), "CSV", "visible", 0
 
 
-def _xlsx(data: bytes, resource: ImportResourcePolicy, product: ProductPolicy):
+def _xlsx(data: bytes, resource: ImportResourcePolicy, product: ProductPolicy, *, header_only: bool = False):
     scanned = _inspect_xlsx(data, set(), None, None, resource, include_all_units=True, strict_table=True)
     unit = scanned["source_units"][0]
     meta, name = unit["inspection"], unit["name"]
@@ -329,6 +333,19 @@ def _xlsx(data: bytes, resource: ImportResourcePolicy, product: ProductPolicy):
             for header in headers:
                 header["hidden"] = header["column"] in hidden
             ignored = {column for column, row in meta["last_data_rows"].items() if column not in headed and row > 1}
+            if header_only:
+                counts = {key: 0 for key in ("formula_count", "formula_cached_value_count",
+                                             "formula_empty_cache_count", "formula_missing_cache_count")}
+                for header in headers:
+                    if "formula" in header:
+                        counts["formula_count"] += 1
+                        cache = header["formula"]["cache"]
+                        key = ("formula_missing_cache_count" if not cache["present"] else
+                               "formula_empty_cache_count" if not cache["raw_value"] else
+                               "formula_cached_value_count")
+                        counts[key] += 1
+                return (_metadata(meta, headers, ignored, 1, counts, resource), b"", name,
+                        unit["visibility"], scanned["decompressed_bytes"])
             writer = _BoundedJson(product.max_import_canonical_file_bytes)
             writer.start("xlsx", name, headers)
             counts = {key: 0 for key in ("formula_count", "formula_cached_value_count",
@@ -383,6 +400,33 @@ def extract_canonical_file(data: bytes, filename: str, *,
             "source_units": [{"name": name, "index": 1, "visibility": visibility, "inspection": meta}],
             "canonical_payload": payload, "canonical_byte_count": len(payload),
             "canonical_sha256": hashlib.sha256(payload).hexdigest()}
+
+
+def inspect_canonical_headers(data: bytes, filename: str, *,
+                              resource_policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY,
+                              product_policy: ProductPolicy = DEFAULT_PRODUCT_POLICY) -> dict:
+    """Run bounded safety checks and inspect only canonical headers, without serializing data rows."""
+    if len(data) > resource_policy.max_file_bytes:
+        raise ImportFailure("IMPORT_FILE_TOO_LARGE", "File exceeds its configured upload limit.")
+    if not data:
+        raise ImportFailure("IMPORT_FILE_EMPTY", "The uploaded file is empty.")
+    if not isinstance(filename, str) or not filename.strip():
+        raise ImportFailure("IMPORT_FILE_NAME_REQUIRED", "A file name is required.")
+    suffix = filename.rsplit(".", 1)[-1].casefold() if "." in filename else ""
+    try:
+        if suffix == "csv":
+            result = _csv(data, resource_policy, product_policy, header_only=True)
+        elif suffix == "xlsx":
+            result = _xlsx(data, resource_policy, product_policy, header_only=True)
+        else:
+            raise ImportFailure("IMPORT_FILE_TYPE_UNSUPPORTED", "Only .xlsx and .csv files are supported.")
+    except ImportFailure:
+        raise
+    except Exception as exc:
+        raise ImportFailure("IMPORT_FILE_INVALID", "The file's table or cell content is malformed.") from exc
+    meta, _unused_payload, name, visibility, decompressed = result
+    return {"file_type": suffix, "inspection": meta, "decompressed_bytes": decompressed,
+            "source_units": [{"name": name, "index": 1, "visibility": visibility, "inspection": meta}]}
 
 
 def _integer(value, minimum=1):

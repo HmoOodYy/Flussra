@@ -1,6 +1,6 @@
 # Flussra C2 Import Product Contract
 
-**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A04 have been implemented and focused-verified on the foundation continuation; A04 covers strict per-file extraction and canonical storage, not cross-file compatibility or the complete revised import experience/payroll application.
+**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A05 have been implemented and focused-verified on the foundation continuation; A05 adds cross-file header compatibility and combined-column accounting, not mapping semantics or the complete revised import experience/payroll application.
 
 **Continuation baseline:** `codex/c2-import-foundation`, implementation at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e` and documentation through `f15bf96`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
 
@@ -20,9 +20,8 @@ Status belongs to its own domain. Ordinary work import and Status import are sep
 
 - Understand and finish **one source per setup**. A different source gets a separate setup afterward. A setup may include multiple files representing that source's days.
 - A source is the user-confirmed input structure and its mapping rules. This contract does not require a new business catalog of named source systems or automatic discovery of relationships between different files.
-- Source columns represent payroll inputs and identity/date/filter/reference information. Columns do not represent days or months. `Driver | Monday | Tuesday | Wednesday` is unsupported.
-- Date authority is chosen separately: file/sheet name or a Date Column (§7).
-- Reject an upload/setup mixing unsupported day-column layouts with supported files. Explain the accepted shape, that other payroll inputs can be added through a later setup, and that confirmed compatible setup can be reused.
+- Source columns represent payroll inputs and identity/date/filter/reference information. A header such as `Monday`, `January` or `2026-01-05` may be an ordinary quantity name; header text never supplies a date or implies a day/month axis. Mapping source columns to days is unsupported. Date authority is chosen separately: file/sheet name or a Date Column (§7).
+- Reject explicit requests to map or interpret source columns as days, including when such a request is mixed with otherwise supported files. Header names alone never establish that interpretation. Explain the accepted shape, that other payroll inputs can be added through a later setup, and that confirmed compatible setup can be reused.
 
 ### 2.2 Tabular restrictions
 
@@ -44,15 +43,15 @@ Populated hidden columns participate in inspection and mapping, count toward the
 
 Initial structure comparison examines **column names/headers**, not column contents. Do not inspect sample payroll values to decide initial header similarity.
 
-External header matching ignores capitalization and surrounding whitespace: `Hours`, `hours` and ` Hours ` are equivalent labels. Preserve enough original label/position information to explain mappings and distinguish duplicate occurrences. Other equivalence transformations are not authorized by this rule. Internal display-name changes still require affected remapping (§4.3).
+External header matching ignores capitalization and surrounding whitespace: `Hours`, `hours` and ` Hours ` are equivalent labels. Preserve enough original label/position information to explain mappings and distinguish duplicate occurrences. Other equivalence transformations are not authorized by this rule. Internal display-name changes still require affected remapping (§4.3). Header-only preflight checks every pair of files: each pair must share a normalized label, so a third file cannot bridge two disjoint structures.
 
 - Repeated daily structures count once: `Driver | Code | A | B` in six files is four columns in the combined structure, not twenty-four.
-- Partially overlapping structures may participate in the same source setup. `Driver | Code | A | B` and `Driver | Code | A | C` have the union `Driver | Code | A | B | C`: five unique columns.
+- Partially overlapping structures may participate in the same source setup. `Driver | Code | A | B` and `Driver | Code | A | C` have a combined count of five occurrences.
 - Files with completely different column sets are rejected from the same setup.
 - The combined structure must contain at most **40 columns**, including identity, name, code, date, filter and other included columns, not merely pay-item quantities. Corresponding columns in repeated compatible files share a slot in that structure; separate physical columns within one file never collapse merely because their normalized labels match.
-- Duplicate labels within one file count individually: `Driver | Code | Hours | Hours | Hours` consumes **five** columns. Another daily file with that same structure does not double the count to ten. The three Hours occurrences also require the explicit resolution in §5.
+- For each normalized label, count the greatest occurrence multiplicity in any one file; the combined count is the sum of those per-label maxima. Thus `Driver | Code | Hours | Hours | Hours` consumes **five** columns, and another daily file with the same structure does not double the count to ten. Adding a `Bonus` occurrence adds one. Physical columns within a file retain distinct occurrence identifiers/signatures; the three Hours occurrences still require explicit resolution in §5.
 - Reject an incompatible or over-limit setup as a whole; do not silently truncate or partially accept it.
-- Count the imported header structure during bounded inspection, before payroll interpretation. Format-only empty columns do not count.
+- Count the imported header structure during bounded header-only preflight, before canonical row extraction or payroll interpretation. Format-only empty columns do not count.
 
 Separate physical-column, row/cell and batch ceilings must account for inspection work, including ignored data. These resource safeguards are distinct from deduplicating corresponding columns across compatible daily files. A changed duplicate count or arrangement still requires renewed resolution; counting does not make an incompatible duplicate rule reusable.
 

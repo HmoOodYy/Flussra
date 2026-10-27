@@ -286,6 +286,16 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                     files=[("file", (name, data, "application/octet-stream")) for name, data in files],
                     headers={**tenant.admin, "Idempotency-Key": str(uuid4())}), phases)
             iid = upload["import_id"]
+            header_structure = upload.get("header_structure") if scene in CURRENT_SCENARIOS else None
+            if scene in CURRENT_SCENARIOS:
+                assert header_structure and header_structure["available"] is True
+                first_inspection = upload["files"][0]["units"][0]["inspection"]
+                expected_columns = first_inspection["headed_column_count"]
+                assert header_structure["combined_column_count"] == expected_columns
+                assert len(header_structure["headed_column_counts"]) == len(files)
+                assert {item["count"] for item in header_structure["headed_column_counts"]} == {expected_columns}
+                assert len(upload["layouts"]) == 1
+                assert header_structure["combined_column_count"] <= policy_metadata["product_policy"]["max_import_combined_columns"]
             if scene.startswith("monthly_daily") or scene in CURRENT_SCENARIOS:
                 units = []
                 for file in upload["files"]:
@@ -444,6 +454,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 "file_bytes": sum(len(data) for _, data in files), "initial_memory": initial_memory,
                 "file_shapes": _file_shapes(files) if scene in CURRENT_SCENARIOS else None,
                 "ingress": ingress, "preview": initial, "refresh": refresh, "counts": counts,
+                "header_structure": header_structure,
                 "canonical_files": canonical_files if scene in CURRENT_SCENARIOS else None,
                 "preview_counts": preview["preview"]["counts"], "purge_seconds": purge,
                 "purge_sql_write_seconds": purge_statements,
@@ -454,7 +465,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 "effective_policy": policy_metadata,
                 "coverage": ({"legal_policy_shape": True, "canonical_extraction_and_admission": True,
                     "canonical_byte_measurement": True,
-                    "combined_column_enforcement": False, "full_mapping_identity_date_aggregation_and_repeat_semantics": False,
+                    "combined_column_enforcement": True, "full_mapping_identity_date_aggregation_and_repeat_semantics": False,
                     "final_revised_contract_acceptance": False} if scene in CURRENT_SCENARIOS else None)}
         finally:
             phases.restore()

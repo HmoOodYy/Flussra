@@ -358,12 +358,17 @@ async def test_upload_parser_runs_after_auth_transaction_and_before_period_lock_
     period_id = period["payroll_period_id"]
     before = await _canonical_counts(p3c_engine, period_id)
     original_extract = batch_service.extract_canonical_file
+    original_header_inspect = batch_service.inspect_canonical_headers
     original_period_lock = batch_service._lock_period_for_mutation
     lock_called = False
-    observations: list[tuple[int, bool]] = []
+    observations: list[tuple[str, int, bool]] = []
+
+    def inspect_without_db_transaction(*args, **kwargs):
+        observations.append(("headers", p3c_engine.sync_engine.pool.checkedout(), lock_called))
+        return original_header_inspect(*args, **kwargs)
 
     def extract_without_db_transaction(*args, **kwargs):
-        observations.append((p3c_engine.sync_engine.pool.checkedout(), lock_called))
+        observations.append(("canonical", p3c_engine.sync_engine.pool.checkedout(), lock_called))
         return original_extract(*args, **kwargs)
 
     async def observed_period_lock(*args, **kwargs):
@@ -371,13 +376,14 @@ async def test_upload_parser_runs_after_auth_transaction_and_before_period_lock_
         lock_called = True
         return await original_period_lock(*args, **kwargs)
 
+    monkeypatch.setattr(batch_service, "inspect_canonical_headers", inspect_without_db_transaction)
     monkeypatch.setattr(batch_service, "extract_canonical_file", extract_without_db_transaction)
     monkeypatch.setattr(batch_service, "_lock_period_for_mutation", observed_period_lock)
     created = await _upload(p3c_client, tenant, period)
     after = await _canonical_counts(p3c_engine, period_id)
 
     assert created.status_code == 200, created.text
-    assert observations == [(0, False)]
+    assert observations == [("headers", 0, False), ("canonical", 0, False)]
     assert lock_called is True
     assert after == before
 
