@@ -517,7 +517,6 @@ async def _query_branch_names(
             SELECT b.branchid, b.branchname
             FROM   core.branches b
             WHERE  b.companyid = :company_id
-              AND  b.status    = 'Active'
               {_and(branch_filter)}
             ORDER  BY b.isdefault DESC, b.branchname
         """),
