@@ -1,10 +1,10 @@
 # Flussra C2 Import Product Contract
 
-**Status:** Agreed product decisions, 2026-10-26. This is the canonical contract for the revised Import behavior. Implementation reconciliation, migration/refactor design and execution are not approved by this document.
+**Status:** Agreed product decisions, 2026-10-26. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. Publication is documentation-only; implementation, migrations and preservation-gap fixes require separate execution authorization.
 
-**Continuation baseline:** `codex/c2-import-foundation` at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
+**Continuation baseline:** `codex/c2-import-foundation`, implementation at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e` and documentation through `f15bf96`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
 
-**Authority:** This document supersedes conflicting product decisions in the [existing C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md) and [existing implementation design](FLUSSRA_C2_IMPORT_DESIGN.md). Those documents remain the record of the preserved architecture, implemented behavior, measurements and compatible safeguards. A rule recorded here is not a claim that it is implemented. Open decisions below have no invented defaults. No implementation, schema or deployed behavior changes with publication of this contract.
+**Authority:** This document records product decisions; the companion [C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md) owns delivery and the [technical design](FLUSSRA_C2_IMPORT_DESIGN.md) owns engineering boundaries and historical evidence. They now describe one revised ordinary-work contract. Superseded assumptions remain in Git history, not as competing current instructions. A rule recorded here is not a claim that it is implemented. No implementation, schema or deployed behavior changes with publication.
 
 ## 1. Purpose and boundaries
 
@@ -60,7 +60,7 @@ Separate physical-column, row/cell and batch ceilings must account for inspectio
 
 ### 3.1 Two per-file limits
 
-| Boundary | Maximum |
+| Boundary | Initial configurable maximum |
 |---|---:|
 | Uploaded file | 10 MB per file |
 | Extracted canonical import data | 1 MB per file |
@@ -69,9 +69,9 @@ The repository's existing decimal byte convention applies: 1 MB = 1,000,000 byte
 
 Canonical import data includes all headed table data before mapping: headers, cell values, formulas, cached formula results and types needed for interpretation. Include headed columns the user may later choose to Ignore; that mapping choice does not reduce the admission measurement. Headerless data excluded from the import table is excluded from this representation, while its inspection remains resource-bounded. Exclude presentation-only colors, fonts, borders, styles, formatting, data validations and other unnecessary presentation metadata. Preserve interpretation meaning derived from the original workbook, including date/time/duration types; discarding display styles must not discard semantic type information.
 
-Canonical data at or below 1 MB is eligible for further processing; above 1 MB is rejected. Extraction is itself bounded parsing work, not a cost-free operation. Retain applicable file-content, archive/decompression, XML, numeric-precision and resource protections while extracting. This product revision does not authorize removing security checks or making any batch unbounded.
+Canonical data at or below the effective canonical-file allowance (initially 1 MB) is eligible for further processing; above it is rejected. Extraction is itself bounded parsing work, not a cost-free operation. Retain applicable file-content, archive/decompression, XML, numeric-precision and resource protections while extracting. This product revision does not authorize removing security checks or making any batch unbounded.
 
-The deterministic canonical representation and its encoding/measurement details must be specified before implementation, using the accounting boundary above. No serialized format or new batch maximum is selected here.
+Use the technical design's versioned deterministic UTF-8 JSON representation, retaining ordered occurrences, physical provenance, exact typed values and formula/cache distinctions. Measure its actual uncompressed bytes, not workbook/DB compression or a mapped subset. Keep canonical format versions explicit and distinct from configurable capacities. No new final batch maximum is selected here.
 
 ### 3.2 Formula results
 
@@ -83,6 +83,12 @@ The deterministic canonical representation and its encoding/measurement details 
 ### 3.3 Batch resource policy
 
 Final ceilings for total files, rows, cells and canonical/processed batch bytes remain **open until realistic workloads are benchmarked**. The 1 MB per-file policy does not establish safe aggregate cost. Existing configured safety ceilings remain implementation safeguards, not newly approved final product limits. No performance guarantee or asynchronous execution requirement is inferred from the new per-file limit.
+
+### 3.4 Adjustable limits and policy authority
+
+The stated upload/canonical-byte, combined-column, Company pay-item and Branch input-concept values are initial product defaults, not scattered constants or permanent schema maxima. Centralize defaults once, load deployment settings into validated immutable policy objects, and enforce them on the backend. Authorized policy metadata supplies UI values, hints and rejection messages; no independent frontend hard limits or customer policy editor is required.
+
+Keep product allowances separate from operational file/physical-column/row/cell/archive/XML/response/concurrency safeguards. Raising an allowance must not require new fixed input fields, schema reconstruction or rewriting compatible mappings. Lowering an allowance does not rewrite completed imports or frozen payroll history; current operations must meet current safeguards and report recoverable capacity failures without truncation. Mathematical validity, supported formats, one-sheet/table structure, storage precision and protocol versions remain explicit contracts rather than arbitrary growth knobs.
 
 ## 4. Mapping and saved relationships
 
@@ -124,10 +130,11 @@ Duplicate header labels are supported only through explicit resolution. `Hours |
 - This does not authorize silently selecting one of several identity/date columns. Duplicate structural occurrences require explicit resolution too.
 - A previously accepted duplicate rule cannot be reused when the duplicate count or arrangement changes; ask the user to resolve it again.
 - Ordinary Sum exposes a list of selected input blocks with an add-more control. It has no special binary 0/1 restriction.
+- If a Sum requires an absent column or blank input, skip that row's target result with a warning and preserve existing payroll; do not sum only the available inputs or assume zero. Invalid nonblank operands remain errors and explicit zeros remain supplied values. An included repeated-row group with an incomplete target result must not publish a partial replacement for that Driver/day/item.
 - A quantity input column occurrence already consumed by one quantity mapping cannot be reused elsewhere in that setup. Shared Driver, Date and Filter columns may be reused by multiple mappings.
 - The final sum must obey the target's canonical quantity validation. An ordinal result must be a whole number greater than or equal to zero.
 
-Identifying duplicate occurrences and their arrangement is part of saved rule identity. The precise normalization/position-compatibility contract is still an implementation-design decision; do not silently make duplicate occurrences interchangeable.
+Identifying duplicate occurrences and their arrangement is part of saved rule identity. Unique named columns can be resolved by normalized label; duplicate count/arrangement must match the accepted signature or be resolved again. Do not silently make duplicate occurrences interchangeable.
 
 ## 6. Driver identity, repeated rows and filters
 
@@ -195,10 +202,10 @@ For a recognized, unchanged source with compatible saved rules, the only normal 
 - The hypothetical ordinal prefix-column mode with binary `1, 1, 0` values and a count in the final open-ended bucket is **not a V1 requirement**. Do not build that specialized mode merely because the hypothetical example was discussed.
 - Repeated-row quantities are combined first; apply the current ordinal calculation once to the final Driver/day/item quantity. Import does not calculate money itself.
 - Ordinal results must be nonnegative whole numbers. Existing domain rules control topology, precision, supported methods and units.
-- The originally stated six-level ceiling belongs to the ordinal/product domain, not an import-specific reinterpretation. Do not invent a new topology or infer source column capacity from six levels; any discrepancy with current domain enforcement needs domain reconciliation before implementation.
+- Keep the current ordinal topology/calculation rules unchanged. The existing domain has no six-tier cap, and this C2 delivery introduces none. Any new tier-count ceiling is separate domain work; neither the earlier hypothetical example nor configurable Import limits authorize it.
 - Where payroll already normalizes supported formats/units, reuse that same authority. Import must not invent separate hour, distance or quantity semantics. An unsupported format is not made supported merely by this principle.
-- A Company may create up to **50 pay items**. A Branch may use at most **15 payroll input concepts, including Status**. Status consumes one slot even though it is a separate domain. These are broader product/domain rules, not just Import DTO limits.
-- Count currently usable concepts toward the Company/Branch limits. Retiring a concept frees its slot; historical definitions and frozen period snapshots remain preserved. Detailed governance/effective-period enforcement still needs domain reconciliation. Recording this rule does not alter existing domain data or historical snapshots.
+- Initial centrally configurable product allowances are **50 currently usable Company pay items** and **15 Branch payroll input concepts, including Status**. Status consumes one slot even though it is a separate domain. These are broader product/domain rules, not just Import DTO limits; raising them changes policy rather than fixed schema/input fields.
+- Count currently usable concepts toward the Company/Branch limits. Retiring a concept frees its slot; historical definitions and frozen period snapshots remain preserved. Enforce capacity through canonical create/approval/activation/retirement authorities under compatible locks, including future effective configurations. Recording this rule does not alter existing domain data or historical snapshots.
 
 ## 9. Missing data, correction, confirmation and recovery
 
@@ -208,7 +215,7 @@ Missing coverage is a **warning**, not a blocker to payroll completion. A driver
 
 An import may add a value or change an existing value upward or downward after confirmation. Missing data is never a deletion instruction: if Ahmed's previously imported 100 miles is absent from the next file, keep the existing 100. Blank remains no supplied value; zero remains explicit zero under canonical payroll behavior.
 
-Same actual data uploaded again is a no-op. A genuinely changed input must explain that data changed and request confirmation; a different filename, presentation or upload event alone is not a new payroll fact. Current payroll conflicts and stale previews still need the existing safeguards. There is no additive source-contribution ledger in V1.
+Same actual completed data uploaded again is a no-op, including when someone manually changed payroll afterward. Preserve that later edit/provenance and explain prior completion without restoring the old file's value. A genuinely changed input must explain that data changed and request confirmation; a different filename, presentation or upload event alone is not a new payroll fact. Changed inputs/current payroll conflicts and stale previews still need the existing safeguards. There is no additive source-contribution ledger in V1.
 
 Rejected/invalid batches retain mapping, filters, confirmed/pending setup and useful error state so the user can correct and continue. Block payroll writes until the complete batch is valid and confirmed. This does not replace atomic rejection of an unsafe file or require preserving malicious/unreadable content, and does not override finalization retention.
 
@@ -231,7 +238,7 @@ Detailed Status matching, allowed values, date/coverage rules, conflict behavior
 7. Show missing-coverage warnings and required identity/category/value/conflict decisions. Obtain the required final confirmation.
 8. Revalidate and apply the reviewed changes atomically through canonical payroll mutation/evidence. Activate replacement saved relationships only after successful completion. Keep the receipt/history and retention guarantees.
 
-In the normal repeat case the saved interpretation reduces this to validation, the organized-day confirmation, and application. This is a product flow, not an approved endpoint/schema/migration sequence. A3/public apply remains unimplemented, and existing deployment-budget acceptance remains open.
+In the normal repeat case the saved interpretation reduces this to validation, the organized-day confirmation, and application. Identical completed data remains a no-op. The companion plan defines **twelve sequential Slice A stages, A01-A12**, with scope, dependencies and verification gates; these do not rename historical A1/A2/A3 work. A12 is the connected setup/read-only preview UI. Slice B remains separate for final identity/conflict/exception decisions, atomic application, successful rule promotion and receipt/history. Draft mapping/date/filter configuration is preparation, not permission to apply payroll. Existing deployment-budget acceptance remains open.
 
 ## 12. Preservation review and differences from the baseline
 
@@ -241,7 +248,7 @@ No implementation work is deleted by this contract. Existing assets can be reuse
 |---|---|---|
 | Setup scope | Many heterogeneous source-layout groups in one batch | One source setup; compatible/partially overlapping header sets only |
 | Worksheets/header | Multiple selected worksheets; header detection/selection | One sheet/file, one table, first-row header; no merged table cells |
-| Capacity | Configurable 128 columns/unit and aggregate operational defaults | 40 columns in the combined structure; duplicates within a file count individually, corresponding daily columns count once; 10 MB uploaded and 1 MB canonical headed data/file; aggregate ceilings pending measurements |
+| Capacity | Configurable 128 columns/unit and aggregate operational defaults | Configurable initial allowances of 40 combined columns, 10 MB uploaded and 1 MB canonical headed data/file; duplicates within a file count individually, corresponding daily columns count once; aggregate ceilings pending measurements |
 | Presentation | Reader retains interpreted values/types under workbook safety rules | Presentation excluded from canonical byte size and data-column extent; formula information and cached results retained |
 | Mapping | Per-import layout mappings; automatic cross-import reuse deferred | Branch-specific reusable per-target relationships and transformations; latest successfully completed replacement becomes current |
 | Changed structure | Regroup/invalidate layout and preview | Preserve absent known-column relationships; remap affected changed relationships, including internal display-name changes |
@@ -250,17 +257,17 @@ No implementation work is deleted by this contract. Existing assets can be reuse
 | Duplicate driver/day facts | Block all duplicate target facts across sources | User-confirmed within-day row aggregation, optionally categorical inclusion/exclusion |
 | Driver discrepancy | Per-import stable-key/name resolution and blocking disagreements | Code authority with user acceptance for name discrepancies; unknown codes cannot be repaired by name |
 | Dates | Column/file/sheet/fixed context; accepted candidates and numeric date order | Two user-facing authorities; contextual year/pattern interpretation and explanations; no missing-day guesses or numeric confidence |
-| Coverage/corrections | Partial supplied sets, blank/zero distinction, omitted facts untouched | Preserve those guarantees and explicitly classify missing coverage as warning-only |
+| Coverage/corrections | Partial supplied sets, blank/zero distinction, omitted facts untouched | Missing coverage warns; incomplete sums produce no partial replacement; completed repeats preserve subsequent manual edits |
 | Ordinal | Existing progressive domain calculation | Reuse domain after final quantity aggregation; hypothetical binary-prefix reader omitted |
 | Status | Separate domain; Status import deferred | Dedicated text-only Status import required as a separate later design |
-| Payroll domain capacity | Dynamic frozen definitions; benchmark counts were not domain limits | New Company/Branch ceilings count currently usable concepts; retirement frees slots while preserving history; effective-period governance still needs design |
+| Payroll domain capacity | Dynamic frozen definitions; benchmark counts were not domain limits | Configurable Company/Branch allowances count currently usable concepts; retirement frees slots, effective-date/concurrency guards preserve history; ordinal domain unchanged |
 | Apply/security | Canonical internal bulk boundary exists; no public decision/apply flow | Preserve canonical authority, isolation, staleness, evidence and atomicity; public flow still needs implementation |
 
 ### 12.1 Pending behavior: completed-import recognition/notice
 
 Reference preview implementation `6498453` contains `completed_notice` and a dedicated byte/semantic-match test. The foundation continuation has no equivalent completed-import notice lookup/field. It retains transport creation idempotency and semantic hashes; these are different protections from detecting a completed business import.
 
-**Disposition: pending preservation review; no implementation now.** Revised repeat behavior still requires a no-op for identical actual data. Determine recognition scope, saved mapping version, period, canonical/ignored-data meaning, current-payroll conflicts and the suitable receipt/day-review message under this contract. Preserve the useful behavior and test intent; do not blindly restore the old single-file API or treat a byte match as permission to suppress necessary validation.
+**Disposition: pending implementation/preservation review in A10; no implementation now.** Recognize complete interpreted mapped input within the same Company/Branch/period/targets and accepted-rule meaning, independently of presentation/ignored data. Identical completed data is a no-op preserving later manual edits, with completion/actor/time explanation. Preserve useful test intent without blindly restoring the old single-file API or treating a byte match/equal totals as sufficient permission to bypass validation.
 
 Reference locations: `backend/app/imports/preview_service.py` (`completed_notice`, `enrich_metadata`) and `backend/tests/test_import_preview_api.py` (`test_completed_import_notice_uses_fixture_state_and_new_import_still_previews_current_facts`) on `6498453`. Foundation counterparts for review are `backend/app/imports/batch_service.py` metadata and semantic identity/publication boundaries.
 
@@ -268,20 +275,16 @@ Reference locations: `backend/app/imports/preview_service.py` (`completed_notice
 
 The reference preview validates supported contract versions before paginated rows/issues reads. Foundation's full metadata loader validates versions, but `backend/app/imports/readmodels.py`'s shared `_read_identity` helper checks scope/revision/fingerprint without repeating those contract-version checks for rows/issues/source-record reads.
 
-**Disposition: pending preservation review; no implementation now.** The underlying fail-closed supported-version guarantee remains compatible with the revised contract. Reconcile the version authority and enforcement boundary for every retained paginated read after the new source/mapping/canonical representation is designed. Do not add obsolete-version adapters or preserve an old helper/API solely for compatibility. Keep version-mismatch rejection and tenant/revision protection test intent visible in that review.
+**Disposition: pending implementation/preservation review in A03/A10; no implementation now.** The fail-closed supported-version guarantee applies consistently to metadata, every retained rows/issues/source-record page, mutations and final commit alongside tenant/revision/fingerprint protection. Reconcile that shared enforcement boundary with the versioned new source/rule contracts. Do not add obsolete-version adapters or preserve an old helper/API solely for compatibility.
 
 ## 13. Open decisions and implementation acceptance prerequisites
 
-These points are explicitly not resolved by this document:
+The product choices are settled; the technical design and stage gates own their engineering delivery. The remaining evidence/deferred-design prerequisites are:
 
-1. Detailed normalization mechanics beyond the settled external case/surrounding-whitespace equivalence. Do not infer additional semantic equivalence.
-2. Detailed deterministic canonical data representation/encoding and byte measurement within the settled headed-table accounting boundary, including formula information.
-3. Total files/physical columns/rows/cells/canonical batch bytes and any revised operational admission bounds, after realistic measurements. Retain existing applicable safeguards meanwhile.
-4. Effective-period governance for the settled currently-usable concept limits and any reconciliation of the stated ordinal ceiling with existing domain enforcement. Retirement releases slots; that policy is no longer open.
-5. Detailed Status import contract and its separately approved implementation scope.
-6. Categorical suitability checks, duplicate-occurrence compatibility, date text grammars/locales and saved-pattern matching details.
-7. Detailed persistence/activation/ownership of Branch-specific reusable per-target rules, the scope of remembered identity acceptances, and their interaction with period snapshots and retention. Do not invent Company-wide automatic reuse, a source-system business catalog or an additive contribution model.
-8. Revised content/repeat identity and consistent supported-version enforcement, including the two preservation-review behaviors in §12.
-9. Deployment request/proxy deadline, memory/concurrency budget and revised workload acceptance. Existing measurements do not prove new-cap performance; no worker/job architecture or arbitrary latency target is approved.
+1. Final aggregate files/physical columns/rows/cells/canonical batch bytes and operational admission bounds after realistic measurements; keep applicable existing safeguards meanwhile.
+2. Authoritative deployment request/proxy deadline and process memory/concurrency budget for A11 acceptance. Existing results do not certify new-cap performance or authorize jobs/polling.
+3. Detailed dedicated Status import and any new ordinal tier-count ceiling remain separately deferred domain work.
+4. Stage-local versioned schemas/DTOs, categorical suitability/date grammar coverage and remembered identity-acceptance details must implement the boundaries and tests in the design without inventing Company-wide reuse or new semantic equivalence. Escalate a genuinely new product ambiguity rather than silently changing this contract.
+5. Both preservation behaviors in §12 remain unimplemented pending their assigned stage review/verification. This revision records their intended disposition, not a fix.
 
-The existing implementation and recorded test/benchmark evidence remain preserved at the continuation baseline. They do not prove conformance to this new contract. Future implementation requires an explicit reconciliation plan and authorization, followed by focused correctness, schema/retention/concurrency and realistic workload verification of the changed behavior. Recording these decisions executes none of that work.
+The existing implementation and historical test/benchmark evidence remain preserved. They do not prove conformance to this revised contract or mark A01-A12/Slice B accepted. Future implementation requires separate execution authorization and fresh focused correctness, schema/retention/concurrency and realistic workload verification. This documentation revision changes no code, schema or payroll data.

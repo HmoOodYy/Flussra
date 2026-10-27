@@ -1,234 +1,187 @@
-# FLUSSRA C2 IMPORT DESIGN — PAYROLL WORK DATA
+# Flussra C2 Import Design — Strict Reusable Ordinary Work
 
-**Authority:** Agreed refoundation contract (2026-10-26), implementing the [C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md). It supersedes the earlier single-file/selected-sheet/global-mapping and relational-cell preview design. Main's A1 foundation is merged at `337e3f7` (PR #74, schema `0094`). Unmerged `6498453` is implementation/measurement evidence only, not a migration or architectural authority. This backend refoundation and bulk-write feasibility gate precede A3. A3 UI and public Slice B decisions/apply remain downstream.
+**Authority:** Implements the [canonical product contract](FLUSSRA_C2_IMPORT_CONTRACT.md) and [complete delivery plan](FLUSSRA_C2_IMPORT_PLAN.md), revised 2026-10-26. This is a documentation-only reconciliation. Described changes remain planned until separately implemented and verified. Slice A has twelve sequential stages A01-A12; Slice B owns final decisions and application.
+
+**Preserved baseline:** `codex/c2-import-foundation`, implementation `9e03a66`, documentation through `f15bf96`; merged historical A1 at `337e3f7`, schema head `0095`. Preserve these commits and canonical facts/evidence. Divergent preview `6498453` is reference only. The existing compact backend and Payroll-owned bulk boundary are useful implementation assets, not evidence that the revised source/rule/UI contract is already built. Historical workload evidence remains in §11.
 
 ## 1. Domain boundaries
 
-A Payroll Period may receive many Imports while editable. One PayrollWork Import is one user-submitted batch, owned by exactly one Company, Branch and Payroll Period; it need not complete that period or supply every frozen Pay Definition.
+One Import is one submitted source setup for one Company/Branch/editable payroll period. It can contain several compatible daily files and supply only some frozen inputs. The period is the target schema. Normalize to one DriverAssignment + WorkDate + PayrollPeriodDefinition quantity; the current payroll calculation engine supplies money, including existing ordinal behavior. No new ordinal topology or tier-count ceiling belongs to this C2 delivery.
 
-```
-Import batch
-  -> immutable source files
-  -> CSV / selected worksheet source units and accepted interpretation
-  -> source-layout groups with separate accepted mappings
-  -> compact source/normalized records and scoped identity matches
-  -> combined Driver + WorkDate impact grid, issues and source drilldown
-  -> future reviewed canonical bulk quantity mutation
-```
+The neutral Import envelope owns scope/lifecycle/revision/idempotency/correlation. File-source code owns bounded extraction and physical provenance. PayrollWork owns input rules, identity/date eligibility, transformations, supplied coverage and payroll comparison. Canonical Payroll owns quantity/Status mutations and evidence. No source-system business catalog, universal matcher, additive contribution ledger or separate payroll writer is introduced.
 
-Canonical `PayrollDraftLines` remain ordinary source facts at DriverAssignment + WorkDate + PayrollPeriodDefinition + Quantity. Money remains the calculation engine's responsibility. Import neither creates master data nor writes payroll/evidence during upload, interpretation, mapping or preview. No Status, Bonus, People, Rates or Access import is included.
+Status-file import is dedicated, text-only and separately designed later. An ordinary-work categorical filter does not import Flussra Status. Existing held-Status/day-off conflicts still require canonical review. People/Rate/Access imports, master creation, spreadsheet recalculation, inline source-value editing and speculative job infrastructure remain outside this delivery.
 
-The immutable period definition layout is the target authority. No Pay Definition name, code, source label or assumed count is a production constant. The fixture dimensions 150 Drivers, 31 days, 20 definitions, 10,000 source rows and approximately 200,000 candidates are measurements, never domain limits.
+## 2. Sources and canonical extraction
 
-## 2. Sources, layouts and accepted meaning
+### 2.1 Strict shape and provenance
 
-### 2.1 Files and source units
+Accept CSV/XLSX with one sheet/file, one table/sheet, first-row headers and no merged cells in the imported table. Reject unsupported workbook/report shape without truncation. Keep immutable file ordinal/name/type/size/byte digest and physical sheet/row/column coordinates; repeated filenames remain distinguishable by their ordinal. Do not count styled empty cells as table data. Hidden populated columns are inspected, counted and identified. Headerless data is ignored with the product notice, excluded from headed-table allowance, and still bounded by inspection safeguards.
 
-One batch accepts multiple CSV/XLSX files. CSV contributes one source unit; XLSX exposes each worksheet as a source unit and allows multiple selections. Workbook/source-unit counts are operational policy, not schema limits. At least 31 daily files and a workbook with 31 daily worksheets must pass verification. Hidden worksheets require explicit selection; chart sheets are not data worksheets.
+Initial compatibility uses normalized headers only: trim surrounding whitespace and compare case-insensitively; retain original labels and occurrence positions for explanation. No payroll-value sampling decides source similarity. Corresponding named occurrences in compatible daily files share combined capacity; duplicate labels within one file remain separate occurrences. The combined union includes each distinct label's necessary occurrence slots, not the sum across files. Apply the configured combined-column allowance and require explicit resolution when duplicate count/arrangement changes. Reject completely disjoint structures and unsupported mixed setups; do not infer their business relationship.
 
-Files have immutable batch ordinal, original filename, type, size, byte digest and bytes until retention. Source-unit identity includes its owning file, physical unit name and unit ordinal. Repeated sheet names or row numbers in different files cannot collide. Repeated filenames are allowed; the visible batch file ordinal disambiguates their physical provenance.
+Source-layout metadata may remain an internal structure/provenance tool. It does not authorize an interface for multiple independent source families, arbitrary regrouping or multiple selected sheets in one setup.
 
-CSV's single unit is initially selected. Workbook units are inspected and initially unselected; selection is accepted explicitly. Every accepted mapping read exposes its current source-unit membership before the user relies on it.
+Discover first-row headers and check shape/column capacity as early as bounded inspection allows, before materializing complete row-value payloads. Once batch headers are available, reject incompatible or over-capacity combined structures before payroll interpretation; do not scan values to decide header similarity.
 
-### 2.2 Layout authority
+### 2.2 Canonical payload and size
 
-A SourceLayout belongs to one Import, not a physical file or the whole period. Compatible units may share it across CSV files and worksheets. Deterministic grouping uses relevant ordered header structure/column positions, not sample payroll values, filenames, Pay Definition counts or AI. Duplicate header labels retain their positions. Materially different structures get separate layout groups.
+Apply the upload-byte allowance before bounded archive/XML/CSV processing. Extract the complete headed table into a versioned deterministic UTF-8 JSON representation: fixed serialization/key ordering, ordered header occurrences, physical row/column locators and typed cell values. Preserve exact numeric lexemes, formula text, cache presence/result and semantic date/time/duration types; do not first round through binary floating-point. Record genuine blanks distinctly from missing required formula caches. Presentation-only fonts/colors/borders/styles/validation metadata and ignored headerless data are not canonical payload.
 
-Grouping is a reviewable suggestion. An explicit split/regroup operation can assign compatible units to a separate layout when the same physical headers have different business meanings. It cannot silently copy an accepted mapping onto incompatible units. Mapping inspection returns layout ID, structure digest, mapped columns and exact file/unit membership. Definition targets come dynamically from operational frozen period definitions.
+Include all headed columns before mapping, even those later set to Ignore. Empty presentation extent is absent; actual headed data rows retain physical coordinates. Measure actual uncompressed canonical UTF-8 bytes against the configured canonical-file allowance. Never use a regenerated workbook's compressed size, DB TOAST size or mapped-column-only size for admission. Canonical format versions are explicit protocol contracts, not tunable numeric limits.
 
-Accepted column mapping is one-based source column -> DriverNumber, EmployeeKey, DriverName, WorkDate, Definition:<period-definition-reference>, or Ignore. Require at least one identity role and one quantity target; prohibit duplicate target roles/definitions. Every non-empty column must be mapped or explicitly ignored. WorkDate is required after normalization, but its source column is optional under the accepted context contract below.
+Keep original bytes immutable under the existing retention policy. Store admitted canonical data/size/digest/version under File ownership so mapping/refresh can use typed extraction without repeatedly opening the original workbook. Canonical detail follows original-file finalization purge. Preserve original workbook-derived type meaning before discarding style metadata.
 
-Header/selection changes regroup affected units and invalidate preview. A mapping can be reused only when its source structure remains compatible; changed structures require acceptance again. Unused layout metadata is not evidence that a unit is selected.
+CSV has literal text values; formula-looking text is not executed. XLSX formulas use saved cached results only. A needed formula without a cache is an error; a real cached blank remains distinguishable. Unsupported domain quantity formats remain invalid rather than receiving a new Import-specific parser.
 
-### 2.3 WorkDate providers
+### 2.3 Safety and correction
 
-Each selected source unit uses one effective date provider:
+Retain actual-content checks; bounded multipart headers/body; ZIP paths, encryption, member count, CRC and actual inflated-byte checks; DTD/entity/XML-depth protection; macro rejection; exact coordinates and bounded text. Do not trust claimed MIME, Content-Length or worksheet dimensions as sole authority. Parsing/extraction runs off-thread under bounded admission without an open payroll transaction/period lock. Reauthorize and recheck period editability when staging is persisted.
 
-- an explicitly mapped WorkDate column;
-- accepted filename date context;
-- accepted worksheet-name date context;
-- an explicit fixed source-unit date;
-- an explicitly accepted Import-level fixed date.
+Reject unsafe/over-limit uploads atomically. For recoverable validation failures retain pending setup and useful diagnostics. A corrected upload uses a new immutable manifest/creation identity and carries only compatible pending setup forward; it does not overwrite the old file or reuse an idempotency key for changed bytes. Re-upload/correction must not force unaffected relationships to be configured again.
 
-A mapped WorkDate role is explicit acceptance of the column provider. Context providers require their kind and accepted ISO date to be submitted explicitly. Filename/sheet detection returns candidate dates and ambiguity; it never supplies authoritative context by itself. An accepted filename/sheet date must match a detected candidate; a user wanting another date must select fixed context. A context provider and mapped date column cannot compete silently: reject that conflicting configuration.
+## 3. Accepted meaning and transformations
 
-Numeric/slash date-order inference for column values follows the existing unambiguous/selected-order contract. Ambiguous values require accepted date order. Persist provider kind/value, header, date order and CSV decoding interpretation as provenance. The preview reports both provider and interpretation. A validly interpreted date outside the target period/day snapshot is a validation error, not a request to route to another period.
+### 3.1 Target relationships and lifecycle
 
-## 3. Supplied facts, identity and comparison
+Maintain immutable versioned Branch-specific relationships for individual PayDefinitions, with a current-successful head per target. A rule references the external column occurrence(s), Direct/Sum transform, identity/date dependencies, optional repeated-row/filter handling and relevant confirmed target/source labels. Bind it to the receiving period's frozen definition when used; do not persist one old period-definition ID as universal mapping authority.
 
-### 3.1 Coverage
+Pending rules are Import-owned proposals. They never replace current successful heads before Slice B successfully completes. A target already reserved by an existing rule requires explicit replacement; activating a new relationship supersedes the old one without additive accounting. Other targets retain their heads. Original-file purge must not remove current rules or immutable accepted rule metadata needed by history/reuse.
 
-Only mapped definition columns belong to a source's supplied set. Omitted/unmapped definitions create no candidate, blank marker, zero, clear operation or unchanged evidence. Later partial Imports compare only their supplied keys against then-current payroll; other definitions and notes remain untouched.
+Absent known columns preserve relationships and produce missing coverage as appropriate. Changed external labels beyond allowed normalization, changed internal display names and relevant dependencies require affected remapping. Unique named columns may be located by their normalized labels; duplicate occurrences require their accepted count/arrangement signature. Never silently align changed duplicates by ordinal alone.
 
-For a mapped definition, blank means no incoming quantity and zero is explicit zero. Preserve that distinction in normalized data and fingerprints. All-blank source rows are skipped without Driver/date errors or confirmation requirements for nonexistent incoming facts; a missing required formula cache is not a blank. Count mapped candidates, including blanks/invalid values, for admission resource accounting. XLSX numeric values and numeric cached formula results retain their XML numeric lexemes for exact Decimal validation, rather than first rounding through a binary float; workbook-styled dates/times/durations keep their interpreted types.
+### 3.2 Direct, Sum and duplicate headers
 
-Typed values use exact finite Decimals and canonical quantity validation, including frozen InputType and supported calculation method/version. Flussra never evaluates formulas: use cached results; missing required caches are errors. Identifier text is preserved where practical; numeric identifiers warn without invented leading-zero padding.
+Direct maps one quantity occurrence to one target. Sum maps explicit eligible numeric occurrences to a result, then validates that result against the target. Shared Driver/Date/Filter fields may support several mappings; a quantity occurrence is consumed once. Duplicate identity/date columns are not Sum candidates and need explicit chosen/ignored outcomes. Every duplicate occurrence must have an outcome before continuation.
 
-### 3.2 Permanent Driver before eligibility
+Parse numeric operands exactly and retain invalid-value diagnostics. Do not impose the abandoned binary-prefix restrictions. Apply canonical target validity to the resulting quantity: finite precision, nonnegative value and whole-number ordinal quantity. Import never evaluates pay rates or money.
 
-Resolve DriverNumber and EmployeeKey in one set-based, Company-scoped permanent Driver/Employee read, independently of period roster membership. All supplied stable keys must agree. Cross-Company identities remain undisclosed. Exact unique normalized roster names are proposals only, not confirmations.
+A missing Sum column or blank operand yields no result for that source row and a warning, not zero or a partial sum. Invalid nonblank operands remain errors. Explicit zeros are valid supplied operands. If an included repeated-row group contains an incomplete Sum result for a target, withhold that Driver/day/target result and warn; publishing only the other rows would silently treat unknown input as zero. Other fully understood targets can still be supplied under the reviewed batch contract.
 
-Then resolve the target Branch/WorkDate assignment using the canonical period snapshot plus live lifecycle date matrix. A known Company Driver without a valid assignment/date stays known and receives an assignment/eligibility error. An unknown/ambiguous name does not erase agreed stable identity, though its error remains. No external alias is invented or saved.
+### 3.3 Driver identity and date authority
 
-Existing-source rescue is exact-date and permits changing an existing source, not adding another definition's new source. Preserve the difference between actual current-source presence and effective nonzero quantity; an existing zero line may matter to rescue even when comparison treats it as empty.
+Resolve permanent Company Driver/Employee stable keys set-wise, separately from Branch/date eligibility. Code/name agreement is ordinary; known code with name variation requires explicit acceptance. Distinct codes do not merge because names match. Conflicting known identities block; an unknown code cannot be repaired automatically by a name. Exact unique name-only matches remain proposals. Preserve text/leading-zero cautions and Company isolation; do not create Drivers or invent aliases. Remember only explicitly confirmed scoped setup, not inferred identity overrides.
 
-### 3.3 Diff and duplicates
+Offer two user-facing date authorities: file/sheet name or a selected Date Column. Persist which name provider is chosen if filename and sheet name differ; competing date-like row values never override it. In column mode one file may supply one or several work dates. Manual date resolution is allowed for genuinely unrecognized/ambiguous input, not as a silent rewrite of explicit wrong-year data.
 
-Compare incoming supplied quantities to current ordinary, non-void payroll facts. Preserve New, Unchanged, Conflict, Blank, Invalid and Unresolved meaning. Positive work overlapping a held full-day-off Status or a configured day off exposes required decisions, without selecting replacements, removing Statuses, accepting exceptions or excluding data.
+Retain current unambiguous numeric-date handling; add supported written-month extraction and confirmed scoped patterns. Clean supported date-bearing text such as `O.c_t (Samsara) 16`, infer an omitted year only from an unambiguous period fit, and preserve the interpretation reason. Explicit wrong year/out-of-period dates are errors. Compare recognized sequences for coverage; never link an unrecognized file to the last missing day. No numeric confidence or unrestricted-language model is required. Duplicate detection runs only after date context exists, regardless of screen order.
 
-Multiple nonblank source values resolving to one DriverAssignment + WorkDate + frozen definition within the same Import are blocking duplicates, including across files, units and layouts. Do not sum or pick a winner. Blank supplies no quantity. Invalid inputs remain traceable and block readiness independently.
+### 3.4 Repeated rows and categories
 
-Separate Imports are allowed to overlap: the later one compares against current facts and exposes ordinary conflicts. A completed-import notice is informational/idempotent protection, not a prohibition on partial later batches.
+Before applying repeated facts, require a confirmed rule: sum by resolved Driver Code within day, or include selected categorical values then sum within that Driver/day. Inspect the selected column, expose distinct scalar values and occurrence counts, and require explicit inclusion/exclusion. Confirm categorical suitability from the actual repeated-value structure; do not classify HOS semantics or invent a fixed distinct-value threshold. Page large category lists under effective response/resource bounds.
+
+Previously confirmed excluded values ignore the whole applicable source row. New categorical values, including an unrecognized blank/type variant, require explicit review rather than implicit exclusion. Preserve category values for review; external-header case normalization does not authorize silently merging category values. Keep traceability of included/excluded rows and selected columns.
+
+Reduce complete eligible contributions to one Driver/day/pay-item quantity. Validate the final quantity through canonical payroll domain rules and apply the existing ordinal calculation once downstream. Missing/invalid identities or dates cannot become an aggregation bucket. No automatic sum is selected merely because repeated rows exist.
 
 ## 4. Compact schema and cutover
 
-### 4.1 Migration authority
+`0094` is historical merged foundation; `0095` is the preserved compact batch schema. Future changes must be forward migrations from the actual current head. Do not rewrite either migration, run implicit reset/reseed, copy preview's divergent migration, or delete canonical Payroll/audit/evidence/history as reconciliation. Detect unsupported staged versions and report a scoped reset/re-upload requirement; do not invent compatibility adapters or pretend old metadata already satisfies new rules.
 
-Main owns `0094`; corrected forward migration `0095` is based directly on it. Do not copy unmerged A2's lookup-index migration or rewrite `0094`.
+Retain Imports, FileSources/source units, compact neutral/source records, PayrollWork records/matches and Driver/day preview groups. Extend File ownership with canonical payload/version/byte identity. Add durable Company/Branch/target-owned immutable rule versions and current-head references, pending per-Import rule references/revisions, sparse review decisions and durable applied-change/evidence links. No fixed columns per pay item, per-value staging table or source-system catalog is needed.
 
-Clean cutover removes disposable A1 PayrollWork staging rather than migrating obsolete per-cell previews. Refuse unsupported non-PayrollWork staging or apparent applied/completed evidence rather than deleting canonical lineage. No canonical payroll/audit/evidence table is reset. Historical `0094` retirement tests remain historical; current-head checks advance separately. Fresh SQL and Alembic authorities must agree.
+Composite ownership must cover Company/Branch/Import/period/definition and every rule/head relationship. JSON payload shape and frozen definition membership remain validated; moving configuration into JSON does not waive ownership checks. Record explicit source/target/canonicalization/rule versions. The version compatibility guard applies to metadata, every preview/issues/source read, mutation and final commit.
 
-### 4.2 Ownership model
+Do not revive the retired dormant matcher/integration schemas. Keep existing schema/route/seed authority checks synchronized when a future migration is actually implemented. Current publication changes no schema or code.
 
-All specialized ownership is Company/Import scoped with composite FKs. Generic Import/source/issue contracts do not require a Driver, worksheet, date or payroll target.
+## 5. Reusable processing and atomic preview
 
-| Table | Role |
-|---|---|
-| Imports | Existing neutral envelope, lifecycle, revision, correlation, idempotency and actors |
-| FileSourceBatches | File-source contract/version and immutable ordered creation manifest; source metadata is not placed on the PayrollWork target |
-| FileSources | Many immutable files per Import, unique batch file ordinal; content/inspection purge markers |
-| FileSourceUnits | File-owned CSV/worksheet identity; selection, header, date provider/order and current layout binding |
-| SourceLayouts | Import-owned structure digest and accepted mapping; transient header/inspection samples kept separate |
-| ImportSourceRecords | Neutral source locator and bounded mapped typed-source payload, one per source row |
-| FileSourceRecords | Source-record -> source unit + physical row; uniqueness is unit + row, not Import + row |
-| PayrollWorkImports | Period ownership, accepted Import fixed-date context, versions, mapping/content/plan fingerprints, counts and future receipt summary; no global ColumnMapping |
-| PayrollWorkRecords | One compact normalized source record: Driver/assignment/date scope, preview-group reference, RowFingerprint, skipped state, supplied-values JSON and issues JSON |
-| PayrollWorkDriverMatches | One scoped identifier match/proposal; later confirmations remain Slice B |
-| PayrollWorkRecordIdentifiers | Source identifier-column associations with their match, never one row per quantity |
-| PayrollWorkPreviewGroups | One Driver + WorkDate grouping (or distinct unresolved/skipped source grouping), severity counts and ownership, without copying every value again |
-| ImportIssues | Neutral batch-level issues where relational issue identity is useful; cell issues remain compact record detail |
+1. Authorize scope/non-driver actor in a short transaction; release it before receive/extraction/materialization.
+2. Admit the complete manifest against effective per-file and aggregate safeguards; stage immutable original/canonical File data atomically.
+3. Load pending or applicable successful rule versions and canonical typed payloads without holding mutation locks.
+4. Resolve identities/dates and source configuration, transform complete quantities, load canonical context set-wise and compute compact normalized records/issues/hashes off-thread.
+5. Prepare bounded transfer streams outside the write transaction. Avoid N+1 payroll queries, Day Grid screen/calculation reads and a second full candidate matrix.
+6. Reauthorize, lock the period before Import, recheck revision/editability and complete relational context, then atomically replace derived preview data/counts/fingerprints.
+7. Close invocation-owned buffers/temp resources on success, rejection, disconnect and rollback. Readers observe complete old or complete new preview state.
 
-There is **no PayrollWorkCells table** in the corrected authority. No fixed Pay Definition columns are added. Sparse future decisions and durable applied-change/evidence links belong to Slice B and do not require materializing every candidate now.
+Source/rule changes advance revision and invalidate dependent preview/decisions. Preserve compatible pending setup on failure. A stale preparation cannot overwrite newer interpretation, rules, payroll context or finalization. Capacity rejection is actionable/retryable, never an unbounded queue. Processing remains synchronous-first; do not add durable execution or polling without a justified separate design.
 
-Normalized values are keyed dynamically by period definition reference with source column, incoming exact quantity/blank state, current source presence/value and outcome. Shared Driver/date/Status/day context is record-level. Source raw values remain in the neutral source payload and are projected for issue/source reads. Guarded relational rows name owners, matches, groups and normalized records; transient per-value data is structured payload.
+## 6. Semantic identities, repeats and preservation review
 
-Database guards repeat Company/Branch/period ownership, immutable file/target identity, payload shape and same-period definition membership, source editability and retention rules. Moving definition references into JSON does not remove ownership validation. Operational capacities are application configuration, not schema maxima.
+Keep byte/creation identity, canonical-file identity, mapped content identity, reviewed plan identity and relational publication staleness distinct. Use versioned deterministic serialization, exact decimals, blank/zero/cache distinction and duplicate-preserving ordering. Generated IDs/audit times do not become public semantic meaning; relational IDs remain ownership references.
 
-## 5. Reusable processing and atomic publication
+Mapping identity covers target frozen meaning, relevant confirmed labels/occurrences, transform/filter/date/identity dependencies and rule version semantics. Unrelated absent columns do not invalidate a target. Content identity covers the complete interpreted mapped input, including repeated-row multiplicity and meaning; ignored/presentation data does not become a new payroll fact. Do not identify repeats solely by equal final totals, one page, filenames or file SHA.
 
-HTTP routes authorize/decode DTOs and invoke application services. File parsing, source-layout interpretation, normalization/validation, current-value comparison and prepared publication are reusable boundaries with no Request dependency. A future durable worker can call them without rewriting the Import domain.
+Before offering changes, recognize a completed equivalent business import within the same Company/Branch/period/target and accepted-rule meaning. Identical completed data is a no-op even after a manual payroll edit: preserve that edit/provenance, explain the completed import and create no fake source mutation/evidence. Changed actual mapped input uses normal comparison/review. Creation retry with the same client key and exact ordered manifest returns existing metadata; a changed manifest conflicts. A new key alone does not make old business data payable again.
 
-1. Authorize Company/Branch/period and non-driver actor in a short read transaction.
-2. Receive/inspect the complete manifest under aggregate admission; no retained connection or period lock during parsing.
-3. Load required bytes/configuration/revision, close the connection, parse selected units once per physical file. XLSX archive safety scanning is once per file per parse, not repeated once per selected worksheet.
-4. Read lean canonical context set-wise; normalize/compare/hash off-thread. No N+1 identity or payroll reads and no Day Grid screen/pay calculation.
-5. Prepare bounded streams/batches outside the write transaction; avoid a second full candidate matrix.
-6. Reauthorize, lock period before Import, recheck revision/editability and complete relational context token.
-7. Replace derived detail and publish all counts/fingerprints atomically in one transaction. Readers see complete old or complete new state. Failures roll back and close all invocation-owned temporary resources.
+**Completed-import notice gap: pending implementation/preservation review, A10.** Preserve the reference test intent for byte/semantic recognition and completed-by/when explanation, adapting it to revised batch/rule semantics and the manual-edit no-op. Do not blindly restore the old single-file notice API.
 
-Source/configuration mutations require expected_revision, increment once and invalidate preview atomically. Stale preparation cannot overwrite newer selection, grouping, mapping, payroll context or finalization. Admission rejection is retryable, never an unbounded in-memory processing queue.
+**Paginated-read version gap: pending implementation/preservation review, A03/A10.** Foundation metadata checks versions, but the shared paginated-read helper lacks equivalent checks. Reconcile a shared supported-version boundary for rows/issues/source reads with ownership/revision/fingerprint checks. Unsupported contracts fail closed; this documentation fixes no code.
 
-## 6. Semantic identities
+## 7. Human preview, APIs and UI boundaries
 
-The generic envelope stays version 1; File batch/file source and PayrollWork target contracts are version **2**, with canonicalization version **3**. Unsupported stored versions fail closed, with reset/re-upload rather than adapters.
+Retain a bounded Driver/day grid with dynamic supplied frozen inputs, exact current/incoming values and complete counts. Missing definitions are absent; mapped blanks, explicit zero, invalid and excluded data remain distinguishable. Provenance and issue/source drilldown must expose every retained candidate through bounded pages, not only summary samples. Do not return the whole workbook.
 
-SHA-256 identities use deterministic versioned canonical UTF-8 JSON, exact Decimal normalization, blank distinct from zero and sorted multisets retaining duplicates. Generated Import/file/unit/layout/source/match/group/period/definition/Driver/assignment IDs and audit timestamps never enter public semantic hashes. Relational IDs remain legitimate ownership/application references.
+Retain creation/detail/preview/rows/issues/source-record/template/cancel service boundaries. Revise their DTOs for one source setup, strict headers, per-target versioned Direct/Sum rules, duplicate occurrence outcomes, category configuration and the selected date authority. Remove multi-sheet/arbitrary-header/regroup choices from the revised supported product interface. Internal source-layout storage is not public permission for the old workflow.
 
-- MappingFingerprint: period business meaning and complete accepted unit/layout/provider contracts. Translate definition references into frozen code/name, InputType/unit, calculation method/version, rate shape and active meaning. Include actual layout assignment/source interpretation, not generated layout IDs.
-- RowFingerprint: a precomputed digest of that unit's accepted semantic mapping/interpretation contract, normalized source identifiers/date and only supplied definitions/values. Invalid mapped date/quantity values retain their relevant raw/type/cache meaning. Ignored raw content cannot change semantic content.
-- ContentFingerprint: accepted mapping semantics and the complete sorted row multiset. It is separate from immutable byte digests.
-- PlanFingerprint: content plus permanent Driver keys, assignment business window/Branch/timezone meaning, relevant current source presence/quantities/Status/day state, outcomes, issues, source provenance and explicit unresolved decision/confirmation state.
+Add authorized read-only effective product/resource policy metadata, consumed by UI messages, upload hints and mapping limits. Bounds are server-enforced and versioned; no independent frontend copies. Extend revisioned draft source-configuration interfaces for the new rules. Slice B alone adds explicit canonical Driver decisions, conflict/exception/exclusion actions, final confirmation/commit and receipt/history reads. DTO validation must obtain adjustable capacities from policy rather than fixed list sizes.
 
-File batch ordinal, worksheet name and physical row/column are source coordinates, not database identities. They disambiguate provenance, including repeated filenames. Byte hashes bind creation/retry identity; they must not leak ignored raw content into semantic content identity. A separate unpublished relational context token rejects stale FK references during preparation/publication.
+Every mutation requires expected revision, editable scope and relevant rule versions. Every page binds to one supported contract/revision/whole-preview fingerprint and consistent read snapshot. Paginate summaries/targets/headers/categories/issues/source data under effective count/byte limits, reporting exact totals and next offsets. New policy values cannot enable an unbounded response.
 
-## 7. Human preview and APIs
-
-### 7.1 Payroll grid
-
-The combined preview is Driver + WorkDate oriented across all selected layouts. Columns are the dynamic union of mapped frozen definitions, with code/name/unit/type from that period. Row values omit unsupplied definitions, explicitly mark mapped blanks and preserve zero. Layout mapping inspection remains separate and lists its source units.
-
-One grid value can cite contributing source records/columns. Every supplied definition appears even when more than five layout groups contribute to one Driver/day. Each value exposes exact candidate and nonblank candidate counts, with at most five deterministic provenance samples, nonblank candidates first. Source-record samples are separately bounded to five, with exact totals and issue counts. Duplicate nonblank candidates display a blocking summary/count, never an arbitrarily chosen incoming value or implicit sum. Bounded source/issue drilldown exposes every retained candidate and physical locator. Internal granular fact iteration is not a public row-per-fact screen contract.
-
-### 7.2 Backend surface
-
-- POST /payroll/periods/{period_id}/imports: ordered multipart batch of one or more repeated file parts; Idempotency-Key required.
-- GET /payroll/imports/{id}: bounded metadata, files/units/layout membership, accepted interpretation/mappings, revision, summaries and preview identity; never file bytes. Mapping targets use target_offset/target_limit (default 50/max 100) and mapping_target_page. Full header labels use header_layout_id/header_offset/header_limit (default/max 25) and header_page. Layout summaries show at most 12 labels of 80 characters, with exact header_count and an explicit truncation flag; they are not the full mapping-inspection contract.
-- PUT /payroll/imports/{id}/interpretation: revisioned selection/header/date-provider changes, including accepted Import fixed date.
-- POST /payroll/imports/{id}/layouts: explicit compatible-unit split/regroup.
-- PUT /payroll/imports/{id}/layouts/{layout_id}/mapping: accept that layout's mapping, invalidate preview.
-- POST /payroll/imports/{id}/preview: build/rebuild read-only combined preview from current accepted source configuration, revision protected.
-- GET /payroll/imports/{id}/rows and /issues: revision/PlanFingerprint-bound paginated grid and issues.
-- GET /payroll/imports/{id}/source-records: paginated source/normalized record provenance; large raw source fields use bounded cell projection/drilldown.
-- GET /payroll/periods/{period_id}/imports/template.xlsx: dynamic frozen-definition template, optionally a selected definition subset; no fixed domain columns.
-- POST /payroll/imports/{id}/cancel: whole uncompleted batch only.
-
-Current page policy: grid default 25/max 100; issues default 50/max 200; source records default 25/max 100, with cell_offset/cell_limit (default 32/max 50). Source-cell pages also project only their associated normalized values and column issues, with whole-record values_count/issue_count; row-level issues remain visible. Thus a single large invalid source record remains fully reachable across bounded pages. Serialized responses, including root metadata, are at most 2,000,000 UTF-8 bytes; a short page exposes its next offset. No whole-workbook response. Severity filters cover errors/warnings/conflicts and counts cover the complete Import. Issue pages include the offending retained value.
-
-Mutating operations require payroll.entry and same-Company/Branch access, non-driver actor, editable period and live Import. Reads require payroll.view or payroll.entry with the same subject/scope boundaries. Register every route in the authorization inventory. No decision, confirmation, exclusion, Status-removal, apply or processing-status endpoint is exposed.
-
-Creation retry binds creator/target/versions plus the entire ordered manifest (filename, type, bytes/size/digest); identical key/input returns current metadata without resurrecting purged detail. Changed input conflicts. New keys may deliberately create additional partial Imports.
+Register every eventual route in authorization inventory. Mutations require payroll.entry and Company/Branch/non-driver boundaries; reads use existing payroll.view/payroll.entry rules. The A12 interface supports setup and read-only preview; it shows unresolved business decisions but cannot pretend a preview is applied or render nonfunctional apply controls.
 
 ## 8. Configurable resource policy
 
-The initial operating defaults below protect one submitted Import, not business cardinalities. They are provisional until the corrected workload evidence is recorded. Increasing configured capacities must not reconstruct schema or add fixed Pay Definition fields.
+| Product setting | Initial default | Owner |
+|---|---:|---|
+| Uploaded bytes/file | 10,000,000 | File intake |
+| Canonical headed-table bytes/file | 1,000,000 | File extraction |
+| Combined source-column occurrences | 40 | Source setup |
+| Currently usable Company pay items | 50 | Canonical definition governance |
+| Branch input concepts including Status | 15 | Effective Branch applicability |
 
-| Capacity | Initial default |
-|---|---:|
-| File bytes | 10,000,000 per file |
-| Aggregate uploaded file bytes | 50,000,000 |
-| Multipart overhead | 256,000 aggregate; existing bounded part headers |
-| Files per batch | 64 |
-| Actual decompressed XLSX bytes | 50,000,000/file; 200,000,000 across the batch |
-| Worksheets/file and source units/batch | 128 each |
-| Layout groups/batch | 64 |
-| Selected rows/unit (including header) | 20,000 |
-| Source columns/unit | 128, including identities/references/ignored fields |
-| Rectangular cells/unit / selected aggregate | 1,000,000 / 2,000,000 |
-| Selected data rows/batch | 50,000 |
-| Mapped quantity candidates/batch | 250,000, including blanks/errors |
-| Text/cell | 8,000 UTF-8 bytes |
-| Inspection metadata bytes | 4,000,000, with bounded header samples |
-| Concurrent heavy requests/process | 2, with immediate 429 and Retry-After |
+Centralize defaults once; existing Settings loads deployment overrides and supplies validated immutable product/resource policy objects. Product growth changes configured allowances, not database cardinality CHECKs, fixed pay-item fields or duplicated route/UI constants. Expose effective values and stable reasons to authorized clients. No policy editing UI or company entitlement system is required.
 
-These are configurable operational ceilings, never schema CHECK maxima for Driver/definition/file/layout counts. Aggregate byte/decompression/unit metadata checks cover the entire uploaded batch; selected-row/candidate checks cover the whole selected workload across every layout, so splitting does not bypass them. Reject atomically with actionable errors, never truncate or accept an incomplete plan.
+Keep separate operational policy for actual batch files/upload bytes/decompressed bytes, physical columns/rows/cells/candidates, text/XML/package work, preview page/response bytes and concurrent heavy requests. Preserve applicable existing defaults until revised realistic benchmarks justify final aggregate values; do not claim all maximum combinations fit. Avoid unrelated numerical cleanup outside these boundaries.
 
-Preserve actual-content checks, malformed/incomplete multipart refusal, filename/header bounds, ZIP path/encryption/member/CRC/actual inflated-byte checks, XML DTD/entity/depth protections, macro rejection, actual coordinates rather than forged dimensions, bounded CSV decoding and formula non-evaluation. Retain the generous 4,096 package-member and 256 XML-depth safety ceilings separately from business capacity. Workbook processing must validate the complete package before openpyxl performs member reads.
+Capture effective admission-policy identity for diagnostics/preview validation. A policy value increase alone does not change a source's business meaning or invalidate compatible saved mappings. New operations obey current safety/capacity checks; existing completed history and frozen payroll snapshots are never rewritten because a limit changes. If a lowered allowance makes a pending operation unacceptable, return the actual current limit and retain recoverable setup rather than truncating.
 
-The million-cell rectangle is a parser/security ceiling, not a million relational payroll-cell acceptance target. Default capacity includes the agreed monthly and rare benchmark shapes with room for identity/reference/ignored columns. Final evidence must justify retaining or revising operational defaults without silently removing the agreed capabilities.
+Count currently usable definitions in canonical direct-create/approval/activation/retirement writers, serialized with compatible scope locks and existing global lock order. Branch checks use effective-dated applicability and include Status once, not once per selectable Status value. Enforce proposed future activation states so deferred changes do not create a later over-capacity branch. Retirement releases usable slots without deleting structure/rates/provenance or changing frozen periods. Preserve existing data and report capacity mismatches; do not silently retire items or reset data to meet a new default.
 
-## 9. Retention and future bulk authority
+Storage precision, protocol versions, supported formats, one-sheet/table structure and mathematical validity are explicit contracts, not deployment knobs. Retain exact canonical payroll normalization and existing ordinal topology; no configurable six-tier ceiling is introduced in C2.
 
-### 9.1 Finalization
+## 9. Retention and Slice B canonical application
 
-Import owns cleanup, invoked inside canonical Payroll finalization after period lock/Locked transition. Lock ordered Imports after the period. Purge every file's bytes/inspection, unit/layout inspection samples, source records/typed payloads, identifiers/matches, normalized values/issues and preview groups/plan state, including never-completed/cancelled Imports.
+Import owns detail cleanup, invoked inside canonical finalization after the period lock. Lock Imports in deterministic order and purge every original/canonical file payload, inspection sample, source/normalized record, transient match/issue/group and current plan detail, including cancelled/never-completed imports. Failure rolls back complete finalization. Finalized periods cannot recreate detail. Keep file manifest/digests, accepted rule versions, receipt/audit metadata and legitimate mapping/content identities; current Branch setup must survive file purge.
 
-Retain envelope/file manifest metadata, accepted unit/provider/header interpretation, layout mapping/identity, mapping/content fingerprints and legitimate receipt/audit metadata. ReviewSummary currently retains only aggregate preview counts, not a fabricated completion receipt. Set the target DetailPurgedAtUtc marker once per Import; never depend on its file count or completion state to discover cleanup work. The narrowly scoped retention exception permits only those removals/clears; finalized periods cannot recreate detail. A failure rolls back complete finalization. All temporary preparation streams are invocation-owned and removed independently of durable Import completion.
+Slice B binds explicit decisions to reviewed incoming/current values, Status/day state, identities and affected rule-head revisions. Revalidate under canonical currency -> period -> Import lock order. Any rule-head locks used for final activation follow that order and a deterministic target order; no inverse path or late Branch-configuration lock may be introduced. Staleness refuses everything atomically.
 
-### 9.2 Internal canonical bulk quantity boundary
+Use canonical Status authority to remove only explicitly accepted conflicting full-day-off Statuses, preserving notes, then the existing Payroll-owned set-based quantity writer for reviewed adds/changes/explicit zeros. Keep source validation, date eligibility/rescue, Status conflicts, actual-change-only audit/SOURCE evidence, shared correlation and unchanged provenance. Do not call interactive per-cell writes thousands of times or disable guards.
 
-Before A3, implement or conclusively measure a canonical Payroll-owned bulk boundary, not an Import-owned parallel payroll writer. It accepts explicitly reviewed supplied quantity changes; it has no HTTP apply endpoint and does not choose conflicts.
+Actual imported changes use `SourceType=Import`; unchanged facts retain their current provenance. Manual/public quantity writes must use `Manual`, including manual edits of imported values, rather than trusting a client-supplied Import label. Apply these source semantics through canonical writers and retain their regression coverage in Slice B.
 
-Authority scope is Company currency lock -> period mutation lock -> future caller's Import lock. Authorize/non-driver/Branch access once, validate the complete change set using frozen definitions, canonical quantity rules, period days, live/snapshot date eligibility and exact-date rescue. Reject duplicate target keys and stale expected current presence/quantities. Positive source cannot coexist with a held full-day-off Status. Notes and unsupplied definitions are untouched.
+In one transaction, persist actual-change/evidence links, receipt, successful completion and current-head activation for the affected pending rule versions. No-op quantities create no fake evidence; completed-data repeats preserve later manual edits. Failed/stale/uncompleted imports do not promote mappings. Missing rows/values and incomplete sums never clear existing payroll. Receipt/history and permitted purge must remain truthful about what actually completed.
 
-Diff under the lock; no-op quantities produce no fake mutation. Add/update/void canonical DraftLines set-wise, retaining all production constraints and triggers. Imported actual changes use Import source semantics; unchanged facts keep their provenance. No Status removal/decision is performed.
+## 10. Twelve-stage Slice A and complete acceptance
 
-Use canonical SOURCE audit-evidence ownership and participant snapshot/coverage semantics. Emit one generic audit row and immutable SOURCE evidence event per actual change, with exact before/after target/quantity/source/status/notes and a shared correlation. Resolve relational IDs set-wise, reuse actor evidence across the batch and retain transactional rollback. Do not call the interactive mutation function thousands of times or disable production guards.
+A01-A12 are the revised sequential delivery identifiers. Historical A1/A2/A3 describe the earlier three-mission baseline only. Each stage depends on the preceding accepted/reviewed stage; baseline code can be reused only with fresh evidence for its revised responsibility.
 
-Tests must prove authorization, stale inputs, inactive/nonoperational definitions, precision/WholeNumber rules, date eligibility/rescue, off-Status rejection, unchanged/omitted facts, Import source semantics, create/update/void, audit/evidence completeness, correlation, rollback on evidence failure, and lock ordering. Measure realistic large changes with all real constraints/audit/evidence active. Bulk feasibility is a separate pre-A3 gate; no public Slice B workflow is authorized here.
+| Stage | Owned delivery | Required focused verification |
+|---|---|---|
+| A01 | Central product/resource policy and authorized effective-policy metadata | Startup validation; changed defaults/overrides; backend/UI metadata consistency |
+| A02 | Canonical Company/Branch capacity governance and retirement semantics | Concurrent creation/activation; effective-date boundaries; retirement frees slots; frozen history unchanged |
+| A03 | Forward schema/rule-version, lifecycle, ownership, retention and staleness foundation | SQL/Alembic parity; scope/version guards; purge/rollback/finalization races |
+| A04 | Strict per-file table inspection and bounded canonical extraction | Exact upload/canonical byte boundaries; styles/hidden/headerless data; formulas/cache/precision/types; unsafe packages |
+| A05 | One-source batch/header compatibility and combined occurrence accounting | Repeated daily files; partial overlap; duplicate count; disjoint/over-limit atomic rejection |
+| A06 | Pending per-target mappings, Direct/Sum and duplicate-header outcomes | Missing-input skip/warn; invalid operands; no quantity reuse; unaffected/current rules preserved |
+| A07 | Permanent Driver identification and discrepancy discovery | Known code/name mismatch; unknown code; same-name different codes; isolation and no master writes |
+| A08 | Chosen date authority, supported inference and explainable date review | Written months/patterns/year inference; wrong-year rejection; chosen-provider authority; no missing-day guesses |
+| A09 | Repeated-row aggregation and categorical filter preparation | Correct date context; explicit rules; new values; exclusions; incomplete-group withholding; final ordinal quantity |
+| A10 | Accurate compact preview, semantic repeat recognition and bounded reads | Whole-content hashes; current facts/eligibility; repeat after manual edit; version/revision/page/provenance completeness |
+| A11 | Integrated backend review, revised workload and deployment acceptance | Real guarded workloads, locks/memory/ordinary-read responsiveness; independent review and actual budget decision |
+| A12 | Connected source-setup and read-only preview UI | Authorized setup/preview/recovery; effective limits; bounded pages; zero payroll writes and no apply controls |
 
-## 10. Verification and acceptance
+A03 establishes retention and scope/version protection before revised intake exposure. Every stage keeps isolation and zero payroll-source writes; A11 is not permission to postpone those checks. Draft transform/category/date configuration is preparation; canonical identity/conflict/exception acceptance, current-rule promotion, final application and receipt completion remain Slice B after A12 acceptance.
 
-Focused verification covers fresh 0094 -> corrected 0095 cutover, disposable staging reset without canonical changes, SQL/Alembic equivalence, schema guards, canonical seed/reset, multi-file/unit/layout ownership, partial coverage, all four date providers, ambiguous context acceptance, 31-file and 31-worksheet cases, dynamic heterogeneous mappings, duplicate targets across sources, stable identity before eligibility, semantic fingerprints across surrogate IDs/layout changes, paging/bounds, stale publication races, no preview payroll writes and atomic retention.
+Benchmark realistic compatible daily CSV/single-sheet XLSX, partial-column variants, lawful input counts, at/beyond canonical-byte boundaries, issue-heavy and repeated-row/category cases. Record total/phase time, locked publication/refresh/purge time, memory/temp behavior and authenticated read responsiveness with all guards/audit/evidence active where applicable. Compare like inputs; do not relabel the historical multi-sheet/20-definition scenarios as revised acceptance.
 
-Benchmark representative input, dense 150 Driver × 31 day × 20 definition input (93,000 potential facts), and approximately 10,000 source rows/200,000 candidates. Include heterogeneous groups, daily CSV files and daily XLSX sheets. Record parsing/normalization/preview/preparation/publication, lock/transaction duration, memory/temp resources, ordinary authenticated-read responsiveness and internal bulk canonical writes. Compare explicitly to the old guarded relational-cell publication and purge costs.
+Synchronous HTTP suitability remains unestablished without an authoritative request/proxy deadline and per-process memory/concurrency budget. A11 cannot pass the deployment gate, and A12 cannot bypass it, on an invented threshold. If measured evidence justifies durable execution, return a separately approved minimal design; do not implement jobs/polling speculatively.
 
-Synchronous-first remains current architecture. No authoritative request/proxy budget was found in repository configuration: the development Uvicorn launcher supplies none. Measure the corrected engine before deciding suitability. Do not invent a latency threshold. If no authoritative budget exists, state that synchronous HTTP suitability is not established. If evidence establishes the need for durable work, stop before A3 and return the smallest justified durable-worker design as a next task; do not silently build it here.
-
-Historical unmerged A2 evidence: 939,953-cell CSV publication was about 100.75 s (68 s after COPY), refresh about 97 s publication, process peak about 1.25 GB before compact in-memory changes, and purge about 23–25 s. Guard/FK work per persisted value dominated. These explain this refoundation; they are not the new product acceptance workload.
-
-No A3 UI or public Slice B decisions/apply are included. Final acceptance requires reviewed measurements, retained safety/canonical invariants, and a satisfactory bulk-write feasibility result.
+Slice B acceptance additionally proves user decisions, existing day-off/held-Status behavior, stale refusal/no writes, exact reviewed changes/evidence/receipt, active-rule atomicity, idempotent completion/manual-edit preservation, rollback and completed-import retention. Dedicated Status import and a new ordinal tier cap remain separately deferred. Follow AGENTS.md focused verification; a final full-suite confidence run is manual, not an automatic implementation runner.
 
 ## 11. Measured backend evidence and remaining gate
+
+> Historical baseline evidence from implementation 9e03a66. Every result, acceptance statement, capacity, internal section reference and A1/A2/A3 label in this section refers to that earlier design. It does not certify the revised contract or mark A01-A12 complete. The historical A3 UI gate corresponds to the revised A11/A12 acceptance boundary. Measurements and reproduction details are retained verbatim below.
 
 Measured 2026-10-26 on Windows 11 x64, 12 logical processors, Python 3.12.10 and PostgreSQL 18.4. The scripts use a disposable production-schema PostgreSQL cluster, real application services through HTTPX ASGITransport, ordinary authenticated period GET probes, and production constraints/guards/audit/evidence. Each Import workload has a fresh process, so working-set peaks include interpreter/fixture overhead but do not carry forward another scenario's peak. These are development-host observations, not network/proxy measurements or statistical production SLOs; repeated runs varied with host load/cache state.
 
