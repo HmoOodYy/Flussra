@@ -14,7 +14,7 @@ from datetime import date
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from app.compensation import branch_config, definitions, resolver, schedules
 from app.compensation.driver_context import (
@@ -124,10 +124,13 @@ async def submit_request(
              response_model=PayDefinitionRequestSummary,
              summary="Return, reject or approve a pending PayDefinition request")
 async def decide_request(
-    token: TokenDep, db: DbDep, request_id: UUID, body: PayDefinitionRequestDecision,
+    request: Request, token: TokenDep, db: DbDep, request_id: UUID,
+    body: PayDefinitionRequestDecision,
 ) -> PayDefinitionRequestSummary:
     company_id, user_id = _ids(token)
-    return await definitions.decide_request(company_id, user_id, request_id, body, db)
+    return await definitions.decide_request(
+        company_id, user_id, request_id, body, db,
+        policy=request.app.state.settings.product_policy)
 
 
 @router.post("/pay-definition-requests/{request_id}/copy",
@@ -143,10 +146,11 @@ async def copy_request(
 @router.post("/pay-definitions", response_model=PayDefinitionSummary, status_code=201,
              summary="Create a Company PayDefinition directly")
 async def create_pay_definition(
-    token: TokenDep, db: DbDep, body: PayDefinitionDirectCreate,
+    request: Request, token: TokenDep, db: DbDep, body: PayDefinitionDirectCreate,
 ) -> PayDefinitionSummary:
     company_id, user_id = _ids(token)
-    return await definitions.create_direct(company_id, user_id, body, db)
+    return await definitions.create_direct(
+        company_id, user_id, body, db, policy=request.app.state.settings.product_policy)
 
 
 @router.get("/pay-definitions", response_model=list[PayDefinitionSummary],
@@ -204,12 +208,13 @@ async def list_branch_pay_definitions(
               response_model=BranchPayDefinitionState,
               summary="Set a PayDefinition's applicability to one Branch")
 async def update_branch_pay_definition(
-    token: TokenDep, db: DbDep, branch_id: int, pay_definition_id: int,
+    request: Request, token: TokenDep, db: DbDep, branch_id: int, pay_definition_id: int,
     body: BranchConfigUpdate,
 ) -> BranchPayDefinitionState:
     company_id, user_id = _ids(token)
     return await branch_config.update_branch_config(
-        company_id, user_id, branch_id, pay_definition_id, body, db)
+        company_id, user_id, branch_id, pay_definition_id, body, db,
+        policy=request.app.state.settings.product_policy)
 
 
 @router.get("/branches/{branch_id}/pay-definitions/{pay_definition_id}/history",
@@ -227,11 +232,13 @@ async def branch_pay_definition_history(
               response_model=BulkBranchConfigResult,
               summary="Set a PayDefinition's applicability across several Branches atomically")
 async def bulk_update_branch_pay_definition(
-    token: TokenDep, db: DbDep, pay_definition_id: int, body: BulkBranchConfigUpdate,
+    request: Request, token: TokenDep, db: DbDep, pay_definition_id: int,
+    body: BulkBranchConfigUpdate,
 ) -> BulkBranchConfigResult:
     company_id, user_id = _ids(token)
     return await branch_config.bulk_update_branch_config(
-        company_id, user_id, pay_definition_id, body, db)
+        company_id, user_id, pay_definition_id, body, db,
+        policy=request.app.state.settings.product_policy)
 
 
 # ---------------------------------------------------------------------------

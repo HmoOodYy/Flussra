@@ -1,6 +1,6 @@
 # Flussra C2 Import Design — Strict Reusable Ordinary Work
 
-**Authority:** Implements the [canonical product contract](FLUSSRA_C2_IMPORT_CONTRACT.md) and [complete delivery plan](FLUSSRA_C2_IMPORT_PLAN.md), revised 2026-10-26. This is a documentation-only reconciliation. Described changes remain planned until separately implemented and verified. Slice A has twelve sequential stages A01-A12; Slice B owns final decisions and application.
+**Authority:** Implements the [canonical product contract](FLUSSRA_C2_IMPORT_CONTRACT.md) and [complete delivery plan](FLUSSRA_C2_IMPORT_PLAN.md), revised 2026-10-26. A01 configurable policy and A02 canonical capacity governance are implemented and focused-verified; A03-A12 remain planned. Slice A has twelve sequential stages A01-A12; Slice B owns final decisions and application.
 
 **Preserved baseline:** `codex/c2-import-foundation`, implementation `9e03a66`, documentation through `f15bf96`; merged historical A1 at `337e3f7`, schema head `0095`. Preserve these commits and canonical facts/evidence. Divergent preview `6498453` is reference only. The existing compact backend and Payroll-owned bulk boundary are useful implementation assets, not evidence that the revised source/rule/UI contract is already built. Historical workload evidence remains in §11.
 
@@ -82,7 +82,7 @@ Retain Imports, FileSources/source units, compact neutral/source records, Payrol
 
 Composite ownership must cover Company/Branch/Import/period/definition and every rule/head relationship. JSON payload shape and frozen definition membership remain validated; moving configuration into JSON does not waive ownership checks. Record explicit source/target/canonicalization/rule versions. The version compatibility guard applies to metadata, every preview/issues/source read, mutation and final commit.
 
-Do not revive the retired dormant matcher/integration schemas. Keep existing schema/route/seed authority checks synchronized when a future migration is actually implemented. Current publication changes no schema or code.
+Do not revive the retired dormant matcher/integration schemas. A02 capacity enforcement requires no schema change. Keep schema, route and seed authority checks synchronized with the forward migrations owned by A03 and later stages.
 
 ## 5. Reusable processing and atomic preview
 
@@ -130,7 +130,7 @@ Register every eventual route in authorization inventory. Mutations require payr
 | Currently usable Company pay items | 50 | Canonical definition governance |
 | Branch input concepts including Status | 15 | Effective Branch applicability |
 
-Centralize defaults once; existing Settings loads deployment overrides and supplies validated immutable product/resource policy objects. Product growth changes configured allowances, not database cardinality CHECKs, fixed pay-item fields or duplicated route/UI constants. Expose effective values and stable reasons to authorized clients through `GET /payroll/periods/{period_id}/imports/policy`. The projection reports configured allowances; Company/Branch capacities and source-shape limits are enforced in their later A02/A04/A05 stages. No policy editing UI or company entitlement system is required.
+Centralize defaults once; existing Settings loads deployment overrides and supplies validated immutable product/resource policy objects. Product growth changes configured allowances, not database cardinality CHECKs, fixed pay-item fields or duplicated route/UI constants. Expose effective values and stable reasons to authorized clients through `GET /payroll/periods/{period_id}/imports/policy`. The projection reports configured allowances. A02 enforces canonical Company/Branch capacities; source-shape limits remain assigned to A04/A05. No policy editing UI or company entitlement system is required.
 
 Keep separate operational policy for actual batch files/upload bytes/decompressed bytes, physical columns/rows/cells/candidates, text/XML/package work, preview page/response bytes and concurrent heavy requests. Preserve applicable existing defaults until revised realistic benchmarks justify final aggregate values; do not claim all maximum combinations fit. Avoid unrelated numerical cleanup outside these boundaries.
 
@@ -148,7 +148,7 @@ Storage precision, protocol versions, supported formats, one-sheet/table structu
 
 Configuration requires positive integer capacities and page defaults no larger than their maxima; invalid configuration fails before the application serves requests and must not print secret settings in validation errors. Omitted page limits resolve from effective policy, explicit limits are checked against its maximum, and response-byte enforcement includes final metadata/continuation fields. Changing environment configuration requires application re-creation/restart; there is no runtime policy-edit endpoint. Policy objects are immutable, and the UI contract reads effective values instead of copying literals.
 
-This API reports configured product allowances. Their downstream Company/Branch count enforcement (A02), canonical extraction limit (A04) and combined-column semantics (A05) are not implied by the policy metadata. Existing operational admission/response bounds consume the effective resource policy now; historical workload evidence in §11 does not validate arbitrary increased settings.
+This API reports configured product allowances; canonical Company/Branch count enforcement is implemented in A02, while canonical extraction limits (A04) and combined-column semantics (A05) remain planned and are not implied by policy metadata. Existing operational admission/response bounds consume the effective resource policy now; historical workload evidence in §11 does not validate arbitrary increased settings.
 
 ## 9. Retention and Slice B canonical application
 

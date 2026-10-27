@@ -24,6 +24,7 @@ from app.access.policy import require_non_driver_subject
 from app.branch_compensation_config_concurrency import lock_branch_compensation_config
 from app.business_clock import branch_today
 from app.compensation.audit import write_audit
+from app.compensation.capacity import enforce_branch_input_capacity
 from app.compensation.errors import compensation_error
 from app.compensation.schemas import (
     BranchConfigTarget,
@@ -35,6 +36,7 @@ from app.compensation.schemas import (
     BulkBranchConfigUpdate,
     RateComponentSummary,
 )
+from app.product_policy import DEFAULT_PRODUCT_POLICY, ProductPolicy
 
 _CONFIG_EDIT = ["payitems.edit", "setup.manage"]
 
@@ -112,7 +114,7 @@ async def resolve_activation_date(
 
 async def activate_for_requesting_branch(
     db: AsyncConnection, *, company_id: int, branch_id: int, pay_definition_id: int,
-    user_id: int,
+    user_id: int, policy: ProductPolicy = DEFAULT_PRODUCT_POLICY,
 ) -> None:
     """Activate a newly approved PayDefinition for the Branch that requested it."""
     await lock_branch_compensation_config(company_id, branch_id, db)
@@ -120,7 +122,8 @@ async def activate_for_requesting_branch(
     effective_from, _ = await resolve_activation_date(company_id, branch_id, None, today, db)
     await apply_config(
         db, company_id=company_id, branch_id=branch_id, pay_definition_id=pay_definition_id,
-        user_id=user_id, is_active=True, notes=None, effective_from=effective_from)
+        user_id=user_id, is_active=True, notes=None, effective_from=effective_from,
+        policy=policy, today=today)
 
 
 async def _require_branch_in_company(
@@ -155,6 +158,7 @@ async def _lock_definition(
 async def apply_config(
     db: AsyncConnection, *, company_id: int, branch_id: int, pay_definition_id: int,
     user_id: int, is_active: bool, notes: str | None, effective_from: date,
+    policy: ProductPolicy = DEFAULT_PRODUCT_POLICY, today: date | None = None,
 ) -> tuple[str, int]:
     """Write one branch's configuration for a PayDefinition with full versioning.
 
@@ -162,6 +166,8 @@ async def apply_config(
     taking it here as well keeps any future caller inside the same authority.
     """
     await lock_branch_compensation_config(company_id, branch_id, db)
+    definition = await _lock_definition(company_id, pay_definition_id, db)
+    _require_activatable(definition, is_active)
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"branch-pay-definition-config:{company_id}:{branch_id}:{pay_definition_id}"},
@@ -245,6 +251,11 @@ async def apply_config(
                 "CONFIG_VERSION_OVERLAP",
                 "The effective date overlaps an existing configuration version.", 409) from exc
         raise
+
+    if is_active:
+        decision_date = today or await branch_today(company_id, branch_id, db)
+        await enforce_branch_input_capacity(
+            company_id, branch_id, min(decision_date, effective_from), db, policy)
 
     await write_audit(
         db, company_id=company_id, branch_id=branch_id, user_id=user_id,
@@ -372,7 +383,8 @@ def _require_activatable(definition: dict, is_active: bool) -> None:
 
 async def update_branch_config(
     company_id: int, user_id: int, branch_id: int, pay_definition_id: int,
-    data: BranchConfigUpdate, db: AsyncConnection,
+    data: BranchConfigUpdate, db: AsyncConnection, *,
+    policy: ProductPolicy = DEFAULT_PRODUCT_POLICY,
 ) -> BranchPayDefinitionState:
     await check_any_permission(company_id, user_id, branch_id, _CONFIG_EDIT, db)
     await _require_branch_in_company(company_id, branch_id, db)
@@ -389,7 +401,7 @@ async def update_branch_config(
     await apply_config(
         db, company_id=company_id, branch_id=branch_id, pay_definition_id=pay_definition_id,
         user_id=user_id, is_active=data.is_active, notes=data.notes,
-        effective_from=effective_from)
+        effective_from=effective_from, policy=policy, today=today)
     return await _state_for(
         company_id, branch_id, pay_definition_id, today, db,
         has_open_periods=period_end is not None)
@@ -397,7 +409,7 @@ async def update_branch_config(
 
 async def bulk_update_branch_config(
     company_id: int, user_id: int, pay_definition_id: int, data: BulkBranchConfigUpdate,
-    db: AsyncConnection,
+    db: AsyncConnection, *, policy: ProductPolicy = DEFAULT_PRODUCT_POLICY,
 ) -> BulkBranchConfigResult:
     await check_any_permission(company_id, user_id, None, _CONFIG_EDIT, db)
 
@@ -428,14 +440,14 @@ async def bulk_update_branch_config(
     definition = await _lock_definition(company_id, pay_definition_id, db)
     _require_activatable(definition, data.is_active)
 
-    validated: list[tuple[dict, date]] = []
+    validated: list[tuple[dict, date, date]] = []
     errors: list[dict] = []
     for row in rows:
         try:
             today = await branch_today(company_id, row["branchid"], db)
             resolved, _ = await resolve_activation_date(
                 company_id, row["branchid"], data.effective_from, today, db)
-            validated.append((dict(row), resolved))
+            validated.append((dict(row), today, resolved))
         except HTTPException as exc:
             errors.append({"branch_id": row["branchid"], "branch_name": row["branchname"],
                            "error": exc.detail["message"]})
@@ -447,11 +459,12 @@ async def bulk_update_branch_config(
             "branch_errors": errors})
 
     results: list[BulkBranchConfigBranchResult] = []
-    for row, effective_from in validated:
+    for row, today, effective_from in validated:
         action, config_id = await apply_config(
             db, company_id=company_id, branch_id=row["branchid"],
             pay_definition_id=pay_definition_id, user_id=user_id,
-            is_active=data.is_active, notes=data.notes, effective_from=effective_from)
+            is_active=data.is_active, notes=data.notes, effective_from=effective_from,
+            policy=policy, today=today)
         results.append(BulkBranchConfigBranchResult(
             branch_id=row["branchid"], branch_name=row["branchname"],
             status=_ACTIONS[action], config_id=config_id, effective_from=effective_from))
