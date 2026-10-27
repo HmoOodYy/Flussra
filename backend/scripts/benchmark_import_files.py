@@ -1,6 +1,7 @@
 """Measure compact multi-file/layout preview on disposable production-schema databases.
 
-Run from backend with Python 3.12: python -m scripts.benchmark_import_files
+Run from backend with Python 3.12: python -m scripts.benchmark_import_files --scenario current
+Named historical presets remain reference workloads and may exceed current product rules.
 Each workload runs in its own process; peak working set includes fixture overhead.
 No application database or public apply endpoint is used.
 """
@@ -394,9 +395,24 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                     (SELECT count(*) FROM import.filesources WHERE importid=:iid) AS files,
                     (SELECT count(*) FROM import.filesourceunits WHERE importid=:iid) AS units,
                     (SELECT count(*) FROM import.sourcelayouts WHERE importid=:iid) AS layouts"""), params)).mappings().one())
+                canonical_files = []
                 if scene in CURRENT_SCENARIOS:
                     counts["pending_rules"] = await db.scalar(text(
                         "SELECT count(*) FROM import.PayrollWorkPendingRules WHERE ImportID=:iid"), params)
+                    canonical_files = [dict(row) for row in (await db.execute(text("""
+                        SELECT f.fileordinal AS ordinal, f.originalfilename AS filename,
+                               f.filesizebytes AS uploaded_bytes, c.FormatVersion AS format_version,
+                               c.ByteCount AS canonical_bytes, c.HashSha256 AS sha256
+                        FROM import.FileSources f
+                        LEFT JOIN import.FileCanonicalData c
+                          ON c.FileSourceID=f.FileSourceID AND c.ImportID=f.ImportID AND c.CompanyID=f.CompanyID
+                        WHERE f.ImportID=:iid AND f.CompanyID=:cid ORDER BY f.FileOrdinal
+                    """), params)).mappings()]
+                    counts["canonical_file_data"] = sum(row["format_version"] is not None for row in canonical_files)
+                    counts["canonical_bytes"] = sum(row["canonical_bytes"] or 0 for row in canonical_files)
+                    assert len(canonical_files) == len(files)
+                    assert all(row["format_version"] == 1 and row["canonical_bytes"] is not None and row["canonical_bytes"] > 0 and row["sha256"]
+                               for row in canonical_files)
             assert counts["canonical_lines"] == counts["source_events"] == 0
             query = {"expected_revision": refreshed["revision"], "plan_fingerprint": refreshed["preview"]["plan_fingerprint"]}
             response_sizes = {}
@@ -428,6 +444,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 "file_bytes": sum(len(data) for _, data in files), "initial_memory": initial_memory,
                 "file_shapes": _file_shapes(files) if scene in CURRENT_SCENARIOS else None,
                 "ingress": ingress, "preview": initial, "refresh": refresh, "counts": counts,
+                "canonical_files": canonical_files if scene in CURRENT_SCENARIOS else None,
                 "preview_counts": preview["preview"]["counts"], "purge_seconds": purge,
                 "purge_sql_write_seconds": purge_statements,
                 "page_response_bytes": response_sizes, "final_memory": memory_snapshot(),
@@ -435,8 +452,8 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 "cleanup_plans": cleanup_plans,
                 "temporary_files_left": sorted(str(path) for path in set(Path(tempfile.gettempdir()).iterdir()) - temporary_before),
                 "effective_policy": policy_metadata,
-                "coverage": ({"legal_policy_shape": True, "canonical_extraction_and_admission": False,
-                    "canonical_byte_measurement": False,
+                "coverage": ({"legal_policy_shape": True, "canonical_extraction_and_admission": True,
+                    "canonical_byte_measurement": True,
                     "combined_column_enforcement": False, "full_mapping_identity_date_aggregation_and_repeat_semantics": False,
                     "final_revised_contract_acceptance": False} if scene in CURRENT_SCENARIOS else None)}
         finally:
@@ -449,7 +466,8 @@ async def measure(scene, dsn, *, profile_cleanup=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=(*SCENARIOS, *CURRENT_SCENARIOS, "current", "all"), default="all")
+    parser.add_argument("--scenario", choices=(*SCENARIOS, *CURRENT_SCENARIOS, "current", "all"),
+                        default="current", help="Current supported daily shapes by default; named legacy presets are reference workloads.")
     parser.add_argument("--profile-cleanup", action="store_true",
                         help="Instrument real group deletion/FK lookup with EXPLAIN ANALYZE (extra overhead).")
     parser.add_argument("--output", type=Path, default=ROOT / ".artifacts/import-batch-benchmark.json")

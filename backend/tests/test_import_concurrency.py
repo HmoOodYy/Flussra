@@ -74,7 +74,7 @@ async def test_concurrent_creation_uses_key_uniqueness_and_exact_identity(
         assert (await db.execute(text("SELECT count(*) FROM import.imports WHERE companyid = :cid"), {"cid": tenant.company_id})).scalar_one() == 1
 
 
-async def test_concurrent_interpretation_rechecks_revision_after_parsing(p3c_client, p3c_engine, tenant):
+async def test_concurrent_interpretation_rechecks_revision_before_commit(p3c_client, p3c_engine, tenant):
     period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
     created = await upload(p3c_client, tenant, period, uuid4())
     iid = created.json()["import_id"]
@@ -82,7 +82,7 @@ async def test_concurrent_interpretation_rechecks_revision_after_parsing(p3c_cli
     source_unit_id = created.json()["files"][0]["units"][0]["source_unit_id"]
     outcomes = await asyncio.gather(*(p3c_client.put(path,
         json={"expected_revision": 1, "units": [{"source_unit_id": source_unit_id,
-            "selected": True, "header_row_number": 2, "date_order": order}]}, headers=tenant.admin)
+            "selected": True, "header_row_number": 1, "date_order": order}]}, headers=tenant.admin)
         for order in ("DMY", "MDY")))
     assert sorted(response.status_code for response in outcomes) == [200, 409]
     refused = next(response for response in outcomes if response.status_code == 409)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import threading
 from decimal import Decimal
 from uuid import uuid4
@@ -114,19 +113,6 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
         response = await upload(p3c_client, tenant, pid, data)
         assert response.status_code == 200, response.text
         iid = response.json()["import_id"]
-        canonical_payload = b'{"canonical_file_version":1}'
-        async with p3c_engine.begin() as db:
-            file_id = (await db.execute(text("""
-                SELECT FileSourceID FROM import.FileSources
-                WHERE ImportID=:iid AND CompanyID=:cid
-            """), {"iid": iid, "cid": tenant.company_id})).scalar_one()
-            await db.execute(text("""
-                INSERT INTO import.FileCanonicalData
-                    (FileSourceID, ImportID, CompanyID, FormatVersion, Payload, ByteCount, HashSha256)
-                VALUES (:file_id, :iid, :cid, 1, :payload, :byte_count, :digest)
-            """), {"file_id": file_id, "iid": iid, "cid": tenant.company_id,
-                   "payload": canonical_payload, "byte_count": len(canonical_payload),
-                   "digest": hashlib.sha256(canonical_payload).hexdigest()})
         if desired in ("NeedsReview", "Completed"):
             preview = await _map_and_preview(p3c_client, tenant, response.json(), definition_id)
             assert preview["status"] == "NeedsReview"
@@ -158,6 +144,8 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
         read = await p3c_client.get(f"/payroll/imports/{iid}", headers=tenant.admin)
         assert read.status_code == 200, read.text
         assert read.json()["files"][0]["content_purged_at"] is not None
+        assert read.json()["files"][0]["canonical_format_version"] == 1
+        assert read.json()["files"][0]["canonical_data_bytes"] > 0
         assert read.json()["source_editable"] is False
         assert read.json()["preview"]["summary"] == before[14]
 
@@ -203,9 +191,8 @@ async def test_purge_and_finalization_failures_roll_back_the_entire_lifecycle(
     assert period_evidence_counts(tenant, scenario.period) == evidence_before
 
 
-@pytest.mark.parametrize("operation", ["upload", "reinterpret"])
-async def test_finalization_during_parser_work_cannot_recreate_details(
-    p3c_client, p3c_engine, tenant, monkeypatch, operation,
+async def test_finalization_during_upload_parsing_cannot_recreate_details(
+    p3c_client, p3c_engine, tenant, monkeypatch,
 ):
     scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
     data, _definition_id = await _valid_file(p3c_engine, tenant, scenario.period_id)
@@ -214,7 +201,6 @@ async def test_finalization_during_parser_work_cannot_recreate_details(
     iid = created.json()["import_id"]
     parser_entered, parser_release = threading.Event(), threading.Event()
     inspect = batch_service._inspect_batch
-    headers = batch_service._inspect_accepted_headers
 
     def held(*args, **kwargs):
         parser_entered.set()
@@ -222,21 +208,8 @@ async def test_finalization_during_parser_work_cannot_recreate_details(
             raise RuntimeError("test did not release parser")
         return inspect(*args, **kwargs)
 
-    def held_headers(*args, **kwargs):
-        parser_entered.set()
-        if not parser_release.wait(15):
-            raise RuntimeError("test did not release parser")
-        return headers(*args, **kwargs)
-
-    if operation == "upload":
-        monkeypatch.setattr(batch_service, "_inspect_batch", held)
-        pending = asyncio.create_task(upload(p3c_client, tenant, scenario.period_id, data))
-    else:
-        monkeypatch.setattr(batch_service, "_inspect_accepted_headers", held_headers)
-        unit_id = created.json()["files"][0]["units"][0]["source_unit_id"]
-        pending = asyncio.create_task(p3c_client.put(f"/payroll/imports/{iid}/interpretation",
-            json={"expected_revision": 1, "units": [{"source_unit_id": unit_id,
-                "selected": True, "header_row_number": 2}]}, headers=tenant.admin))
+    monkeypatch.setattr(batch_service, "_inspect_batch", held)
+    pending = asyncio.create_task(upload(p3c_client, tenant, scenario.period_id, data))
     try:
         assert await asyncio.to_thread(parser_entered.wait, 5)
         await asyncio.wait_for(submit_and_approve(p3c_client, tenant, scenario.period), 10)

@@ -15,7 +15,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.imports.canonical import (
+    canonical_source_unit,
+    decode_canonical_file,
+    extract_canonical_file,
+)
 from app.imports.contracts import (
+    CANONICAL_FILE_VERSION,
     CANONICALIZATION_VERSION,
     FILE_SOURCE_CONTRACT_VERSION,
     IMPORT_CONTRACT_VERSION,
@@ -24,7 +30,6 @@ from app.imports.contracts import (
     require_supported_import_contract,
 )
 from app.imports.errors import ImportFailure
-from app.imports.files import inspect_source_file, read_source_units
 from app.imports.mapping import (
     canonical,
     definition_meaning,
@@ -100,6 +105,10 @@ def _policy(request: Request) -> ImportResourcePolicy:
     return request.app.state.settings.import_resource_policy
 
 
+def _product_policy(request: Request):
+    return request.app.state.settings.product_policy
+
+
 def _normalize_date_source(source, inspection: dict, default_date: date | None, *, expand_import_fixed: bool) -> dict:
     if not isinstance(source, dict):
         raise failure("IMPORT_DATE_SOURCE_INVALID", "WorkDate provider must be an object.", 422)
@@ -158,11 +167,21 @@ async def load_import(db: AsyncConnection, cid: int, iid: int):
     return row
 
 
-async def load_sources(db: AsyncConnection, cid: int, iid: int) -> tuple[list[dict], list[dict], list[dict]]:
-    files = [dict(r) for r in (await db.execute(text("""
-        SELECT filesourceid, fileordinal, contractversion, originalfilename, filetype, filesizebytes,
-            filehashsha256, filecontent, contentpurgedatutc, inspectionmetadata
-        FROM import.filesources WHERE importid = :iid AND companyid = :cid ORDER BY fileordinal
+async def load_sources(db: AsyncConnection, cid: int, iid: int, *, include_canonical: bool = False
+                       ) -> tuple[list[dict], list[dict], list[dict]]:
+    columns = """
+        f.filesourceid, f.fileordinal, f.contractversion, f.originalfilename, f.filetype, f.filesizebytes,
+        f.filehashsha256, f.contentpurgedatutc, f.inspectionmetadata,
+        c.FormatVersion AS canonicalformatversion, c.ByteCount AS canonicalbytecount,
+        c.HashSha256 AS canonicalsha256
+    """
+    canonical_join = "LEFT JOIN import.FileCanonicalData c ON c.FileSourceID=f.FileSourceID " \
+                     "AND c.ImportID=f.ImportID AND c.CompanyID=f.CompanyID"
+    if include_canonical:
+        columns += ", c.Payload AS canonicalpayload"
+    files = [dict(r) for r in (await db.execute(text(f"""
+        SELECT {columns} FROM import.filesources f {canonical_join}
+        WHERE f.importid = :iid AND f.companyid = :cid ORDER BY f.fileordinal
     """), {"iid": iid, "cid": cid})).mappings()]
     _require_file_source_contract(files)
     units = [dict(r) for r in (await db.execute(text("""
@@ -213,9 +232,12 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
 
     def unit_inspection(value):
         value = value or {}
-        keys = ("row_count", "column_count", "cell_count", "header_row_number", "header_state",
-                "date_order", "accepted_date_order", "date_order_state", "encoding", "delimiter", "formula_count",
-                "cached_formula_count", "missing_cache_count", "filename_date_candidates", "unit_date_candidates")
+        keys = ("row_count", "column_count", "cell_count", "headed_column_count", "imported_row_count",
+                "header_row_number", "header_state", "date_order", "accepted_date_order",
+                "date_order_state", "encoding", "delimiter", "formula_count",
+                "formula_cached_value_count", "formula_empty_cache_count", "formula_missing_cache_count",
+                "cached_formula_count", "missing_cache_count", "filename_date_candidates", "unit_date_candidates",
+                "headerless_columns", "hidden_columns", "notices")
         return {key: value[key] for key in keys if key in value}
 
     def layout_inspection(value):
@@ -261,6 +283,8 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
         "default_work_date": row["defaultworkdate"], "files": [
             {"file_source_id": f["filesourceid"], "ordinal": f["fileordinal"], "name": f["originalfilename"],
              "type": f["filetype"], "size_bytes": f["filesizebytes"], "sha256": f["filehashsha256"],
+             "canonical_data_bytes": f["canonicalbytecount"],
+             "canonical_format_version": f["canonicalformatversion"],
              "content_purged_at": f["contentpurgedatutc"], "inspection": f["inspectionmetadata"],
              "units": [{"source_unit_id": u["sourceunitid"], "name": u["unitname"], "index": u["unitordinal"],
                         "kind": u["unitkind"], "selected": u["isselected"],
@@ -349,7 +373,7 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
     async with admission(request):
         payloads = await receive_files(request, _policy(request))
         inspected = await anyio.to_thread.run_sync(partial(
-            _inspect_batch, payloads, _policy(request), labels))
+            _inspect_batch, payloads, _policy(request), labels, _product_policy(request)))
         manifest = _manifest_payload(payloads, inspected)
         creation = _creation_fingerprint(cid, uid, period.branch_id, pid, manifest)
         async with engine.begin() as db:
@@ -394,6 +418,15 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
                        "content": payload.data,
                        "inspection": _json({"decompressed_bytes": info["decompressed_bytes"],
                                              "unit_count": len(info["source_units"])})})).scalar_one()
+                await db.execute(text("""
+                    INSERT INTO import.FileCanonicalData
+                        (FileSourceID, ImportID, CompanyID, FormatVersion, Payload, ByteCount, HashSha256)
+                    VALUES (:fid, :iid, :cid, :version, :payload, :byte_count, :sha256)
+                """), {"fid": file_id, "iid": iid, "cid": cid,
+                       "version": info["canonical_format_version"],
+                       "payload": info["canonical_payload"],
+                       "byte_count": info["canonical_byte_count"],
+                       "sha256": info["canonical_sha256"]})
                 for unit in info["source_units"]:
                     inspection = unit["inspection"]
                     structure = fingerprint("layout-structure", {
@@ -434,51 +467,34 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
             return await metadata(db, cid, iid, policy=_policy(request))
 
 
-def _inspect_batch(payloads: list[FilePayload], policy: ImportResourcePolicy, labels: list[str]) -> list[dict]:
+def _inspect_batch(payloads: list[FilePayload], policy: ImportResourcePolicy, _labels: list[str],
+                   product_policy=None) -> list[dict]:
     if not payloads or len(payloads) > policy.max_files:
         raise ImportFailure("IMPORT_FILE_COUNT_LIMIT_EXCEEDED", "Import has an unsupported number of files.")
+    if product_policy is None:
+        from app.product_policy import DEFAULT_PRODUCT_POLICY
+        product_policy = DEFAULT_PRODUCT_POLICY
     total_decompressed = total_units = total_inspection = 0
     result = []
     for payload in payloads:
-        info = inspect_source_file(payload.data, payload.filename, policy, header_labels=labels)
+        info = extract_canonical_file(payload.data, payload.filename,
+                                      resource_policy=policy, product_policy=product_policy)
         if info["decompressed_bytes"] > policy.max_file_decompressed_bytes:
             raise ImportFailure("IMPORT_DECOMPRESSED_LIMIT_EXCEEDED", "A workbook exceeds its configured decompressed-byte limit.")
         total_decompressed += info["decompressed_bytes"]
         total_units += len(info["source_units"])
-        total_inspection += len(_json(info).encode("utf-8"))
+        safe_info = {key: value for key, value in info.items() if key != "canonical_payload"}
+        total_inspection += len(_json(safe_info).encode("utf-8"))
         if total_decompressed > policy.max_total_decompressed_bytes:
             raise ImportFailure("IMPORT_TOTAL_DECOMPRESSED_LIMIT_EXCEEDED", "Import exceeds its aggregate decompressed-byte limit.")
         if total_units > policy.max_source_units:
             raise ImportFailure("IMPORT_SOURCE_UNIT_LIMIT_EXCEEDED", "Import exceeds its aggregate source-unit limit.")
         if total_inspection > policy.max_inspection_bytes:
             raise ImportFailure("IMPORT_INSPECTION_TOO_LARGE", "Import inspection metadata exceeds its configured limit.")
+        info["canonical_format_version"] = CANONICAL_FILE_VERSION
         result.append(info)
     return result
 
-
-def _inspect_accepted_headers(files, units, body, policy):
-    files_by_id = {item["filesourceid"]: item for item in files}
-    requested = {item.source_unit_id: item for item in body.units if item.header_row_number is not None}
-    by_file = defaultdict(list)
-    for unit in units:
-        item = requested.get(unit["sourceunitid"])
-        if item is not None and item.header_row_number != unit["headerrownumber"]:
-            by_file[unit["filesourceid"]].append((unit, item))
-    resolved = {}
-    for file_id, entries in by_file.items():
-        file = files_by_id[file_id]
-        configs = []
-        for unit, item in entries:
-            inspection = unit["inspectionmetadata"] or {}
-            if not inspection.get("column_count"):
-                raise ImportFailure("IMPORT_SOURCE_COLUMNS_INVALID", "A unit without columns cannot accept a header row.")
-            configs.append({"unit_name": unit["unitname"], "header_row_number": item.header_row_number,
-                            "date_order": item.date_order or unit["dateorder"], "columns": [1]})
-        result = read_source_units(file["filecontent"], file["originalfilename"], configs, policy)
-        by_name = {item["unit_name"]: item["inspection"] for item in result}
-        for unit, _item in entries:
-            resolved[unit["sourceunitid"]] = by_name[unit["unitname"]]
-    return resolved
 
 
 async def read_import(engine: AsyncEngine, cid: int, uid: int, iid: int, *, target_offset: int = 0,
@@ -534,8 +550,8 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
             for item in body.units:
                 unit = next(u for u in units if u["sourceunitid"] == item.source_unit_id)
                 inspection = unit["inspectionmetadata"] or {}
-                if item.header_row_number is not None and item.header_row_number > max(inspection.get("row_count", 1), 1):
-                    raise failure("IMPORT_HEADER_ROW_INVALID", "Selected header row is outside the source unit.", 422)
+                if item.header_row_number is not None and item.header_row_number != 1:
+                    raise failure("IMPORT_HEADER_ROW_INVALID", "Import tables use the first row as their header.", 422)
                 if item.date_order is not None and item.date_order not in ("DMY", "MDY", "YMD"):
                     raise failure("IMPORT_DATE_ORDER_INVALID", "Date order must be DMY, MDY or YMD.", 422)
                 if unit["unitkind"] == "CSV" and not item.selected:
@@ -550,41 +566,10 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
                                  for u in units)
             if not selected_count:
                 raise failure("IMPORT_SOURCE_SELECTION_REQUIRED", "Select at least one CSV or worksheet source unit.", 422)
-        accepted_headers = await anyio.to_thread.run_sync(
-            partial(_inspect_accepted_headers, files, units, body, _policy(request))
-        )
         async with engine.begin() as db:
             await _lock_mutable(db, cid, uid, iid, body.expected_revision)
-            _current_files, current_units, layouts = await load_sources(db, cid, iid)
-            layouts_by_structure = defaultdict(list)
-            for layout in layouts:
-                layouts_by_structure[layout["structurefingerprint"]].append(layout["sourcelayoutid"])
-            header_layouts = {}
-            changed_units = [unit for unit in current_units if unit["sourceunitid"] in accepted_headers]
-            for unit in changed_units:
-                inspection = accepted_headers[unit["sourceunitid"]]
-                structure = fingerprint("layout-structure", {
-                    "headers": [str(value).strip().casefold() for value in inspection.get("header_cells", [])],
-                    "column_count": inspection.get("column_count", 0),
-                })
-                header_layouts[unit["sourceunitid"]] = structure
-            new_structures = {}
-            for unit in changed_units:
-                structure = header_layouts[unit["sourceunitid"]]
-                if len(layouts_by_structure[structure]) != 1 and structure not in new_structures:
-                    new_structures[structure] = accepted_headers[unit["sourceunitid"]].get("header_cells", [])
-            if len(layouts) + len(new_structures) > _policy(request).max_layouts:
-                raise failure("IMPORT_LAYOUT_LIMIT_EXCEEDED", "Import exceeds its configured source-layout limit.", 422)
+            _current_files, current_units, _layouts = await load_sources(db, cid, iid)
             await clear_derived_state(db, cid, iid, reset_mapping=False)
-            for ordinal, (structure, headers) in enumerate(new_structures.items(), start=1):
-                layout_id = (await db.execute(text("""
-                    INSERT INTO import.sourcelayouts (importid, companyid, structurefingerprint, label, inspectionmetadata)
-                    VALUES (:iid, :cid, :structure, :label, CAST(:inspection AS jsonb))
-                    RETURNING sourcelayoutid
-                """), {"iid": iid, "cid": cid, "structure": structure,
-                       "label": f"Layout {len(layouts) + ordinal}",
-                       "inspection": _json({"header_cells": headers})})).scalar_one()
-                layouts_by_structure[structure] = [layout_id]
             for item in body.units:
                 unit = next(u for u in units if u["sourceunitid"] == item.source_unit_id)
                 inspection = unit["inspectionmetadata"] or {}
@@ -604,23 +589,13 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
                        "date_order": current_order, "date_source": _json(current_source),
                        "unit": item.source_unit_id, "iid": iid, "cid": cid})
                 if item.header_row_number is not None:
-                    inspected = accepted_headers.get(item.source_unit_id)
-                    if inspected is not None:
-                        inspection.update(inspected)
-                    inspection["header_row_number"] = item.header_row_number
+                    inspection["header_row_number"] = 1
                     inspection["header_state"] = "selected"
                 inspection["date_order"] = current_order
                 await db.execute(text("""
                     UPDATE import.filesourceunits SET inspectionmetadata = CAST(:inspection AS jsonb)
                     WHERE sourceunitid = :unit AND importid = :iid AND companyid = :cid
                 """), {"inspection": _json(inspection), "unit": item.source_unit_id, "iid": iid, "cid": cid})
-                structure = header_layouts.get(item.source_unit_id)
-                if structure is not None:
-                    await db.execute(text("""
-                        UPDATE import.filesourceunits SET sourcelayoutid = :layout
-                        WHERE sourceunitid = :unit AND importid = :iid AND companyid = :cid
-                    """), {"layout": layouts_by_structure[structure][0], "unit": item.source_unit_id,
-                           "iid": iid, "cid": cid})
             await db.execute(text("""
                 UPDATE import.payrollworkimports SET defaultworkdate = :work_date
                 WHERE importid = :iid AND companyid = :cid
@@ -681,6 +656,7 @@ async def accept_mapping(request, engine, cid, uid, iid, layout_id, body: Mappin
         """), {"iid": iid, "cid": cid, "layout": layout_id})).mappings().first()
         if layout is None:
             raise HTTPException(404, "Source layout not found.")
+        await _reject_headerless_mapping(db, cid, iid, layout_id, body.column_mapping)
         definitions = await list_period_definitions(row["payrollperiodid"], cid, db, active_only=True)
         validate_mapping(body.column_mapping, [], definitions,
                          max_column=_policy(request).max_columns_per_unit, require_work_date=False)
@@ -702,9 +678,82 @@ async def accept_mapping(request, engine, cid, uid, iid, layout_id, body: Mappin
         return await metadata(db, cid, iid, policy=_policy(request))
 
 
-def _materialize_batch(files, units, layouts, policy):
+async def _reject_headerless_mapping(db, cid: int, iid: int, layout_id: int, mapping: dict[str, str]) -> None:
+    """Headerless physical columns remain ignored even for handcrafted mappings."""
+    mapped_columns = {str(column) for column, target in mapping.items() if target != "Ignore"}
+    if not mapped_columns:
+        return
+    rows = (await db.execute(text("""
+        SELECT inspectionmetadata FROM import.filesourceunits
+        WHERE importid = :iid AND companyid = :cid AND sourcelayoutid = :layout
+    """), {"iid": iid, "cid": cid, "layout": layout_id})).mappings()
+    for row in rows:
+        inspection = row["inspectionmetadata"] or {}
+        headers = inspection.get("header_cells", [])
+        headerless = {str(column) for column in inspection.get("headerless_columns", [])}
+        unmappable = set()
+        for column in mapped_columns:
+            if column in headerless:
+                unmappable.add(column)
+                continue
+            try:
+                position = int(column) - 1
+            except ValueError:
+                unmappable.add(column)
+                continue
+            if position < 0 or position >= len(headers) or not str(headers[position]).strip():
+                unmappable.add(column)
+        if unmappable:
+            raise failure(
+                "IMPORT_HEADERLESS_COLUMN_UNSUPPORTED",
+                "Columns without first-row headers are ignored and cannot be mapped.",
+                422,
+            )
+
+
+def _materialize_batch(files, units, layouts, policy, product_policy=None):
+    if product_policy is None:
+        from app.product_policy import DEFAULT_PRODUCT_POLICY
+        product_policy = DEFAULT_PRODUCT_POLICY
     files_by_id = {item["filesourceid"]: item for item in files}
     layouts_by_id = {item["sourcelayoutid"]: item for item in layouts}
+    if len(files) > policy.max_files or len(units) > policy.max_source_units or len(layouts) > policy.max_layouts:
+        raise ImportFailure("IMPORT_SOURCE_LIMIT_EXCEEDED", "This Import exceeds current file, unit or layout limits.")
+    total_upload_bytes = total_decompressed_bytes = 0
+    canonical_by_file = {}
+    for file in files:
+        if file["filesizebytes"] > policy.max_file_bytes:
+            raise ImportFailure("IMPORT_FILE_TOO_LARGE", "A stored file exceeds the current upload limit.")
+        total_upload_bytes += file["filesizebytes"]
+        file_inspection = file["inspectionmetadata"] or {}
+        decompressed = int(file_inspection.get("decompressed_bytes", 0))
+        if decompressed > policy.max_file_decompressed_bytes:
+            raise ImportFailure("IMPORT_DECOMPRESSED_LIMIT_EXCEEDED", "A workbook exceeds the current decompressed-byte limit.")
+        total_decompressed_bytes += decompressed
+        if file["contentpurgedatutc"] is not None:
+            raise ImportFailure("IMPORT_CONTENT_PURGED", "Source file content has been purged and cannot be previewed.")
+        if file.get("canonicalpayload") is None or file.get("canonicalbytecount") is None:
+            raise ImportFailure("IMPORT_CANONICAL_CONTENT_MISSING",
+                                "Canonical file data is unavailable. Reset this Import and upload the files again.", 409)
+        if int(file["canonicalbytecount"]) > product_policy.max_import_canonical_file_bytes:
+            raise ImportFailure("IMPORT_CANONICAL_FILE_TOO_LARGE",
+                                "Stored file data exceeds the current canonical-data limit. Reset and upload again.")
+    if total_upload_bytes > policy.max_total_file_bytes:
+        raise ImportFailure("IMPORT_TOTAL_FILE_BYTES_EXCEEDED", "Stored files exceed the current aggregate upload limit.")
+    if total_decompressed_bytes > policy.max_total_decompressed_bytes:
+        raise ImportFailure("IMPORT_TOTAL_DECOMPRESSED_LIMIT_EXCEEDED", "Import exceeds current decompressed-byte limits.")
+    for unit in units:
+        inspection = unit["inspectionmetadata"] or {}
+        if (int(inspection.get("row_count", 0)) > policy.max_rows_per_unit
+                or int(inspection.get("column_count", 0)) > policy.max_columns_per_unit
+                or int(inspection.get("cell_count", 0)) > policy.max_cells_per_unit):
+            raise ImportFailure("IMPORT_SOURCE_LIMIT_EXCEEDED", "A stored source exceeds current per-unit inspection limits.")
+    for file in files:
+        canonical_by_file[file["filesourceid"]] = decode_canonical_file(
+            file["canonicalpayload"], expected_bytes=int(file["canonicalbytecount"]),
+            expected_sha256=file["canonicalsha256"], format_version=int(file["canonicalformatversion"]),
+            maximum_bytes=product_policy.max_import_canonical_file_bytes,
+            resource_policy=policy, maximum_columns=product_policy.max_import_combined_columns)
     selected = [unit for unit in units if unit["isselected"]]
     if not selected:
         raise ImportFailure("IMPORT_SOURCE_SELECTION_REQUIRED", "Select at least one source unit before preview.")
@@ -717,10 +766,14 @@ def _materialize_batch(files, units, layouts, policy):
         mapping = layout["columnmapping"]
         if not mapping:
             raise ImportFailure("IMPORT_MAPPING_REQUIRED", "Accept a mapping for every selected source layout.")
-        aggregate_rows += max(0, int(inspection.get("row_count", 0)) - unit["headerrownumber"])
+        imported_rows = inspection.get("imported_row_count")
+        if imported_rows is None:
+            imported_rows = max(0, int(inspection.get("row_count", 0)) - unit["headerrownumber"])
+        else:
+            imported_rows = max(0, int(imported_rows))
+        aggregate_rows += imported_rows
         aggregate_cells += int(inspection.get("cell_count", 0))
-        candidates += max(0, int(inspection.get("row_count", 0)) - unit["headerrownumber"]) * sum(
-            target.startswith("Definition:") for target in mapping.values())
+        candidates += imported_rows * sum(target.startswith("Definition:") for target in mapping.values())
     if aggregate_rows > policy.max_data_rows:
         raise ImportFailure("IMPORT_DATA_ROW_LIMIT_EXCEEDED", "Selected units exceed the configured aggregate row limit.")
     if aggregate_cells > policy.max_selected_cells:
@@ -734,17 +787,15 @@ def _materialize_batch(files, units, layouts, policy):
     source_rows = []
     for file_id, file_units in by_file.items():
         file = files_by_id[file_id]
-        configs = []
+        canonical = canonical_by_file[file_id]
+        materialized_by_name = {}
         for unit in file_units:
             inspection = unit["inspectionmetadata"] or {}
-            configs.append({"unit_name": unit["unitname"], "header_row_number": unit["headerrownumber"],
-                            "date_order": unit["dateorder"], "columns": list(range(1, int(inspection.get("column_count", 0)) + 1))})
-        materialized = read_source_units(file["filecontent"], file["originalfilename"], configs, policy)
-        materialized_by_name = {item["unit_name"]: item for item in materialized}
-        for unit in file_units:
-            inspection = materialized_by_name[unit["unitname"]]["inspection"]
+            materialized = canonical_source_unit(canonical, unit_name=unit["unitname"], date_order=unit["dateorder"])
+            materialized["inspection"].update(inspection)
             inspection["filename_date_candidates"] = _date_candidates(file["originalfilename"])
             inspection["unit_date_candidates"] = _date_candidates(unit["unitname"])
+            materialized_by_name[unit["unitname"]] = materialized
         for unit in file_units:
             layout = layouts_by_id[unit["sourcelayoutid"]]
             source_rows.append({"source_unit_id": unit["sourceunitid"], "file_ordinal": unit["fileordinal"],
@@ -783,12 +834,13 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
                 raise failure("IMPORT_REVISION_CONFLICT", "Import changed. Read its current revision and retry.")
             if period.status not in SOURCE_ENTRY_STATUSES or row["status"] not in ("NeedsMapping", "NeedsReview") or row["detailpurgedatutc"]:
                 raise failure("IMPORT_NOT_EDITABLE", "This Import is no longer editable.")
-            files, units, layouts = await load_sources(db, cid, iid)
+            files, units, layouts = await load_sources(db, cid, iid, include_canonical=True)
             started_rule_context = await current_rule_context(db, cid, iid)
-            if any(file["contentpurgedatutc"] is not None or file["filecontent"] is None for file in files):
+            if any(file["contentpurgedatutc"] is not None for file in files):
                 raise failure("IMPORT_CONTENT_PURGED", "Source file content has been purged and cannot be previewed.")
             default_date = row["defaultworkdate"]
-        materialized = await anyio.to_thread.run_sync(partial(_materialize_batch, files, units, layouts, policy))
+        materialized = await anyio.to_thread.run_sync(partial(
+            _materialize_batch, files, units, layouts, policy, _product_policy(request)))
         files = units = layouts = None
         for source in materialized:
             date_source = source["date_source"]

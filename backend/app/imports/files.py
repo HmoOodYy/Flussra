@@ -290,7 +290,7 @@ def _read_xlsx_source_unit(worksheet, unit: dict[str, Any], config: dict[str, An
                 # styled dates/times/durations still use workbook interpretation.
                 rendered = marker["raw_number"]
             output_cells[str(column)] = FileCell(
-                rendered, kind, formula, bool(marker.get("missing_cache"))
+                rendered, kind, formula, bool(marker.get("missing_cache")),
             )
         rows.append({"source_row": number, "cells": output_cells})
     # Drain metadata so malformed trailing row/cell coordinates cannot escape
@@ -339,17 +339,26 @@ def _selected_cell_metadata(
                         if column <= last_column:
                             raise _failure("IMPORT_XLSX_INVALID", "Workbook contains duplicate or unordered cell coordinates.")
                         last_column = column
-                        cell = {"formula": False, "date": None, "native_date": element.attrib.get("t") == "d",
+                        cell = {"formula": False, "formula_text": None, "formula_attributes": {},
+                                "cache_present": False, "cache_type": element.attrib.get("t", "n"),
+                                "date": None, "native_date": element.attrib.get("t") == "d",
                                 "error": element.attrib.get("t") == "e", "value_seen": False,
                                 "numeric": element.attrib.get("t", "n") == "n"}
                     elif event == "start" and tag == "f":
                         cell["formula"] = True
+                        if sum(len(key.encode("utf-8")) + len(value.encode("utf-8"))
+                               for key, value in element.attrib.items()) > policy.max_cell_text_bytes:
+                            raise _failure("IMPORT_CELL_TEXT_LIMIT_EXCEEDED", "A formula exceeds its configured text limit.")
+                        cell["formula_attributes"] = dict(element.attrib)
                     elif event == "start" and tag == "v":
                         cell["value_seen"] = True
-                    elif event == "end" and tag == "v" and cell.get("native_date"):
-                        cell["date"] = element.text
+                        cell["cache_present"] = True
+                    elif event == "end" and tag == "f":
+                        cell["formula_text"] = element.text or ""
                     elif event == "end" and tag == "v":
                         cell["raw_value"] = element.text
+                        if cell.get("native_date"):
+                            cell["date"] = element.text
                     elif event == "end" and tag == "c":
                         if (selected_columns is None or column in selected_columns) and (
                             cell.get("formula") or cell.get("native_date") or cell.get("error")
@@ -362,6 +371,11 @@ def _selected_cell_metadata(
                                 "date": cell.get("date"),
                                 "error": cell.get("error", False),
                                 "raw_number": cell.get("raw_value") if cell.get("numeric") else None,
+                                "formula_text": cell.get("formula_text"),
+                                "formula_attributes": cell.get("formula_attributes", {}),
+                                "cache_present": cell.get("cache_present", False),
+                                "cache_type": cell.get("cache_type"),
+                                "raw_cache_value": cell.get("raw_value"),
                             }
                         cell = {}
                     elif event == "end" and tag == "row":
@@ -531,6 +545,7 @@ def _inspect_xlsx(
     *,
     include_all_units: bool = False,
     unit_configs: list[dict[str, Any]] | None = None,
+    strict_table: bool = False,
 ) -> dict[str, Any]:
     try:
         archive = zipfile.ZipFile(io.BytesIO(data), "r")
@@ -607,6 +622,23 @@ def _inspect_xlsx(
             raise
         except (ParseError, zipfile.BadZipFile, RuntimeError, ValueError, OSError) as exc:
             raise _failure("IMPORT_XLSX_INVALID", "Workbook XML or ZIP structure is malformed.") from exc
+
+        if strict_table:
+            entries = list(_metadata_elements(archive, "xl/workbook.xml", "sheet", policy.max_xlsx_xml_depth))
+            if len(entries) != 1 or len(sheet_paths) != 1:
+                raise _failure("IMPORT_WORKBOOK_SHEET_COUNT_INVALID",
+                               "Upload exactly one workbook sheet per file; it must be a data worksheet.")
+            name, path = next(iter(sheet_paths.items()))
+            _check_xml_text(name, policy.max_cell_text_bytes)
+            shape = shape_by_path.get(path, {"rows": 0, "columns": 0})
+            _check_shape(shape["rows"], shape["columns"], policy)
+            return {"source_units": [{"name": name, "index": 1,
+                    "visibility": entries[0].get("state", "visible"),
+                    "inspection": {"row_count": shape["rows"], "column_count": shape["columns"],
+                        "cell_count": shape["rows"] * shape["columns"],
+                        "last_data_rows": shape.get("last_data_rows", {}),
+                        "header_row_number": 1, "encoding": None, "delimiter": None}}],
+                    "decompressed_bytes": decompressed.total}
 
         try:
             values_book = load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
@@ -970,7 +1002,7 @@ def _scan_xml_element(
                 raise _failure("IMPORT_XLSX_INVALID", "Workbook cell coordinates must be unique and increasing within each row.")
             state.update(context="c", text_bytes=0, formula=False, value_seen=False,
                          value_nonempty=False, cell_type=element.attrib.get("t"),
-                         cell_row=row, cell_column=column)
+                         cell_row=row, cell_column=column, inline_text=False)
         elif tag == "si":
             state.clear()
             state.update(context="si", text_bytes=0)
@@ -990,16 +1022,19 @@ def _scan_xml_element(
                 state["value_nonempty"] = True
             if tag == "v":
                 state["raw_value"] = value
-    if tag == "row" and is_sheet:
-        row = state.get("current_row", 0)
-        shape = shapes.setdefault(member_name, {"rows": 0, "columns": 0})
-        shape["rows"] = max(shape["rows"], row)
-    elif tag == "c" and is_sheet:
+            elif tag == "t" and state.get("cell_type") == "inlineStr":
+                state["inline_text"] = True
+    if tag == "c" and is_sheet:
         shape = shapes.setdefault(member_name, {"rows": 0, "columns": 0})
         column = state.get("cell_column", 0)
         row = state.get("cell_row", 0)
-        shape["rows"] = max(shape["rows"], row)
-        shape["columns"] = max(shape["columns"], column)
+        # Styled empty cells do not extend the physical data rectangle. This
+        # check runs after the cell's formula/value events have been seen.
+        has_data = state.get("formula") or state.get("value_seen") or state.get("inline_text")
+        if has_data:
+            shape["rows"] = max(shape["rows"], row)
+            shape["columns"] = max(shape["columns"], column)
+            shape.setdefault("last_data_rows", {})[column] = row
         if state.get("formula"):
             counts = formulas.setdefault(
                 member_name,

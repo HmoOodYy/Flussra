@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import threading
 from decimal import Decimal
 from uuid import uuid4
@@ -287,9 +286,13 @@ async def test_preview_publishes_rule_context_and_attached_unsupported_version_f
                                  {"version": baseline, "iid": owner_id})
 
     async with p3c_engine.connect() as db:
-        file_id = (await db.execute(text("""
-            SELECT FileSourceID FROM import.FileSources WHERE ImportID=:iid AND CompanyID=:cid
-        """), {"iid": import_id, "cid": tenant.company_id})).scalar_one()
+        file_row = (await db.execute(text("""
+            SELECT f.FileSourceID AS file_source_id, c.FormatVersion AS format_version
+            FROM import.FileSources f JOIN import.FileCanonicalData c
+              ON c.FileSourceID=f.FileSourceID AND c.ImportID=f.ImportID AND c.CompanyID=f.CompanyID
+            WHERE f.ImportID=:iid AND f.CompanyID=:cid
+        """), {"iid": import_id, "cid": tenant.company_id})).one()
+        file_id = file_row.file_source_id
     async with p3c_engine.begin() as db:
         async with suspended_test_triggers(db, (TriggerIdentity("import", "filesources", "trg_importdetail_writable"),)):
             await db.execute(text("UPDATE import.FileSources SET ContractVersion=99 WHERE FileSourceID=:fid"), {"fid": file_id})
@@ -298,23 +301,19 @@ async def test_preview_publishes_rule_context_and_attached_unsupported_version_f
         async with suspended_test_triggers(db, (TriggerIdentity("import", "filesources", "trg_importdetail_writable"),)):
             await db.execute(text("UPDATE import.FileSources SET ContractVersion=2 WHERE FileSourceID=:fid"), {"fid": file_id})
 
-    # Simulate an older stored canonical payload version; ordinary inserts reject it.
+    # Simulate a preexisting stored format version unknown to the shared readers.
     _stable_id, period_definition_id, rate_definition_id = await _target(
         p3c_engine, tenant, period, period_definition_id)
+    canonical_trigger = (TriggerIdentity("import", "filecanonicaldata", "trg_filecanonicaldata_writable"),)
     async with p3c_engine.begin() as db:
-        canonical_payload = b'{"canonical_file_version":9}'
-        async with suspended_test_triggers(db, (TriggerIdentity("import", "filecanonicaldata", "trg_filecanonicaldata_writable"),)):
-            await db.execute(text("""
-                INSERT INTO import.FileCanonicalData
-                    (FileSourceID, ImportID, CompanyID, FormatVersion, Payload, ByteCount, HashSha256)
-                VALUES (:file_id, :iid, :cid, 9, :payload, :byte_count, :hash)
-            """), {"file_id": file_id, "iid": import_id, "cid": tenant.company_id,
-                   "payload": canonical_payload, "byte_count": len(canonical_payload),
-                   "hash": hashlib.sha256(canonical_payload).hexdigest()})
+        async with suspended_test_triggers(db, canonical_trigger):
+            await db.execute(text("UPDATE import.FileCanonicalData SET FormatVersion=9 WHERE FileSourceID=:fid"),
+                             {"fid": file_id})
     await assert_all_reads_reject()
     async with p3c_engine.begin() as db:
-        async with suspended_test_triggers(db, (TriggerIdentity("import", "filecanonicaldata", "trg_filecanonicaldata_writable"),)):
-            await db.execute(text("DELETE FROM import.FileCanonicalData WHERE FileSourceID=:fid"), {"fid": file_id})
+        async with suspended_test_triggers(db, canonical_trigger):
+            await db.execute(text("UPDATE import.FileCanonicalData SET FormatVersion=:version WHERE FileSourceID=:fid"),
+                             {"fid": file_id, "version": file_row.format_version})
 
     # Simulate an old attached rule version with an unsupported source contract.
     async with p3c_engine.begin() as db:
@@ -528,21 +527,9 @@ async def test_actual_quantity_evidence_link_requires_completion_and_completed_h
     created, target_period_definition_id, definition_id, ppd_id, rate_id, rule_id, preview = await _mapped_preview_with_rule(
         p3c_client, p3c_engine, tenant, period)
     assert definition_id != ppd_id, "fixture must distinguish stable pay definition from period target identity"
-    canonical_payload = b'{"file":"canonical"}'
     replacement_proposal, _, _ = await _insert_rule(
         p3c_engine, tenant, created, period, target_period_definition_id, definition_id)
     async with p3c_engine.begin() as db:
-        file_id = (await db.execute(text("""
-            SELECT FileSourceID FROM import.FileSources
-            WHERE ImportID=:iid AND CompanyID=:cid ORDER BY FileOrdinal LIMIT 1
-        """), {"iid": created["import_id"], "cid": tenant.company_id})).scalar_one()
-        await db.execute(text("""
-            INSERT INTO import.FileCanonicalData
-                (FileSourceID, ImportID, CompanyID, FormatVersion, Payload, ByteCount, HashSha256)
-            VALUES (:fid, :iid, :cid, 1, :payload, :size, :digest)
-        """), {"fid": file_id, "iid": created["import_id"], "cid": tenant.company_id,
-               "payload": canonical_payload, "size": len(canonical_payload),
-               "digest": hashlib.sha256(canonical_payload).hexdigest()})
         await db.execute(text("""
             INSERT INTO import.PayrollWorkReviewDecisions
                 (ImportID, CompanyID, BranchID, PayrollPeriodID, DecisionKey, ContractVersion,

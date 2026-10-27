@@ -1,6 +1,6 @@
 # Flussra C2 Import Product Contract
 
-**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A03 have been implemented and focused-verified on the foundation continuation; this does not claim the revised import experience, extraction or payroll application is complete.
+**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A04 have been implemented and focused-verified on the foundation continuation; A04 covers strict per-file extraction and canonical storage, not cross-file compatibility or the complete revised import experience/payroll application.
 
 **Continuation baseline:** `codex/c2-import-foundation`, implementation at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e` and documentation through `f15bf96`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
 

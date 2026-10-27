@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from io import BytesIO
 from uuid import uuid4
 
@@ -109,6 +111,66 @@ async def _map_custom_and_preview(client, tenant, created, mapping):
     return preview.json()
 
 
+async def test_invalid_later_file_rejects_batch_without_staging_any_file_or_payroll_rows(
+    p3c_client, p3c_engine, tenant,
+):
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    period_id = period["payroll_period_id"]
+    async with p3c_engine.connect() as db:
+        before = tuple((await db.execute(text("""
+            SELECT
+                (SELECT count(*) FROM import.PayrollWorkImports WHERE PayrollPeriodID=:pid),
+                (SELECT count(*) FROM import.FileSources f JOIN import.PayrollWorkImports w
+                   ON w.ImportID=f.ImportID AND w.CompanyID=f.CompanyID WHERE w.PayrollPeriodID=:pid),
+                (SELECT count(*) FROM import.FileCanonicalData c JOIN import.PayrollWorkImports w
+                   ON w.ImportID=c.ImportID AND w.CompanyID=c.CompanyID WHERE w.PayrollPeriodID=:pid),
+                (SELECT count(*) FROM payroll.PayrollDraftLines WHERE PayrollPeriodID=:pid),
+                (SELECT count(*) FROM payroll.PayrollPeriodAuditEvidenceEvents WHERE PayrollPeriodID=:pid)
+        """), {"pid": period_id})).one())
+    response = await _upload(p3c_client, tenant, period, [
+        ("valid.csv", b"DriverNumber,WorkDate,Amount\n001,2026-10-20,1\n"),
+        ("invalid.xlsx", b"not a workbook"),
+    ])
+    assert response.status_code == 422, response.text
+    async with p3c_engine.connect() as db:
+        after = tuple((await db.execute(text("""
+            SELECT
+                (SELECT count(*) FROM import.PayrollWorkImports WHERE PayrollPeriodID=:pid),
+                (SELECT count(*) FROM import.FileSources f JOIN import.PayrollWorkImports w
+                   ON w.ImportID=f.ImportID AND w.CompanyID=f.CompanyID WHERE w.PayrollPeriodID=:pid),
+                (SELECT count(*) FROM import.FileCanonicalData c JOIN import.PayrollWorkImports w
+                   ON w.ImportID=c.ImportID AND w.CompanyID=c.CompanyID WHERE w.PayrollPeriodID=:pid),
+                (SELECT count(*) FROM payroll.PayrollDraftLines WHERE PayrollPeriodID=:pid),
+                (SELECT count(*) FROM payroll.PayrollPeriodAuditEvidenceEvents WHERE PayrollPeriodID=:pid)
+        """), {"pid": period_id})).one())
+    assert after == before
+
+
+async def test_headerless_physical_columns_cannot_be_mapped_by_request(
+    p3c_client, p3c_engine, tenant,
+):
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    upload = await _upload(p3c_client, tenant, period, [(
+        "headerless.csv", b"DriverNumber,,WorkDate,Amount\n123,unheaded,2026-10-20,4\n"
+    )])
+    assert upload.status_code == 200, upload.text
+    created = upload.json()
+    layout = created["layouts"][0]
+    assert created["files"][0]["units"][0]["inspection"]["headerless_columns"] == [2]
+    rejected = await p3c_client.put(
+        f"/payroll/imports/{created['import_id']}/layouts/{layout['layout_id']}/mapping",
+        json={"expected_revision": created["revision"], "column_mapping": {
+            "1": "DriverNumber", "2": "DriverName", "3": "WorkDate", "4": "Ignore"}},
+        headers=tenant.admin,
+    )
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["detail"]["code"] == "IMPORT_HEADERLESS_COLUMN_UNSUPPORTED"
+    current = await p3c_client.get(f"/payroll/imports/{created['import_id']}", headers=tenant.admin)
+    assert current.status_code == 200, current.text
+    assert current.json()["revision"] == created["revision"]
+    assert current.json()["layouts"][0]["mapping"] is None
+
+
 async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_ownership(
     p3c_client, p3c_app, p3c_engine, tenant, monkeypatch,
 ):
@@ -140,11 +202,28 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
                                                           ("daily.csv", header.encode() + second)])
     assert uploaded.status_code == 200, uploaded.text
     created = uploaded.json()
+    async with p3c_engine.connect() as db:
+        canonical_rows = (await db.execute(text("""
+            SELECT c.FormatVersion, c.ByteCount, c.HashSha256, c.Payload
+            FROM import.FileCanonicalData c
+            WHERE c.ImportID=:iid AND c.CompanyID=:cid ORDER BY c.FileSourceID
+        """), {"iid": created["import_id"], "cid": tenant.company_id})).all()
+    assert len(canonical_rows) == 2
+    for item, canonical_row in zip(created["files"], canonical_rows, strict=True):
+        version, byte_count, sha256, payload = canonical_row
+        assert version == 1
+        assert byte_count == len(payload) == item["canonical_data_bytes"]
+        assert hashlib.sha256(payload).hexdigest() == sha256
+        assert json.loads(payload)["format_version"] == 1
     assert [item["ordinal"] for item in created["files"]] == [1, 2]
     assert [item["name"] for item in created["files"]] == ["daily.csv", "daily.csv"]
     assert len(created["layouts"]) == 1
     units = [item["units"][0] for item in created["files"]]
     assert len({unit["source_unit_id"] for unit in units}) == 2
+    for unit in units:
+        assert unit["inspection"]["row_count"] == 2
+        assert unit["inspection"]["imported_row_count"] == 1
+        assert unit["inspection"]["headed_column_count"] == 3
     assert all(unit["selected"] and unit["layout_id"] == created["layouts"][0]["layout_id"] for unit in units)
     layout_summary = created["layouts"][0]["inspection"]
     assert layout_summary["header_cells"][0] == long_header[:80]
@@ -179,6 +258,12 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
     )
     assert invalid_target_page.status_code == 422
 
+    from app.imports import files as import_files
+
+    def original_reader_must_not_run(*args, **kwargs):
+        raise AssertionError("preview reopened the original workbook/CSV")
+
+    monkeypatch.setattr(import_files, "read_source_units", original_reader_must_not_run)
     refreshed = await _map_and_preview(p3c_client, tenant, created, definition_id)
     assert refreshed["status"] == "NeedsReview"
     assert refreshed["preview"]["counts"]["rows"] == 2
