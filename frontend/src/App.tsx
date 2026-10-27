@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { lazy } from 'react';
 import { AuthProvider } from './providers/AuthProvider';
 import { WarningsProvider } from './providers/WarningsProvider';
 import { AuthBootstrap } from './components/AuthBootstrap';
@@ -8,24 +9,9 @@ import { AppShell } from './components/AppShell';
 import { PublicLandingPage } from './pages/public/PublicLandingPage';
 import { SignupPage } from './pages/public/SignupPage';
 import { LoginPage } from './pages/LoginPage';
-import { DashboardPage } from './pages/DashboardPage';
-import { PeriodsListPage } from './pages/payroll/PeriodsListPage';
-import { PayrollEntryPage } from './pages/payroll/entry/PayrollEntryPage';
-import { LedgerPage } from './pages/payroll/LedgerPage';
 import { SettingsShell } from './pages/settings/SettingsShell';
-import { CompanyBranchesPage } from './pages/settings/company-branches/CompanyBranchesPage';
-import { PayrollSetupsPage } from './pages/settings/payroll/PayrollSetupsPage';
-import { BranchPayrollSchedulePage } from './pages/payroll/schedule/BranchPayrollSchedulePage';
 import { legacyPayrollSettingsRedirect } from './pages/settings/payroll/payrollSetupsView';
-import { StatusKeysPage } from './pages/settings/status-keys/StatusKeysPage';
-import { PayItemsPage } from './pages/settings/pay-items/PayItemsPage';
-import { RolesPage } from './pages/settings/roles/RolesPage';
 import { PeopleDefaultRedirect, PeopleHub } from './pages/people/PeopleHub';
-import { WorkforcePage } from './pages/people/workforce/WorkforcePage';
-import { AccessPage } from './pages/people/access/AccessPage';
-import { TransferRequestsPage } from './pages/people/transfers/TransferRequestsPage';
-import { PayRatesPage } from './pages/people/pay-rates/PayRatesPage';
-import { ReviewPage } from './pages/ReviewPage';
 import { useAuth } from './store/authStore';
 import type { UserProfile } from './store/authStore';
 import {
@@ -46,6 +32,22 @@ import {
   canAccessCompanyBranches,
   canCreateBranches,
 } from './lib/permissions';
+
+const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
+const PeriodsListPage = lazy(() => import('./pages/payroll/PeriodsListPage').then((module) => ({ default: module.PeriodsListPage })));
+const PayrollEntryPage = lazy(() => import('./pages/payroll/entry/PayrollEntryPage').then((module) => ({ default: module.PayrollEntryPage })));
+const LedgerPage = lazy(() => import('./pages/payroll/LedgerPage').then((module) => ({ default: module.LedgerPage })));
+const BranchPayrollSchedulePage = lazy(() => import('./pages/payroll/schedule/BranchPayrollSchedulePage').then((module) => ({ default: module.BranchPayrollSchedulePage })));
+const CompanyBranchesPage = lazy(() => import('./pages/settings/company-branches/CompanyBranchesPage').then((module) => ({ default: module.CompanyBranchesPage })));
+const PayrollSetupsPage = lazy(() => import('./pages/settings/payroll/PayrollSetupsPage').then((module) => ({ default: module.PayrollSetupsPage })));
+const StatusKeysPage = lazy(() => import('./pages/settings/status-keys/StatusKeysPage').then((module) => ({ default: module.StatusKeysPage })));
+const PayItemsPage = lazy(() => import('./pages/settings/pay-items/PayItemsPage').then((module) => ({ default: module.PayItemsPage })));
+const RolesPage = lazy(() => import('./pages/settings/roles/RolesPage').then((module) => ({ default: module.RolesPage })));
+const WorkforcePage = lazy(() => import('./pages/people/workforce/WorkforcePage').then((module) => ({ default: module.WorkforcePage })));
+const AccessPage = lazy(() => import('./pages/people/access/AccessPage').then((module) => ({ default: module.AccessPage })));
+const TransferRequestsPage = lazy(() => import('./pages/people/transfers/TransferRequestsPage').then((module) => ({ default: module.TransferRequestsPage })));
+const PayRatesPage = lazy(() => import('./pages/people/pay-rates/PayRatesPage').then((module) => ({ default: module.PayRatesPage })));
+const ReviewPage = lazy(() => import('./pages/ReviewPage').then((module) => ({ default: module.ReviewPage })));
 
 /**
  * Thin wrapper that reads user from context at render time and gates on a

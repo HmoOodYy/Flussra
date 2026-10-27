@@ -177,7 +177,7 @@ function OperationalDashboard() {
       }
     };
     fetchAll();
-  }, []);
+  }, [setWarnings]);
 
   if (loading) {
     return (
