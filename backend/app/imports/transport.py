@@ -176,5 +176,22 @@ async def receive_files(
     return files
 
 
+async def receive_mapping_json(request: Request, max_bytes: int) -> bytes:
+    """Read one bounded mapping request without trusting Content-Length."""
+    body = bytearray()
+    try:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            if len(body) + len(chunk) > max_bytes:
+                raise ImportFailure("IMPORT_MAPPING_REQUEST_TOO_LARGE",
+                                    "Mapping request exceeds its configured size limit.", 413)
+            body.extend(chunk)
+    except ClientDisconnect as exc:
+        raise ImportFailure("IMPORT_MAPPING_REQUEST_INCOMPLETE",
+                            "Mapping request ended before the body was complete.", 400) from exc
+    return bytes(body)
+
+
 def _failure(code: str, message: str) -> ImportFailure:
     return ImportFailure(code, message)

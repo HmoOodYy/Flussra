@@ -332,8 +332,15 @@ def test_headerless_only_tail_rows_do_not_create_mapped_quantity_candidates():
         "headerrownumber": 1, "dateorder": None, "datesource": {},
         "inspectionmetadata": extracted["inspection"],
     }
-    layout = {"sourcelayoutid": 1, "structurefingerprint": "test", "columnmapping": {
-        "1": "DriverNumber", "2": "WorkDate", "3": "Definition:8"}}
+    def selector(header):
+        return {"header": header}
+    layout = {"sourcelayoutid": 1, "structurefingerprint": "test",
+              "inspectionmetadata": extracted["inspection"], "columnmapping": None}
+    pending_rule = {"paydefinitionid": 8, "payrollperioddefinitionid": 8,
+                    "rulepayload": {"payload_version": 1, "transform": "Direct",
+                                    "inputs": [selector("Amount")],
+                                    "shared_columns": {"DriverNumber": selector("DriverNumber"),
+                                                       "WorkDate": selector("WorkDate")}}}
     policy = replace(DEFAULT_IMPORT_RESOURCE_POLICY, max_data_rows=1, max_candidates=1)
-    rows = _materialize_batch([stored_file], [unit], [layout], policy)
+    rows = _materialize_batch([stored_file], [unit], [layout], policy, pending_rules=[pending_rule])
     assert len(rows) == 1 and rows[0]["source_unit_id"] == 1

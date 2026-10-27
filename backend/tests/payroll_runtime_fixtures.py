@@ -30,6 +30,55 @@ from tests.compensation_api_fixtures import (
 )
 from tests.compensation_database_fixtures import make_driver
 
+
+async def map_import_columns(client, tenant, created, column_mapping):
+    """Adapt focused legacy column fixtures to the target-rule API."""
+    from app.imports.headers import describe_headers
+
+    layout = created["layouts"][0]
+    headers = []
+    offset = 0
+    while True:
+        page = await client.get(
+            f"/payroll/imports/{created['import_id']}?header_layout_id={layout['layout_id']}"
+            f"&header_offset={offset}", headers=tenant.admin)
+        assert page.status_code == 200, page.text
+        header_page = page.json()["header_page"]
+        headers.extend(item["label"] for item in header_page["items"])
+        if header_page["next_offset"] is None:
+            break
+        offset = header_page["next_offset"]
+    described = describe_headers(headers)
+    by_column = {item["source_column"]: item for item in described["header_occurrences"]}
+
+    def selector(column):
+        item = by_column[column]
+        result = {"header": item["label"]}
+        if item["duplicate_signature"]:
+            result["occurrences"] = [{"duplicate_signature": item["duplicate_signature"],
+                                      "occurrence_ordinal": item["occurrence_ordinal"]}]
+        return result
+
+    shared = {}
+    targets = {}
+    ignored = []
+    for column_text, target in column_mapping.items():
+        column = int(column_text)
+        value = selector(column)
+        if target in {"DriverNumber", "EmployeeKey", "DriverName", "WorkDate"}:
+            shared[target] = value
+        elif target == "Ignore":
+            ignored.append(value)
+        elif target.startswith("Definition:"):
+            targets.setdefault(target, []).append(value)
+    payload = {"expected_revision": created["revision"], "shared_columns": shared,
+               "ignored_columns": ignored,
+               "targets": [{"target": target, "transform": "Direct" if len(inputs) == 1 else "Sum",
+                            "inputs": inputs, "expected_head_revision": 0}
+                           for target, inputs in targets.items()]}
+    return await client.put(f"/payroll/imports/{created['import_id']}/mapping",
+                            json=payload, headers=tenant.admin)
+
 PAYROLL_PERMISSIONS = PERMISSIONS + [
     "payroll.view", "payroll.entry", "payroll.period.create", "payroll.finalize",
     "reports.view", "payroll_setup.manage", "payroll_setup.publish", "payroll_setup.assign",

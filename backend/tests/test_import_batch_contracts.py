@@ -69,6 +69,36 @@ def test_source_cell_pages_keep_values_and_issues_reachable_under_response_bound
         assert len(issues) == 127
 
 
+def test_sum_operand_provenance_is_sliced_to_each_source_cell_page():
+    raw = "7" * 2_000
+    operands = [
+        {"column": 3, "value": raw, "kind": "number"},
+        {"column": 4, "value": raw, "kind": "number"},
+        None,
+    ]
+    item = {
+        "source_record_id": 9,
+        "payload": {str(column): {"value": raw, "kind": "number"} for column in (1, 2, 3, 4)},
+        "values_json": {"81": {"source_column": 3, "source_columns": [3, 4],
+                                 "transform": "Sum", "raw_value": operands}},
+        "issues": [{"column": 3, "code": "IMPORT_SUM_INPUT_MISSING", "value": operands}],
+    }
+
+    first = project_source_record(item, 2, 1)
+    second = project_source_record(item, 3, 1)
+
+    assert first["values_json"]["81"]["source_columns"] == [3, 4]
+    assert first["values_json"]["81"]["raw_value_operand_count"] == 3
+    assert first["values_json"]["81"]["raw_value_missing_operand_count"] == 1
+    assert [operand["column"] for operand in first["values_json"]["81"]["raw_value"]] == [3]
+    assert [operand["column"] for operand in first["issues"][0]["value"]] == [3]
+    assert second["values_json"]["81"]["raw_value_operand_count"] == 3
+    assert [operand["column"] for operand in second["values_json"]["81"]["raw_value"]] == [4]
+    assert second["issues"] == []
+    assert len(encoded(first).encode("utf-8")) < 8_000
+    assert len(encoded(second).encode("utf-8")) < 8_000
+
+
 @pytest.mark.parametrize("source", [
     {"kind": "column", "value": "2026-10-20"},
     {"kind": "import_fixed", "value": "2026-10-20"},

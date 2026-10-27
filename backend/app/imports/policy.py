@@ -43,6 +43,8 @@ class ImportResourcePolicy:
     row_detail_sample: int = 5
     layout_header_sample: int = 12
     max_header_label_chars: int = 80
+    max_numeric_work_digits: int = 16_000
+    max_mapping_request_bytes: int = 2_000_000
 
     def __post_init__(self) -> None:
         for field in fields(self):

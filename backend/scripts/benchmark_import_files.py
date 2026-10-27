@@ -309,6 +309,8 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 assert response.status_code == 200, response.text
                 upload = response.json()
             definitions = {definition.code: definition.payroll_period_definition_id for definition in fixture["definitions"]}
+            target_rules = {}
+            shared_columns = {}
             for layout in upload["layouts"]:
                 headers = []
                 offset = 0
@@ -322,60 +324,20 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                     if page["next_offset"] is None:
                         break
                     offset = page["next_offset"]
-                mapping = {str(index): ("DriverNumber" if header == "DriverNumber" else "WorkDate" if header == "WorkDate"
-                    else f"Definition:{definitions[header]}") for index, header in enumerate(headers, 1)}
-                response = await client.put(f"/payroll/imports/{iid}/layouts/{layout['layout_id']}/mapping",
-                    json={"expected_revision": upload["revision"], "column_mapping": mapping}, headers=tenant.admin)
-                assert response.status_code == 200, response.text
-                upload = response.json()
-            if scene in CURRENT_SCENARIOS:
-                import json
-
-                from app.imports.contracts import (
-                    CANONICALIZATION_VERSION,
-                    FILE_SOURCE_CONTRACT_VERSION,
-                    RULE_CONTRACT_VERSION,
-                    SOURCE_CONTRACT_VERSION,
-                    TARGET_CONTRACT_VERSION,
-                )
-                from app.imports.mapping import definition_meaning, fingerprint
-                from app.imports.rules import bind_pending_rule
-
-                definition = fixture["definitions"][0]
-                target = next(item for item in fixture["definitions"]
-                              if item.pay_definition_id == definition.pay_definition_id)
-                payload = {"kind": "Direct", "source_field": target.code}
-                async with engine.begin() as db:
-                    rule_id = await db.scalar(text("""
-                        INSERT INTO import.PayrollWorkRuleVersions
-                            (CompanyID, BranchID, PayDefinitionID, OriginImportID,
-                             OriginPayrollPeriodID, RuleContractVersion, SourceContractVersion,
-                             TargetContractVersion, CanonicalizationVersion, RuleFingerprint,
-                             SourceSignature, TargetMeaning, RulePayload, CreatedByUserID)
-                        VALUES (:cid,:bid,:definition,:iid,:pid,:rule_version,:source_version,
-                                :target_version,:canonical_version,:fingerprint,
-                                CAST(:source AS jsonb),CAST(:meaning AS jsonb),CAST(:payload AS jsonb),:uid)
-                        RETURNING RuleVersionID
-                    """), {"cid": tenant.company_id, "bid": period["branch_id"],
-                           "definition": definition.pay_definition_id, "iid": iid,
-                           "pid": period["payroll_period_id"], "fingerprint": fingerprint("rule", payload),
-                           "rule_version": RULE_CONTRACT_VERSION,
-                           "source_version": SOURCE_CONTRACT_VERSION,
-                           "target_version": TARGET_CONTRACT_VERSION,
-                           "canonical_version": CANONICALIZATION_VERSION,
-                           "source": json.dumps({"kind": "Direct", "header": target.code,
-                                                 "file_contract_version": FILE_SOURCE_CONTRACT_VERSION}),
-                           "meaning": json.dumps(definition_meaning(definition)),
-                           "payload": json.dumps(payload), "uid": tenant.owner})
-                    await bind_pending_rule(db, company_id=tenant.company_id, user_id=tenant.owner,
-                        import_id=iid, expected_import_revision=upload["revision"],
-                        pay_definition_id=definition.pay_definition_id,
-                        period_definition_id=definition.payroll_period_definition_id,
-                        rate_definition_id=definition.rate_definition_id, rule_version_id=rule_id,
-                        expected_head_revision=0)
-                latest = await client.get(f"/payroll/imports/{iid}", headers=tenant.admin)
-                assert latest.status_code == 200, latest.text
-                upload = latest.json()
+                for role in ("DriverNumber", "WorkDate"):
+                    if role in headers:
+                        shared_columns[role] = {"header": role}
+                for header in headers:
+                    if header in {"DriverNumber", "WorkDate"} or header in target_rules:
+                        continue
+                    target_rules[header] = {"target": f"Definition:{definitions[header]}",
+                        "transform": "Direct", "inputs": [{"header": header}],
+                        "expected_head_revision": 0}
+            response = await client.put(f"/payroll/imports/{iid}/mapping", json={
+                "expected_revision": upload["revision"], "shared_columns": shared_columns,
+                "targets": list(target_rules.values())}, headers=tenant.admin)
+            assert response.status_code == 200, response.text
+            upload = response.json()
             sql_count = 0
             sql_seconds = 0
             sql_writes.clear()

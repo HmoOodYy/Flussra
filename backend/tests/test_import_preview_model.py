@@ -15,14 +15,14 @@ from app.payroll.definition_calculation import PeriodDefinition
 WORK_DATE = date(2026, 10, 20)
 
 
-def _definition(definition_id=100, code="REGULAR", name="Regular work"):
+def _definition(definition_id=100, code="REGULAR", name="Regular work", input_type="Decimal"):
     return PeriodDefinition(
         payroll_period_definition_id=definition_id,
         pay_definition_id=definition_id + 1000,
         rate_definition_id=definition_id + 2000,
         code=code,
         name=name,
-        input_type="Decimal",
+        input_type=input_type,
         unit="hours",
         calculation_method="PerUnit",
         calculation_method_version=1,
@@ -74,7 +74,9 @@ def _context(*, driver=None, definition=None, assignment=None, live=True,
 
 
 def _source(*, quantity_value="4.0000", driver_number="001", employee_key=None, driver_name=None):
-    mapping = {"1": "DriverNumber", "2": "WorkDate", "3": "Definition:100"}
+    mapping = {"1": "DriverNumber", "2": "WorkDate"}
+    quantity_rules = [{"target": "Definition:100", "transform": "Direct", "columns": ["3"],
+                       "source_signature": {"inputs": [{"header": "regular"}]}}]
     cells = {
         "1": {"value": driver_number, "kind": "text", "formula": False, "missing_cache": False},
         "2": {"value": WORK_DATE.isoformat(), "kind": "text", "formula": False, "missing_cache": False},
@@ -88,12 +90,26 @@ def _source(*, quantity_value="4.0000", driver_number="001", employee_key=None, 
         mapping[column] = "DriverName"
         cells[column] = {"value": driver_name, "kind": "text", "formula": False, "missing_cache": False}
     return {"file_ordinal": 1, "unit_name": "CSV", "unit_kind": "CSV",
-            "structure_fingerprint": "a" * 64, "mapping": mapping,
+            "structure_fingerprint": "a" * 64, "mapping": mapping, "quantity_rules": quantity_rules,
             "date_source": {"kind": "column"}, "date_order": None,
             "materialized": {"inspection": {"header_row_number": 1,
                 "header_cells": ["DriverNumber", "WorkDate", "REGULAR"]},
                 "rows": [{"source_row": 2, "cells": cells}],
                 "nonempty_columns": sorted(map(int, cells))}}
+
+
+def _sum_source(*, first="0.5", second="0.5"):
+    source = _source(quantity_value=first)
+    source["quantity_rules"] = [{"target": "Definition:100", "transform": "Sum", "columns": ["3", "4"],
+                                 "source_signature": {"inputs": [{"header": "regular-a"},
+                                                                    {"header": "regular-b"}]}}]
+    source["materialized"]["inspection"]["header_cells"] = [
+        "DriverNumber", "WorkDate", "Regular A", "Regular B"]
+    source["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": second, "kind": "number", "formula": False, "missing_cache": False,
+    }
+    source["materialized"]["nonempty_columns"] = [1, 2, 3, 4]
+    return source
 
 
 def test_context_only_existing_source_rescue_changes_plan_not_source_content():
@@ -156,7 +172,7 @@ def test_semantic_fingerprints_ignore_surrogate_identifier_renumbering():
     source["source_unit_id"] = 17
     changed_source = _source()
     changed_source["source_unit_id"] = 1700
-    changed_source["mapping"]["3"] = "Definition:9100"
+    changed_source["quantity_rules"][0]["target"] = "Definition:9100"
 
     original = build_batch_preview([deepcopy(source)], baseline)
     equivalent = build_batch_preview([deepcopy(changed_source)], renumbered)
@@ -227,6 +243,50 @@ def test_blank_zero_and_decimal_formatting_have_distinct_and_stable_semantics():
     assert two["content_fingerprint"] == formatted_two["content_fingerprint"]
     assert two["plan_fingerprint"] == formatted_two["plan_fingerprint"]
     assert two["rows"][0]["row_fingerprint"] == formatted_two["rows"][0]["row_fingerprint"]
+
+
+def test_sum_validates_final_quantity_and_warns_for_blank_operands_on_driver_date_row():
+    whole_number_context = _context(definition=_definition(input_type="WholeNumber"))
+    combined = build_batch_preview([_sum_source()], whole_number_context)
+
+    assert combined["rows"][0]["skipped"] is False
+    assert combined["rows"][0]["values"]["100"]["quantity"] == "1"
+    assert not any(issue["code"] == "IMPORT_QUANTITY_INVALID" for issue in combined["issues"])
+
+    blanked = build_batch_preview([_sum_source(first="", second="")], _context())
+    assert blanked["rows"][0]["skipped"] is False
+    assert blanked["rows"][0]["values"]["100"]["is_blank"] is True
+    assert any(issue["code"] == "IMPORT_SUM_INPUT_MISSING" for issue in blanked["issues"])
+
+
+def test_sum_missing_operand_does_not_mask_invalid_nonblank_operand():
+    preview = build_batch_preview([_sum_source(first="", second="bad")], _context())
+
+    assert preview["rows"][0]["skipped"] is False
+    assert any(issue["code"] == "IMPORT_QUANTITY_INVALID" for issue in preview["issues"])
+    assert not any(issue["code"] == "IMPORT_SUM_INPUT_MISSING" for issue in preview["issues"])
+
+
+def test_sum_with_no_physical_operands_warns_without_emitting_unprovenanced_value():
+    source = _sum_source()
+    source["quantity_rules"][0]["columns"] = [None, None]
+    preview = build_batch_preview([source], _context())
+
+    assert preview["rows"][0]["skipped"] is False
+    assert preview["rows"][0]["values"] == {}
+    assert any(issue["code"] == "IMPORT_SUM_INPUT_MISSING"
+               and issue["column"] is None for issue in preview["issues"])
+    assert preview["rows"][0]["semantic"]["values"]["REGULAR"]["missing_source"] is True
+
+
+def test_direct_rule_with_absent_input_preserves_semantics_without_candidate_value():
+    source = _source()
+    source["quantity_rules"][0]["columns"] = [None]
+    preview = build_batch_preview([source], _context())
+
+    assert preview["rows"][0]["values"] == {}
+    assert preview["rows"][0]["semantic"]["values"]["REGULAR"]["missing_source"] is True
+    assert preview["issues"] == []
 
 
 def test_ignored_source_value_does_not_change_semantic_fingerprints():
@@ -326,7 +386,7 @@ def test_distinct_layouts_merge_into_one_driver_date_group():
         source["file_ordinal"] = index + 1
         source["unit_name"] = f"Sheet {index + 1}"
         source["structure_fingerprint"] = f"{index + 1:064x}"
-        source["mapping"]["3"] = f"Definition:{definition.payroll_period_definition_id}"
+        source["quantity_rules"][0]["target"] = f"Definition:{definition.payroll_period_definition_id}"
         source["materialized"]["inspection"]["header_cells"][2] = definition.code
         sources.append(source)
 
@@ -350,14 +410,20 @@ def test_rescued_existing_target_remains_conflict_when_new_target_is_ineligible_
     context["definition_by_id"] = {100: existing_definition, 101: new_definition}
 
     outcomes = []
-    for mapping, cells in (
-        ({"1": "DriverNumber", "2": "WorkDate", "3": "Definition:101", "4": "Definition:100"},
+    for quantity_rules, cells in (
+        ([{"target": "Definition:101", "transform": "Direct", "columns": ["3"],
+          "source_signature": {"inputs": [{"header": "EXISTING"}]}},
+         {"target": "Definition:100", "transform": "Direct", "columns": ["4"],
+          "source_signature": {"inputs": [{"header": "NEW"}]}}],
          {"3": "1", "4": "4"}),
-        ({"1": "DriverNumber", "2": "WorkDate", "3": "Definition:100", "4": "Definition:101"},
+        ([{"target": "Definition:100", "transform": "Direct", "columns": ["3"],
+          "source_signature": {"inputs": [{"header": "EXISTING"}]}},
+         {"target": "Definition:101", "transform": "Direct", "columns": ["4"],
+          "source_signature": {"inputs": [{"header": "NEW"}]}}],
          {"3": "4", "4": "1"}),
     ):
         source = _source()
-        source["mapping"] = mapping
+        source["quantity_rules"] = quantity_rules
         source["materialized"]["inspection"]["header_cells"] = ["DriverNumber", "WorkDate", "EXISTING", "NEW"]
         source["materialized"]["nonempty_columns"] = [1, 2, 3, 4]
         source["materialized"]["rows"][0]["cells"].update({

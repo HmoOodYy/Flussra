@@ -15,7 +15,11 @@ from tests.compensation_api_fixtures import (  # noqa: F401
     p3c_http_client,
 )
 from tests.compensation_database_fixtures import p3b_database  # noqa: F401
-from tests.payroll_runtime_fixtures import build_payroll_tenant, open_period_with_grid
+from tests.payroll_runtime_fixtures import (
+    build_payroll_tenant,
+    map_import_columns,
+    open_period_with_grid,
+)
 
 pytestmark = pytest.mark.asyncio
 DATA = b"Driver Number,Work Date,Units\n001,2026-10-20,1\n"
@@ -44,13 +48,8 @@ async def _mapped_import(client, engine, tenant, period, assignment_id, definiti
     response = await upload(client, tenant, period, uuid4(), data)
     assert response.status_code == 200, response.text
     created = response.json()
-    layout = created["layouts"][0]
-    mapping = await client.put(
-        f"/payroll/imports/{created['import_id']}/layouts/{layout['layout_id']}/mapping",
-        json={"expected_revision": created["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"}},
-        headers=tenant.admin,
-    )
+    mapping = await map_import_columns(client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
     assert mapping.status_code == 200, mapping.text
     return created, mapping.json()
 
@@ -122,13 +121,8 @@ async def test_preview_rechecks_canonical_quantity_and_preserves_prior_publicati
     uploaded = await upload(p3c_client, tenant, period, uuid4(), data)
     assert uploaded.status_code == 200, uploaded.text
     created = uploaded.json()
-    layout = created["layouts"][0]
-    mapping = await p3c_client.put(
-        f"/payroll/imports/{created['import_id']}/layouts/{layout['layout_id']}/mapping",
-        json={"expected_revision": created["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"}},
-        headers=tenant.admin,
-    )
+    mapping = await map_import_columns(p3c_client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
     assert mapping.status_code == 200, mapping.text
     initial = await p3c_client.post(f"/payroll/imports/{created['import_id']}/preview",
         json={"expected_revision": mapping.json()["revision"]}, headers=tenant.admin)

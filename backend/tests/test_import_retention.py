@@ -26,7 +26,7 @@ from tests.compensation_api_fixtures import (  # noqa: F401 - register isolated 
     p3c_http_client,
 )
 from tests.compensation_database_fixtures import p3b_database  # noqa: F401
-from tests.payroll_runtime_fixtures import build_payroll_tenant
+from tests.payroll_runtime_fixtures import build_payroll_tenant, map_import_columns
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,11 +67,8 @@ async def upload(client, tenant, pid, data, *, key=None):
 
 async def _map_and_preview(client, tenant, created, definition_id):
     iid = created["import_id"]
-    layout_id = created["layouts"][0]["layout_id"]
-    mapped = await client.put(f"/payroll/imports/{iid}/layouts/{layout_id}/mapping",
-        json={"expected_revision": created["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"}},
-        headers=tenant.admin)
+    mapped = await map_import_columns(client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
     assert mapped.status_code == 200, mapped.text
     preview = await client.post(f"/payroll/imports/{iid}/preview",
         json={"expected_revision": mapped.json()["revision"]}, headers=tenant.admin)
@@ -127,6 +124,44 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
                     WHERE importid=:iid AND companyid=:cid"""), {"uid": tenant.owner, "iid": iid, "cid": tenant.company_id})
         staged.append((iid, desired, details(tenant, iid)))
 
+    headers, values = (line.split(",") for line in data.decode().strip().splitlines())
+    code = headers[2]
+    duplicate_data = (",".join([*headers[:2], code, code, code]) + "\n"
+                      + ",".join([*values[:2], values[2], values[2], "99"]) + "\n").encode()
+    duplicate_upload = await upload(p3c_client, tenant, pid, duplicate_data)
+    assert duplicate_upload.status_code == 200, duplicate_upload.text
+    duplicate_created = duplicate_upload.json()
+    duplicate_layout = duplicate_created["layouts"][0]
+    signature = duplicate_layout["inspection"]["duplicate_header_signatures"][0]["signature"]
+    mapping = await p3c_client.put(
+        f"/payroll/imports/{duplicate_created['import_id']}/mapping",
+        json={"expected_revision": duplicate_created["revision"],
+              "shared_columns": {"DriverNumber": {"header": headers[0]},
+                                 "WorkDate": {"header": headers[1]}},
+              "ignored_columns": [{"header": code, "occurrences": [
+                  {"duplicate_signature": signature, "occurrence_ordinal": 3}]}],
+              "targets": [{"target": f"Definition:{definition_id}", "transform": "Sum",
+                           "inputs": [
+                               {"header": code, "occurrences": [
+                                   {"duplicate_signature": signature, "occurrence_ordinal": 1}]},
+                               {"header": code, "occurrences": [
+                                   {"duplicate_signature": signature, "occurrence_ordinal": 2}]},
+                           ], "expected_head_revision": 0}]},
+        headers=tenant.admin,
+    )
+    assert mapping.status_code == 200, mapping.text
+    duplicate_preview = await p3c_client.post(
+        f"/payroll/imports/{duplicate_created['import_id']}/preview",
+        json={"expected_revision": mapping.json()["revision"]}, headers=tenant.admin)
+    assert duplicate_preview.status_code == 200, duplicate_preview.text
+    async with p3c_engine.begin() as db:
+        await db.execute(text("""UPDATE import.Imports SET Status='Completed', Revision=Revision+1,
+            CompletedByUserID=:uid, CompletedAtUtc=NOW(), UpdatedByUserID=:uid, UpdatedAtUtc=NOW()
+            WHERE ImportID=:iid AND CompanyID=:cid"""),
+            {"uid": tenant.owner, "iid": duplicate_created["import_id"], "cid": tenant.company_id})
+    duplicate_iid = duplicate_created["import_id"]
+    staged.append((duplicate_iid, "Completed", details(tenant, duplicate_iid)))
+
     await submit_and_approve(p3c_client, tenant, scenario.period)
     result = await finalize(p3c_client, tenant, scenario.period)
     assert Decimal(result.json()["final_gross"]) == Decimal("42.00")
@@ -148,6 +183,16 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
         assert read.json()["files"][0]["canonical_data_bytes"] > 0
         assert read.json()["source_editable"] is False
         assert read.json()["preview"]["summary"] == before[14]
+
+    persisted_signature = rows(tenant, """
+        SELECT SourceSignature FROM import.PayrollWorkRuleVersions
+        WHERE CompanyID=%s AND OriginImportID=%s
+    """, tenant.company_id, duplicate_iid)
+    assert len(persisted_signature) == 1
+    assert persisted_signature[0][0]["ignored_columns"] == [{
+        "header": code.casefold(),
+        "occurrences": [{"duplicate_signature": signature, "occurrence_ordinal": 3}],
+    }]
 
     async with p3c_engine.begin() as db:
         await purge_payroll_work_import_details(db, company_id=tenant.company_id, period_id=pid, actor_id=tenant.owner)

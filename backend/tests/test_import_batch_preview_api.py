@@ -19,6 +19,7 @@ from tests.compensation_database_fixtures import p3b_database  # noqa: F401
 from tests.payroll_runtime_fixtures import (
     add_driver,
     build_payroll_tenant,
+    map_import_columns,
     open_period_with_grid,
     rated_definition,
 )
@@ -84,13 +85,8 @@ async def _definition(engine, tenant, period):
 
 async def _map_and_preview(client, tenant, created, definition_id):
     import_id = created["import_id"]
-    layout = created["layouts"][0]
-    response = await client.put(
-        f"/payroll/imports/{import_id}/layouts/{layout['layout_id']}/mapping",
-        json={"expected_revision": created["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"}},
-        headers=tenant.admin,
-    )
+    response = await map_import_columns(client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
     assert response.status_code == 200, response.text
     preview = await client.post(
         f"/payroll/imports/{import_id}/preview",
@@ -101,9 +97,7 @@ async def _map_and_preview(client, tenant, created, definition_id):
 
 
 async def _map_custom_and_preview(client, tenant, created, mapping):
-    layout_id = created["layouts"][0]["layout_id"]
-    mapped = await client.put(f"/payroll/imports/{created['import_id']}/layouts/{layout_id}/mapping",
-        json={"expected_revision": created["revision"], "column_mapping": mapping}, headers=tenant.admin)
+    mapped = await map_import_columns(client, tenant, created, mapping)
     assert mapped.status_code == 200, mapped.text
     preview = await client.post(f"/payroll/imports/{created['import_id']}/preview",
         json={"expected_revision": mapped.json()["revision"]}, headers=tenant.admin)
@@ -155,16 +149,20 @@ async def test_headerless_physical_columns_cannot_be_mapped_by_request(
     )])
     assert upload.status_code == 200, upload.text
     created = upload.json()
-    layout = created["layouts"][0]
-    assert created["files"][0]["units"][0]["inspection"]["headerless_columns"] == [2]
+    inspection = created["files"][0]["units"][0]["inspection"]
+    assert inspection["headerless_columns"] == [2]
+    assert inspection["notices"] == [
+        "Some data was ignored because no column header was provided. Please review your file."
+    ]
     rejected = await p3c_client.put(
-        f"/payroll/imports/{created['import_id']}/layouts/{layout['layout_id']}/mapping",
-        json={"expected_revision": created["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": "DriverName", "3": "WorkDate", "4": "Ignore"}},
+        f"/payroll/imports/{created['import_id']}/mapping",
+        json={"expected_revision": created["revision"], "shared_columns": {
+            "DriverNumber": {"header": "DriverNumber"}, "WorkDate": {"header": "WorkDate"}},
+            "ignored_columns": [{"header": "   "}], "targets": []},
         headers=tenant.admin,
     )
     assert rejected.status_code == 422, rejected.text
-    assert rejected.json()["detail"]["code"] == "IMPORT_HEADERLESS_COLUMN_UNSUPPORTED"
+    assert rejected.json()["detail"]["code"] == "IMPORT_SELECTOR_INVALID"
     current = await p3c_client.get(f"/payroll/imports/{created['import_id']}", headers=tenant.admin)
     assert current.status_code == 200, current.text
     assert current.json()["revision"] == created["revision"]
@@ -461,19 +459,18 @@ async def test_grid_keeps_all_definitions_when_more_than_five_layouts_share_one_
     assert uploaded.status_code == 200, uploaded.text
     created = uploaded.json()
     assert len(created["layouts"]) == 6
-    revision = created["revision"]
+    mapped_targets = []
     for layout in created["layouts"]:
-        # Each layout's immutable header sample identifies its one quantity target.
         header = layout["inspection"]["header_cells"][2]
         target = next(item for item in targets if item["code"] == header)
-        mapped = await p3c_client.put(
-            f"/payroll/imports/{created['import_id']}/layouts/{layout['layout_id']}/mapping",
-            json={"expected_revision": revision, "column_mapping": {
-                "1": "DriverNumber", "2": "WorkDate", "3": target["target"]}},
-            headers=tenant.admin,
-        )
-        assert mapped.status_code == 200, mapped.text
-        revision = mapped.json()["revision"]
+        mapped_targets.append({"target": target["target"], "transform": "Direct",
+                               "inputs": [{"header": header}], "expected_head_revision": 0})
+    mapped = await p3c_client.put(f"/payroll/imports/{created['import_id']}/mapping",
+        json={"expected_revision": created["revision"], "shared_columns": {
+            "DriverNumber": {"header": "DriverNumber"}, "WorkDate": {"header": "WorkDate"}},
+            "targets": mapped_targets}, headers=tenant.admin)
+    assert mapped.status_code == 200, mapped.text
+    revision = mapped.json()["revision"]
     preview = await p3c_client.post(f"/payroll/imports/{created['import_id']}/preview",
         json={"expected_revision": revision}, headers=tenant.admin)
     assert preview.status_code == 200, preview.text
@@ -634,11 +631,12 @@ async def test_import_default_work_date_refreshes_every_tagged_unit_and_clearing
     assert all(unit["date_source"] == {"kind": "import_fixed"}
                for file in interpreted_json["files"] for unit in file["units"])
 
-    layout = interpreted_json["layouts"][0]
     mapped = await p3c_client.put(
-        f"/payroll/imports/{created['import_id']}/layouts/{layout['layout_id']}/mapping",
-        json={"expected_revision": interpreted_json["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": f"Definition:{definition_id}"}},
+        f"/payroll/imports/{created['import_id']}/mapping",
+        json={"expected_revision": interpreted_json["revision"], "shared_columns": {
+            "DriverNumber": {"header": "DriverNumber"}}, "targets": [{
+                "target": f"Definition:{definition_id}", "transform": "Direct",
+                "inputs": [{"header": definition_code}], "expected_head_revision": 0}]},
         headers=tenant.admin,
     )
     assert mapped.status_code == 200, mapped.text
@@ -701,6 +699,7 @@ async def _assert_date_provider_survives_preview_refresh(client, engine, tenant,
     uploaded = await _upload(client, tenant, period, [(file_name, file_bytes)])
     assert uploaded.status_code == 200, uploaded.text
     created = uploaded.json()
+    value_header = created["layouts"][0]["inspection"]["header_cells"][1]
     unit = created["files"][0]["units"][0]
     assert unit["name"] == unit_name
 
@@ -712,12 +711,12 @@ async def _assert_date_provider_survives_preview_refresh(client, engine, tenant,
         headers=tenant.admin,
     )
     assert interpreted.status_code == 200, interpreted.text
-    layout = interpreted.json()["layouts"][0]
     mapped = await client.put(
-        f"/payroll/imports/{created['import_id']}/layouts/{layout['layout_id']}/mapping",
-        json={"expected_revision": interpreted.json()["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": f"Definition:{definition_id}",
-        }},
+        f"/payroll/imports/{created['import_id']}/mapping",
+        json={"expected_revision": interpreted.json()["revision"], "shared_columns": {
+            "DriverNumber": {"header": "DriverNumber"}}, "targets": [{
+                "target": f"Definition:{definition_id}", "transform": "Direct",
+                "inputs": [{"header": value_header}], "expected_head_revision": 0}]},
         headers=tenant.admin,
     )
     assert mapped.status_code == 200, mapped.text

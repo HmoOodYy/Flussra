@@ -227,10 +227,9 @@ async def test_lowered_policy_blocks_mapping_and_preview_but_metadata_keeps_trut
     assert metadata.status_code == 200, metadata.text
     assert metadata.json()["header_structure"]["combined_column_count"] == 4
 
-    layout_id = body["layouts"][0]["layout_id"]
     mapping = await p3c_client.put(
-        f"/payroll/imports/{body['import_id']}/layouts/{layout_id}/mapping",
-        json={"expected_revision": body["revision"], "column_mapping": {}}, headers=tenant.admin)
+        f"/payroll/imports/{body['import_id']}/mapping",
+        json={"expected_revision": body["revision"], "shared_columns": {}, "targets": []}, headers=tenant.admin)
     assert mapping.status_code == 422
     assert mapping.json()["detail"]["code"] == "IMPORT_COMBINED_COLUMN_LIMIT_EXCEEDED"
 
@@ -262,18 +261,24 @@ async def test_calendar_looking_labels_are_accepted_as_headers_not_day_targets(
         definitions = await list_period_definitions(period["payroll_period_id"], tenant.company_id, db, active_only=True)
     quantity_target = next(item["target"] for item in targets(definitions)
                            if item["target"].startswith("Definition:"))
-    layout_id = body["layouts"][0]["layout_id"]
     ordinary_quantity = await p3c_client.put(
-        f"/payroll/imports/{body['import_id']}/layouts/{layout_id}/mapping",
-        json={"expected_revision": body["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": quantity_target}}, headers=tenant.admin)
+        f"/payroll/imports/{body['import_id']}/mapping",
+        json={"expected_revision": body["revision"], "shared_columns": {
+            "DriverNumber": {"header": "DriverNumber"}}, "targets": [{
+                "target": quantity_target, "transform": "Direct", "inputs": [{"header": "Monday"}],
+                "expected_head_revision": 0}]}, headers=tenant.admin)
     assert ordinary_quantity.status_code == 200, ordinary_quantity.text
     invalid_day_target = await p3c_client.put(
-        f"/payroll/imports/{body['import_id']}/layouts/{layout_id}/mapping",
-        json={"expected_revision": ordinary_quantity.json()["revision"], "column_mapping": {
-            "1": "DriverNumber", "2": "Monday"}}, headers=tenant.admin)
+        f"/payroll/imports/{body['import_id']}/mapping",
+        json={"expected_revision": ordinary_quantity.json()["revision"], "shared_columns": {
+            "DriverNumber": {"header": "DriverNumber"}}, "targets": [{
+                "target": "Monday", "transform": "Direct", "inputs": [{"header": "Tuesday"}],
+                "expected_head_revision": 0}]}, headers=tenant.admin)
     assert invalid_day_target.status_code == 422
-    assert invalid_day_target.json()["detail"]["code"] == "IMPORT_MAPPING_INVALID"
+    assert invalid_day_target.json()["detail"]["code"] == "IMPORT_MAPPING_REQUEST_INVALID"
+    current = await p3c_client.get(f"/payroll/imports/{body['import_id']}", headers=tenant.admin)
+    assert current.status_code == 200, current.text
+    assert current.json()["revision"] == ordinary_quantity.json()["revision"]
     current = await p3c_client.get(f"/payroll/imports/{body['import_id']}", headers=tenant.admin)
     assert current.json()["revision"] == ordinary_quantity.json()["revision"]
 

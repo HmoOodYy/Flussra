@@ -20,7 +20,21 @@ DATE_PARTS = re.compile(r"^(\d{1,4})[/.-](\d{1,2})[/.-](\d{1,4})$", re.ASCII)
 
 def canonical(value):
     if isinstance(value, Decimal):
-        return format(value.normalize(), "f") if value else "0"
+        if not value:
+            return "0"
+        if abs(value.adjusted()) > 1_000:
+            parts = value.as_tuple()
+            digits = list(parts.digits)
+            exponent = parts.exponent
+            while len(digits) > 1 and digits[-1] == 0:
+                digits.pop()
+                exponent += 1
+            mantissa = str(digits[0]) + ("." + "".join(map(str, digits[1:])) if len(digits) > 1 else "")
+            return ("-" if parts.sign else "") + mantissa + "E" + str(exponent + len(digits) - 1)
+        exact = format(value, "f")
+        if "." in exact:
+            exact = exact.rstrip("0").rstrip(".")
+        return exact
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if isinstance(value, Mapping):

@@ -66,19 +66,39 @@ def project_source_record(item: dict, cell_offset: int, cell_limit: int) -> dict
     projected["values_count"] = len(values)
     projected["issue_count"] = len(issues)
     projected["values_json"] = {
-        key: value for key, value in values.items()
-        if isinstance(value, dict) and value.get("source_column") in page_columns
+        key: dict(value) for key, value in values.items()
+        if isinstance(value, dict) and (
+            value.get("source_column") in page_columns
+            or any(column in page_columns for column in value.get("source_columns", [])))
     }
+    for value in projected["values_json"].values():
+        _page_operand_details(value, "raw_value", page_columns)
     projected["issues"] = [
-        issue for issue in issues
+        dict(issue) for issue in issues
         if issue.get("column") is None or issue.get("column") in page_columns
     ]
+    for issue in projected["issues"]:
+        _page_operand_details(issue, "value", page_columns)
     projected["cell_count"] = len(ordered)
     projected["cell_offset"] = cell_offset
     projected["cell_limit"] = cell_limit
     projected["cells"] = dict(page)
     projected["next_cell_offset"] = (cell_offset + len(page) if cell_offset + len(page) < len(ordered) else None)
     return canonical(projected)
+
+
+def _page_operand_details(record: dict, field: str, page_columns: set[int]) -> None:
+    """Keep operand provenance available without repeating all operands on each cell page."""
+    operands = record.get(field)
+    if not isinstance(operands, list) or not all(
+        operand is None or isinstance(operand, dict) and "column" in operand
+        for operand in operands
+    ):
+        return
+    record[f"{field}_operand_count"] = len(operands)
+    record[f"{field}_missing_operand_count"] = sum(operand is None for operand in operands)
+    record[field] = [operand for operand in operands
+                     if isinstance(operand, dict) and operand["column"] in page_columns]
 
 
 async def _read_identity(db, cid: int, uid: int, iid: int, revision: int, plan_fingerprint: str):
@@ -187,7 +207,8 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                 entry["candidates"].append({"source_record_id": candidate["sourcerecordid"],
                     "file_ordinal": candidate["fileordinal"], "file_name": candidate["originalfilename"],
                     "unit_name": candidate["unitname"], "source_row": candidate["sourcerownumber"],
-                    "source_column": value["source_column"], "quantity": value["quantity"],
+                    "source_column": value["source_column"], "source_columns": value.get("source_columns", []),
+                    "transform": value.get("transform", "Direct"), "quantity": value["quantity"],
                     "is_blank": value["is_blank"], "outcome": value["outcome"],
                     "current_quantity": value["current_quantity"],
                     "current_source_exists": value["current_source_exists"]})

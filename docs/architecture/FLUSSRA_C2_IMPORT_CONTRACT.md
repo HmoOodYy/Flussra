@@ -1,6 +1,6 @@
 # Flussra C2 Import Product Contract
 
-**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A05 have been implemented and focused-verified on the foundation continuation; A05 adds cross-file header compatibility and combined-column accounting, not mapping semantics or the complete revised import experience/payroll application.
+**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A06 have been implemented and focused-verified on the foundation continuation. A06 covers per-target pending mappings, Direct/Sum and duplicate outcomes, compatible current-head reuse and affected-target remapping; A07-A12, semantic repeat recognition, the connected Import experience and Slice B payroll application remain incomplete.
 
 **Continuation baseline:** `codex/c2-import-foundation`, implementation at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e` and documentation through `f15bf96`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
 

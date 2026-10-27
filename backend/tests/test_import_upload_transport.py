@@ -11,6 +11,7 @@ from app.imports import ImportFailure
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
 from app.imports.transport import (
     receive_files,
+    receive_mapping_json,
 )
 
 
@@ -62,6 +63,24 @@ def _receive_files(body: bytes, *, policy=DEFAULT_IMPORT_RESOURCE_POLICY,
     return asyncio.run(receive_files(
         _request(body, chunk_sizes=chunk_sizes, content_length=content_length), policy
     ))
+
+
+def test_receive_mapping_json_counts_streamed_bytes_not_declared_content_length() -> None:
+    body = b'{"expected_revision":1}'
+    request = _request(body, content_length="1")
+
+    assert asyncio.run(receive_mapping_json(request, len(body))) == body
+
+
+def test_receive_mapping_json_rejects_actual_oversize_even_when_content_length_is_small() -> None:
+    body = b'{"targets":[],"padding":"0123456789"}'
+    request = _request(body, chunk_sizes=(4, 5, 3), content_length="1")
+
+    with pytest.raises(ImportFailure) as exc:
+        asyncio.run(receive_mapping_json(request, 16))
+
+    assert exc.value.code == "IMPORT_MAPPING_REQUEST_TOO_LARGE"
+    assert exc.value.status_code == 413
 
 
 def test_receive_file_streams_split_boundaries_and_calculates_sha256() -> None:

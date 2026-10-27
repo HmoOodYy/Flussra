@@ -21,7 +21,7 @@ ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'GET /payroll/periods/{period_id}/imports/policy': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'PUT /payroll/imports/{import_id}/interpretation': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /payroll/imports/{import_id}/layouts': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
-    'PUT /payroll/imports/{import_id}/layouts/{layout_id}/mapping': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'PUT /payroll/imports/{import_id}/mapping': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /payroll/imports/{import_id}/preview': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/imports/{import_id}/rows': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/imports/{import_id}/issues': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),

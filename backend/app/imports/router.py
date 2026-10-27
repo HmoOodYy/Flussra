@@ -1,8 +1,10 @@
 """PayrollWork source staging and bounded preview routes; no decision/apply API."""
 from uuid import UUID
 
+import anyio
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import Response
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.dependencies import get_current_user, get_engine
@@ -16,18 +18,42 @@ from app.imports.batch_service import (
     cancel_import,
     create_import,
     create_layout,
+    load_import,
     read_import,
     update_interpretation,
 )
+from app.imports.errors import ImportFailure
 from app.imports.policy_metadata import ImportPolicyMetadataResponse, read_period_import_policy
 from app.imports.readmodels import (
     read_issues,
     read_rows,
     read_sources,
 )
+from app.imports.runtime import admission, authorize
 from app.imports.template import period_template
+from app.imports.transport import receive_mapping_json
 
 router = APIRouter(prefix="/payroll", tags=["Imports"])
+
+
+def _inline_mapping_schema_refs(schema: dict, definitions: dict, active: frozenset[str] = frozenset()) -> dict:
+    reference = schema.get("$ref")
+    if isinstance(reference, str) and reference.startswith("#/$defs/"):
+        name = reference.rsplit("/", 1)[-1]
+        if name in active:
+            return schema
+        return _inline_mapping_schema_refs(definitions[name], definitions, active | {name})
+    return {key: (_inline_mapping_schema_refs(value, definitions, active) if isinstance(value, dict)
+                  else [_inline_mapping_schema_refs(item, definitions, active) if isinstance(item, dict) else item
+                        for item in value] if isinstance(value, list) else value)
+            for key, value in schema.items()}
+
+
+def _mapping_request_body() -> dict:
+    schema = MappingRequest.model_json_schema()
+    definitions = schema.pop("$defs", {})
+    return {"required": True, "content": {"application/json": {
+        "schema": _inline_mapping_schema_refs(schema, definitions)}}}
 
 
 @router.post("/periods/{period_id}/imports")
@@ -74,10 +100,22 @@ async def regroup_layout(import_id: int, body: RegroupRequest, request: Request,
     return await create_layout(request, engine, int(user["cid"]), int(user["sub"]), import_id, body)
 
 
-@router.put("/imports/{import_id}/layouts/{layout_id}/mapping")
-async def change_mapping(import_id: int, layout_id: int, body: MappingRequest, request: Request,
+@router.put("/imports/{import_id}/mapping", openapi_extra={"requestBody": _mapping_request_body()})
+async def change_mapping(import_id: int, request: Request,
                          user: dict = Depends(get_current_user), engine: AsyncEngine = Depends(get_engine)):
-    return await accept_mapping(request, engine, int(user["cid"]), int(user["sub"]), import_id, layout_id, body)
+    cid, uid = int(user["cid"]), int(user["sub"])
+    async with engine.begin() as db:
+        row = await load_import(db, cid, import_id)
+        await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
+    policy = request.app.state.settings.import_resource_policy
+    async with admission(request):
+        payload = await receive_mapping_json(request, policy.max_mapping_request_bytes)
+        try:
+            body = await anyio.to_thread.run_sync(MappingRequest.model_validate_json, payload)
+        except ValidationError as exc:
+            raise ImportFailure("IMPORT_MAPPING_REQUEST_INVALID",
+                                "Mapping request does not match the supported target mapping format.", 422) from exc
+        return await accept_mapping(request, engine, cid, uid, import_id, body)
 
 
 @router.post("/imports/{import_id}/preview")

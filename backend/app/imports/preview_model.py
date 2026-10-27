@@ -3,12 +3,22 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import date
-from decimal import Decimal
+from decimal import (
+    MAX_EMAX,
+    MIN_EMIN,
+    Decimal,
+    DecimalException,
+    Inexact,
+    InvalidOperation,
+    Rounded,
+    localcontext,
+)
 from types import SimpleNamespace
 
 from app.imports.errors import ImportFailure
 from app.imports.mapping import (
     IDENTIFIERS,
+    NUMBER,
     assignment_meaning,
     blank,
     canonical,
@@ -22,9 +32,12 @@ from app.imports.mapping import (
     period_meaning,
     quantity,
     target_key,
-    validate_mapping,
+)
+from app.imports.mapping import (
+    targets as mapping_targets,
 )
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
+from app.payroll.definition_calculation import quantity_error
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
 
 
@@ -57,6 +70,103 @@ def _date_source_semantics(source):
     return {"kind": kind, "value": value}
 
 
+def _exact_decimal_sum(values: list[Decimal], max_work_digits: int) -> Decimal:
+    """Add bounded finite decimals exactly, independent of the process context."""
+    nonzero = [value for value in values if value]
+    if not nonzero:
+        return Decimal(0)
+    lowest_exponent = min(value.as_tuple().exponent for value in nonzero)
+    highest_adjusted = max(value.adjusted() for value in nonzero)
+    required_span = highest_adjusted - lowest_exponent + len(str(len(nonzero))) + 1
+    if required_span > max_work_digits:
+        raise ArithmeticError("configured numeric work limit exceeded")
+    try:
+        with localcontext() as context:
+            context.prec = max(1, required_span)
+            context.Emax = MAX_EMAX
+            context.Emin = MIN_EMIN
+            context.traps[Inexact] = True
+            context.traps[Rounded] = True
+            total = sum(nonzero, Decimal(0))
+    except DecimalException as exc:
+        raise ArithmeticError("exact decimal sum could not be represented") from exc
+    if not total:
+        return Decimal(0)
+    parts = total.as_tuple()
+    digits = list(parts.digits)
+    exponent = parts.exponent
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    return Decimal((parts.sign, tuple(digits), exponent))
+
+
+def _sum_quantity(cells: dict, columns: list[int | None], definition, max_work_digits: int):
+    values = []
+    raw_operands = []
+    missing = not columns or any(column is None for column in columns)
+    first_error = None
+    first_error_column = None
+    for column in columns:
+        cell = cells.get(str(column)) if column is not None else None
+        if cell is None:
+            raw_operands.append(None)
+            missing = True
+            continue
+        raw_operands.append({"column": int(column), "value": canonical(cell.get("value")),
+                             "kind": cell.get("kind"), "formula": bool(cell.get("formula")),
+                             "missing_cache": bool(cell.get("missing_cache"))})
+        if cell.get("missing_cache"):
+            if first_error is None:
+                first_error = "Formula without a calculated value."
+                first_error_column = int(column)
+            continue
+        if blank(cell):
+            missing = True
+            continue
+        raw = str(cell.get("value", "")).strip()
+        if cell.get("kind") not in ("number", "text") or (
+                cell.get("kind") == "text" and not NUMBER.fullmatch(raw)):
+            if first_error is None:
+                first_error = "Numbers only; use digits with an optional decimal point."
+                first_error_column = int(column)
+            continue
+        try:
+            value = Decimal(raw)
+        except InvalidOperation:
+            if first_error is None:
+                first_error = "Numbers only."
+                first_error_column = int(column)
+            continue
+        if not value.is_finite():
+            if first_error is None:
+                first_error = "Quantity must be a finite number."
+                first_error_column = int(column)
+            continue
+        values.append(value)
+    if first_error:
+        return None, first_error, raw_operands, missing, first_error_column
+    if missing:
+        return None, None, raw_operands, True, None
+    nonzero = [value for value in values if value]
+    if nonzero:
+        lowest_exponent = min(value.as_tuple().exponent for value in nonzero)
+        highest_adjusted = max(value.adjusted() for value in nonzero)
+        required_span = highest_adjusted - lowest_exponent + len(str(len(nonzero))) + 1
+        if required_span > max_work_digits:
+            return None, (f"Sum operands exceed the configured numeric work limit of "
+                          f"{max_work_digits} decimal digits."), raw_operands, False, None
+    try:
+        result = _exact_decimal_sum(values, max_work_digits)
+    except ArithmeticError:
+        return None, (f"Sum operands exceed the configured numeric work limit of "
+                      f"{max_work_digits} decimal digits."), raw_operands, False, None
+    error = quantity_error(definition.input_type, result)
+    if error is None and result.as_tuple().exponent < -4:
+        error = "At most four decimal places are supported."
+    return (None if error else result), error, raw_operands, False, None
+
+
 def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> dict:
     """Normalize selected source units together so duplicates span files/layouts."""
     definitions = context["definitions"]
@@ -72,21 +182,45 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         date_column = next((column for column, target in source["mapping"].items() if target == "WorkDate"), None)
         if (source_date.get("kind") == "column") != (date_column is not None):
             raise ImportFailure("IMPORT_DATE_SOURCE_CONFLICT", "Use either a mapped WorkDate column or one accepted context provider.")
-        mapping = validate_mapping(source["mapping"], source["materialized"]["nonempty_columns"], definitions,
-                                   max_column=(policy.max_columns_per_unit if policy
-                                               else DEFAULT_IMPORT_RESOURCE_POLICY.max_columns_per_unit),
-                                   require_work_date=source_date.get("kind") == "column")
+        mapping = {str(column): target for column, target in source["mapping"].items()}
+        allowed_targets = {item["target"] for item in mapping_targets(definitions)}
+        if any(not str(column).isdigit() or int(column) < 1 or target not in allowed_targets
+               for column, target in mapping.items()):
+            raise ImportFailure("IMPORT_MAPPING_INVALID", "Saved target mapping is outside the current frozen period.", 422)
+        assignments = [value for value in mapping.values() if value != "Ignore"]
+        if not IDENTIFIERS.intersection(assignments):
+            raise ImportFailure("IMPORT_MAPPING_REQUIRED_TARGET", "Map a Driver identifier before preview.", 422)
+        if source_date.get("kind") == "column" and "WorkDate" not in assignments:
+            raise ImportFailure("IMPORT_DATE_SOURCE_CONFLICT", "Map a WorkDate column or choose a context date.", 422)
         materialized = source["materialized"]
         inspection = materialized["inspection"]
         mapped = {column: target for column, target in mapping.items() if target != "Ignore"}
-        if not IDENTIFIERS.intersection(mapped.values()):
-            raise ImportFailure("IMPORT_MAPPING_REQUIRED_TARGET", "Map a Driver identifier, WorkDate and at least one Pay Item.")
-        definition_columns = {column: definitions_by_target[target] for column, target in mapped.items()
-                              if target.startswith("Definition:") and target in definitions_by_target}
+        quantity_rules = source.get("quantity_rules", [])
+        if not quantity_rules:
+            raise ImportFailure("IMPORT_MAPPING_REQUIRED_TARGET", "Map at least one Pay Item target.")
+        definition_columns = {}
+        for rule in quantity_rules:
+            target = rule.get("target")
+            if (target not in definitions_by_target or rule.get("transform") not in {"Direct", "Sum"}
+                    or not isinstance(rule.get("columns"), list) or not rule["columns"]
+                    or rule["transform"] == "Direct" and len(rule["columns"]) != 1
+                    or rule["transform"] == "Sum" and len(rule["columns"]) < 2):
+                raise ImportFailure("IMPORT_RULE_PAYLOAD_UNSUPPORTED", "A saved target rule cannot be previewed.", 409)
+            if target in definition_columns:
+                raise ImportFailure("IMPORT_MAPPING_DUPLICATE_TARGET", "A target rule was resolved more than once.", 422)
+            definition_columns[target] = (definitions_by_target[target], rule)
         date_column = next((column for column, target in mapped.items() if target == "WorkDate"), None)
         raw_rows = materialized["rows"]
-        active_rows = [item for item in raw_rows if any(not blank(item["cells"].get(column, _date_cell(None)))
-                                                        for column in definition_columns)]
+        def has_operand(item, rule):
+            return any(column is not None and not blank(item["cells"].get(str(column), _date_cell(None)))
+                       for column in rule["columns"])
+
+        has_sum_rule = any(rule["transform"] == "Sum" for _definition, rule in definition_columns.values())
+        active_rows = [item for item in raw_rows if any(
+            has_operand(item, rule) for _definition, rule in definition_columns.values())
+            or has_sum_rule and any(not blank(item["cells"].get(str(column), _date_cell(None)))
+                                    for column, target in mapped.items()
+                                    if target in IDENTIFIERS or target == "WorkDate")]
         date_cells = [item["cells"].get(date_column) for item in active_rows] if date_column else []
         date_order, order_state = infer_date_order(date_cells, period["start"], period["end"],
                                                    source.get("date_order"))
@@ -104,8 +238,12 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         source_contract = {
             "structure": source["structure_fingerprint"],
             "unit_kind": source.get("unit_kind"),
-            "mapping": [{"column": int(column), "target": (definition_meaning(definitions_by_target[target])
-                        if target in definitions_by_target else target)} for column, target in _numbered(mapping)],
+            "mapping": [{"column": int(column), "target": target}
+                        for column, target in _numbered(mapping) if target != "Ignore"],
+            "quantity_rules": [{"target": definition_meaning(definition),
+                                "transform": rule["transform"],
+                                "source_signature": rule.get("source_signature")}
+                               for definition, rule in definition_columns.values()],
             "date_source": source_date,
             "date_order": date_order,
             "header_row_number": inspection["header_row_number"],
@@ -117,18 +255,26 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                   "unit_name": source["unit_name"]})
         for source_row in raw_rows:
             cells = source_row["cells"]
-            skipped = not any(not blank(cells.get(column, _date_cell(None))) for column in definition_columns)
+            has_quantity = any(has_operand(source_row, rule)
+                               for _definition, rule in definition_columns.values())
+            has_identity_or_date = any(not blank(cells.get(str(column), _date_cell(None)))
+                                       for column, kind in mapped.items() if kind in IDENTIFIERS | {"WorkDate"})
+            has_sum = any(rule["transform"] == "Sum" for _definition, rule in definition_columns.values())
+            skipped = not has_quantity and not (has_sum and has_identity_or_date)
             data_rows += 0 if skipped else 1
-            candidates += len(definition_columns)
-            selected_cells += len(mapped)
+            candidates += sum(any(column is not None for column in rule["columns"])
+                              for _definition, rule in definition_columns.values())
+            selected_cells += len(mapped) + sum(sum(column is not None for column in rule["columns"])
+                                                for _definition, rule in definition_columns.values())
             row_issues: list[dict] = []
 
-            def issue(column, severity, code, message):
-                value = cells.get(column) if column else None
+            def issue(column, severity, code, message, *, value_override=None):
+                value = cells.get(str(column)) if column else None
                 item = {"file_ordinal": source["file_ordinal"], "unit_name": source["unit_name"],
                         "source_row": source_row["source_row"], "column": int(column) if column else None,
                         "severity": severity, "code": code, "message": message,
-                        "value": (None if value is None else canonical(value.get("value")))}
+                        "value": (value_override if value_override is not None else
+                                  None if value is None else canonical(value.get("value")))}
                 row_issues.append(item)
                 issues.append(item)
 
@@ -211,21 +357,49 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
 
             values = {}
             semantic_values = {}
-            for column, definition in definition_columns.items():
-                cell = cells.get(column, _date_cell(None))
-                is_blank = blank(cell)
-                if skipped:
-                    value, error = None, None
+            for target, (definition, rule) in definition_columns.items():
+                columns = rule["columns"]
+                is_sum = rule["transform"] == "Sum"
+                issue_column = next((item for item in columns if item is not None), None)
+                raw_operands = None
+                missing_sum = False
+                if is_sum:
+                    value, error, raw_operands, missing_sum, error_column = _sum_quantity(
+                        cells, columns, definition,
+                        policy.max_numeric_work_digits if policy else DEFAULT_IMPORT_RESOURCE_POLICY.max_numeric_work_digits)
+                    if error_column is not None:
+                        issue_column = error_column
+                    cell = {"value": canonical(value), "kind": "number", "formula": False,
+                            "missing_cache": False} if value is not None else _date_cell(None)
+                    is_blank = missing_sum
                 else:
-                    value, error = quantity(cell, SimpleNamespace(input_type=definition.input_type))
+                    column = columns[0]
+                    cell = cells.get(str(column), _date_cell(None)) if column is not None else _date_cell(None)
+                    is_blank = blank(cell)
+                    if skipped:
+                        value, error = None, None
+                    else:
+                        value, error = quantity(cell, SimpleNamespace(input_type=definition.input_type))
+                source_columns = [int(item) for item in columns if item is not None]
+                if not source_columns:
+                    if is_sum and not skipped:
+                        issue(None, "Warning", "IMPORT_SUM_INPUT_MISSING",
+                              "A required Sum input is missing or blank; no quantity is supplied for this target.",
+                              value_override=raw_operands)
+                    semantic_values[definition.code] = {
+                        "transform": "Sum" if is_sum else "Direct",
+                        "operands": raw_operands if is_sum else None,
+                        "blank": True, "quantity": None, "error": error, "missing_source": True,
+                    }
+                    continue
                 source_quantity_error = error
                 key = (assignment_id, date_value, definition.payroll_period_definition_id)
                 current_present = key in context["current_lines"] if assignment_id and date_value else False
                 current = context["current_lines"].get(key)
-                if is_blank:
-                    outcome = "Blank"
-                elif error:
+                if error:
                     outcome = "Invalid"
+                elif is_blank:
+                    outcome = "Blank"
                 elif row_error:
                     outcome = "Invalid"
                 elif proposed:
@@ -243,25 +417,37 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                     outcome = "Invalid"
                     error = "Existing-source rescue permits changing existing input on this date, not adding new source."
                 if error:
-                    issue(column, "Error", "IMPORT_QUANTITY_INVALID" if not (value is not None and not fresh and not current_present)
-                          else "IMPORT_NEW_SOURCE_NOT_ELIGIBLE", error)
+                    issue(issue_column, "Error", "IMPORT_QUANTITY_INVALID" if not (value is not None and not fresh and not current_present)
+                          else "IMPORT_NEW_SOURCE_NOT_ELIGIBLE", error,
+                          value_override=raw_operands if raw_operands is not None else None)
+                elif missing_sum and not skipped:
+                    issue(issue_column, "Warning",
+                          "IMPORT_SUM_INPUT_MISSING",
+                          "A required Sum input is missing or blank; no quantity is supplied for this target.",
+                          value_override=raw_operands)
                 if outcome == "Conflict":
-                    issue(column, "Conflict", "IMPORT_VALUE_CONFLICT",
+                    issue(issue_column, "Conflict", "IMPORT_VALUE_CONFLICT",
                           "Incoming quantity differs from the current quantity; no replacement is selected.")
                 entry_state = context["entries"].get((assignment_id, date_value)) if assignment_id and date_value else None
                 day_off = bool(date_value and context["days"].get(date_value, False))
                 if value is not None and value > 0 and outcome in ("New", "Conflict", "Unresolved") and entry_state and entry_state["isoffreason"]:
-                    issue(column, "Conflict", "IMPORT_STATUS_DECISION_REQUIRED",
+                    issue(issue_column, "Conflict", "IMPORT_STATUS_DECISION_REQUIRED",
                           "Positive work overlaps a held full-day-off Status; no Status removal is selected.")
                 if value is not None and value > 0 and outcome in ("New", "Conflict", "Unresolved") and day_off:
-                    issue(column, "Conflict", "IMPORT_DAY_OFF_DECISION_REQUIRED",
+                    issue(issue_column, "Conflict", "IMPORT_DAY_OFF_DECISION_REQUIRED",
                           "Positive work is on a configured day off; no exception is accepted.")
                 defid = str(definition.payroll_period_definition_id)
-                values[defid] = {"source_column": int(column), "raw_value": canonical(cell.get("value")),
+                source_columns = [int(item) for item in columns if item is not None]
+                raw_value = raw_operands if raw_operands is not None else canonical(cell.get("value"))
+                values[defid] = {"source_column": source_columns[0] if source_columns else None,
+                                 "source_columns": source_columns, "transform": "Sum" if is_sum else "Direct",
+                                 "raw_value": raw_value,
                                  "quantity": canonical(value), "is_blank": is_blank, "outcome": outcome,
                                  "current_quantity": canonical(current), "current_source_exists": current_present}
                 semantic_values[definition.code] = (
-                    {"blank": is_blank, "quantity": canonical(value)} if not source_quantity_error else
+                    {"transform": "Sum" if is_sum else "Direct", "operands": raw_operands,
+                     "blank": is_blank, "quantity": canonical(value), "error": source_quantity_error}
+                    if is_sum or not source_quantity_error else
                     {"invalid": True, "raw_value": canonical(cell.get("value")), "kind": cell.get("kind"),
                      "formula": bool(cell.get("formula")), "missing_cache": bool(cell.get("missing_cache"))}
                 )

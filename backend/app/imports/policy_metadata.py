@@ -51,6 +51,7 @@ class ImportResourcePolicyResponse(BaseModel):
     max_xlsx_members: int = Field(strict=True, ge=1)
     max_xlsx_xml_depth: int = Field(strict=True, ge=1)
     max_concurrent_requests: int = Field(strict=True, ge=1)
+    max_numeric_work_digits: int = Field(strict=True, ge=1)
     max_response_bytes: int = Field(strict=True, ge=1)
     row_page_default: int = Field(strict=True, ge=1)
     row_page_max: int = Field(strict=True, ge=1)
@@ -68,6 +69,7 @@ class ImportResourcePolicyResponse(BaseModel):
     layout_header_sample: int = Field(strict=True, ge=1)
     max_header_label_chars: int = Field(strict=True, ge=1)
     max_request_body_bytes: int = Field(strict=True, ge=1)
+    max_mapping_request_bytes: int = Field(strict=True, ge=1)
 
 
 class ImportPolicyMetadataResponse(BaseModel):

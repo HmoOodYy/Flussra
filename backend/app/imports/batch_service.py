@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 import anyio
 from fastapi import HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -26,20 +26,26 @@ from app.imports.contracts import (
     CANONICALIZATION_VERSION,
     FILE_SOURCE_CONTRACT_VERSION,
     IMPORT_CONTRACT_VERSION,
+    RULE_CONTRACT_VERSION,
     SOURCE_CONTRACT_VERSION,
     TARGET_CONTRACT_VERSION,
     require_supported_import_contract,
 )
 from app.imports.errors import ImportFailure
-from app.imports.headers import analyze_header_sets, combined_column_count, describe_headers
+from app.imports.headers import (
+    analyze_header_sets,
+    combined_column_count,
+    describe_headers,
+    normalize_header,
+)
 from app.imports.mapping import (
     canonical,
     definition_meaning,
+    encoded,
     fingerprint,
     normalized_identifier,
     suggest_mapping,
     target_key,
-    validate_mapping,
 )
 from app.imports.mapping import (
     targets as mapping_targets,
@@ -51,6 +57,12 @@ from app.imports.preview_store import persist_preview, prepare_preview
 from app.imports.rules import current_rule_context
 from app.imports.runtime import admission, authorize, failure
 from app.imports.staging import clear_derived_state
+from app.imports.target_mapping import (
+    ensure_duplicate_outcomes,
+    resolve_selector,
+    selector_identity,
+    selectors_overlap,
+)
 from app.imports.transport import FilePayload, receive_files
 from app.payroll.mutation_lock import _lock_period_for_mutation
 from app.payroll.period_definitions import list_period_definitions
@@ -89,7 +101,54 @@ class RegroupRequest(RevisionRequest):
 
 
 class MappingRequest(RevisionRequest):
-    column_mapping: dict[str, str]
+    shared_columns: dict[str, ColumnSelector] = Field(default_factory=dict)
+    ignored_columns: list[ColumnSelector] = Field(default_factory=list)
+    targets: list[TargetRuleRequest] = Field(default_factory=list)
+
+
+class DuplicateOccurrence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    duplicate_signature: str | None
+    occurrence_ordinal: int | None = Field(strict=True, ge=1)
+
+    @model_validator(mode="after")
+    def validate_occurrence(self):
+        if self.duplicate_signature is None:
+            if self.occurrence_ordinal not in (None, 1):
+                raise ValueError("a unique arrangement uses occurrence ordinal 1 or an explicit absence")
+        elif (not re.fullmatch(r"[0-9a-f]{64}", self.duplicate_signature)
+              or self.occurrence_ordinal is not None
+              and (isinstance(self.occurrence_ordinal, bool) or self.occurrence_ordinal < 1)):
+            raise ValueError("duplicate selectors require a valid signature and ordinal")
+        return self
+
+
+class ColumnSelector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    header: str = Field(min_length=1)
+    occurrences: list[DuplicateOccurrence] | None = None
+
+
+class TargetRuleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: str = Field(pattern=r"^Definition:[1-9][0-9]*$")
+    transform: str
+    inputs: list[ColumnSelector] = Field(min_length=1)
+    expected_head_revision: int = Field(strict=True, ge=0)
+    replace_existing: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def validate_transform(self):
+        if self.transform not in {"Direct", "Sum"}:
+            raise ValueError("transform must be Direct or Sum")
+        if self.transform == "Direct" and len(self.inputs) != 1:
+            raise ValueError("Direct requires exactly one input")
+        if self.transform == "Sum" and len(self.inputs) < 2:
+            raise ValueError("Sum requires at least two inputs")
+        return self
+
+
+MappingRequest.model_rebuild()
 
 
 def _json(value) -> str:
@@ -274,6 +333,55 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
         targets = mapping_targets(definitions)
     target_count = len(targets)
     target_page = targets[target_offset:target_offset + target_limit]
+    target_definitions = {target_key(item): item for item in definitions}
+    definition_ids = [target_definitions[item["target"]].pay_definition_id
+                      for item in target_page if item["target"] in target_definitions]
+    pending_state = {}
+    head_state = {}
+    if definition_ids:
+        pending_state = {item["paydefinitionid"]: item for item in (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, p.ExpectedHeadRevision,
+                   r.RulePayload, r.TargetMeaning
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=ANY(:definitions)
+        """), {"iid": iid, "cid": cid, "definitions": definition_ids})).mappings()}
+        head_state = {item["paydefinitionid"]: item for item in (await db.execute(text("""
+            SELECT h.PayDefinitionID, h.RuleVersionID, h.Revision, r.RulePayload, r.TargetMeaning,
+                   r.SourceSignature, r.RuleContractVersion, r.SourceContractVersion,
+                   r.TargetContractVersion, r.CanonicalizationVersion,
+                   origin.Status AS OriginStatus
+            FROM import.PayrollWorkRuleHeads h
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=h.RuleVersionID
+              AND r.CompanyID=h.CompanyID AND r.BranchID=h.BranchID AND r.PayDefinitionID=h.PayDefinitionID
+            JOIN import.Imports origin ON origin.ImportID=r.OriginImportID AND origin.CompanyID=r.CompanyID
+            WHERE h.CompanyID=:cid AND h.BranchID=:bid AND h.PayDefinitionID=ANY(:definitions)
+        """), {"cid": cid, "bid": row["branchid"], "definitions": definition_ids})).mappings()}
+    selected_ids = {unit["sourcelayoutid"] for unit in units if unit["isselected"]}
+    reuse_headers = {layout["sourcelayoutid"]: (layout["inspectionmetadata"] or {}).get("header_cells", [])
+                     for layout in layouts if not selected_ids or layout["sourcelayoutid"] in selected_ids}
+    for item in target_page:
+        definition = target_definitions.get(item["target"])
+        if definition is None:
+            continue
+        did = definition.pay_definition_id
+        pending = pending_state.get(did)
+        head = head_state.get(did)
+        reason, reusable = _rule_reuse_reason(head, definition, reuse_headers)
+        state = {"current_head_revision": head["revision"] if head else 0,
+                 "current_rule_version_id": head["ruleversionid"] if head else None,
+                 "pending_rule_version_id": pending["ruleversionid"] if pending else None,
+                 "pending_revision": pending["revision"] if pending else None,
+                 "pending_expected_head_revision": pending["expectedheadrevision"] if pending else None,
+                 "pending_rule": _stored_rule_payload(pending["rulepayload"]) if pending else None,
+                 "current_rule": _stored_rule_payload(head["rulepayload"]) if head else None,
+                 "reusable": reusable, "reason": reason}
+        state["state"] = ("head_changed" if pending and pending["expectedheadrevision"] != state["current_head_revision"]
+                           else "pending" if pending else "missing_inputs" if reusable and reason == "Known source columns are absent"
+                           else "reusable" if reusable
+                           else "remap_required" if head else "unmapped")
+        item["rule_state"] = state
     header_page = None
     if header_layout_id is not None:
         selected_layout = next((layout for layout in layouts if layout["sourcelayoutid"] == header_layout_id), None)
@@ -539,6 +647,7 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
                         :isselected, :headerrownumber, CAST(:datesource AS jsonb), :sourcelayoutid,
                         CAST(:inspection AS jsonb))
                 """), file_units)
+            await _prepare_current_rules(request, db, cid, uid, iid)
             return await metadata(db, cid, iid, policy=_policy(request))
 
 
@@ -711,6 +820,7 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
                 UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
                     updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
             """), {"uid": uid, "iid": iid, "cid": cid})
+            await _prepare_current_rules(request, db, cid, uid, iid)
             return await metadata(db, cid, iid, policy=_policy(request))
 
 
@@ -721,37 +831,668 @@ async def create_layout(request, engine, cid, uid, iid, body: RegroupRequest):
                       "Source structures are grouped automatically. Upload unrelated structures as separate Imports.", 422)
 
 
-async def accept_mapping(request, engine, cid, uid, iid, layout_id, body: MappingRequest):
+def _target_meaning(definition) -> dict:
+    return {"definition": definition_meaning(definition), "version": 1}
+
+
+def _selector_payload(selector: ColumnSelector) -> dict:
+    value = selector.model_dump()
+    if value["occurrences"] is None:
+        value.pop("occurrences")
+    value["header"] = normalize_header(value["header"])
+    if value.get("occurrences"):
+        value["occurrences"] = sorted(value["occurrences"],
+                                       key=lambda item: (item["duplicate_signature"] or "",
+                                                         item["occurrence_ordinal"] or 0))
+    return value
+
+
+def _stored_rule_payload(value) -> dict | None:
+    if (not isinstance(value, dict) or set(value) != {
+            "payload_version", "transform", "inputs", "shared_columns"}
+            or type(value.get("payload_version")) is not int or value["payload_version"] != 1):
+        return None
+    if value.get("transform") not in {"Direct", "Sum"}:
+        return None
+    inputs = value.get("inputs")
+    shared = value.get("shared_columns")
+    if not isinstance(inputs, list) or not inputs or not isinstance(shared, dict):
+        return None
+    def selector_ok(selector):
+        if not isinstance(selector, dict) or set(selector) - {"header", "occurrences"}:
+            return False
+        if not isinstance(selector.get("header"), str) or not normalize_header(selector["header"]):
+            return False
+        occurrences = selector.get("occurrences")
+        if occurrences is None:
+            return True
+        if not isinstance(occurrences, list) or not occurrences:
+            return False
+        seen = set()
+        for occurrence in occurrences:
+            if not isinstance(occurrence, dict) or set(occurrence) != {
+                    "duplicate_signature", "occurrence_ordinal"}:
+                return False
+            signature = occurrence["duplicate_signature"]
+            ordinal = occurrence["occurrence_ordinal"]
+            if signature is None:
+                if ordinal not in (None, 1) or isinstance(ordinal, bool) or signature in seen:
+                    return False
+            elif (not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{64}", signature)
+                  or signature in seen
+                  or ordinal is not None and (isinstance(ordinal, bool) or not isinstance(ordinal, int)
+                                              or ordinal < 1)):
+                return False
+            seen.add(signature)
+        return True
+    if any(not selector_ok(item) for item in inputs) or set(shared) - {
+            "DriverNumber", "EmployeeKey", "DriverName", "WorkDate"}:
+        return None
+    if any(not selector_ok(item) for item in shared.values()):
+        return None
+    shared_selectors = list(shared.values())
+    if (any(selectors_overlap(left, right) for index, left in enumerate(shared_selectors)
+            for right in shared_selectors[index + 1:])
+            or any(selectors_overlap(left, right) for index, left in enumerate(inputs)
+                   for right in inputs[index + 1:])):
+        return None
+    if any(selectors_overlap(left, right) for left in shared_selectors for right in inputs):
+        return None
+    if value["transform"] == "Direct" and len(inputs) != 1:
+        return None
+    if value["transform"] == "Sum" and len(inputs) < 2:
+        return None
+    return value
+
+
+def _rule_reuse_reason(head, definition, headers):
+    """Explain compatibility without changing a saved or pending relationship."""
+    if head is None:
+        return "No successfully saved relationship", False
+    if head["originstatus"] != "Completed":
+        return "The source relationship was not successfully completed", False
+    if head["targetmeaning"] != _target_meaning(definition):
+        return "The frozen target name or input meaning changed", False
+    payload = _stored_rule_payload(head["rulepayload"])
+    if (payload is None or head["rulecontractversion"] != RULE_CONTRACT_VERSION
+            or head["sourcecontractversion"] != SOURCE_CONTRACT
+            or head["targetcontractversion"] != TARGET_CONTRACT
+            or head["canonicalizationversion"] != CANONICALIZATION):
+        return "The saved relationship format needs remapping", False
+    signature = _stored_source_signature(head["sourcesignature"], payload)
+    if signature is None:
+        return "The saved source relationship needs remapping", False
+    try:
+        inputs = [resolve_selector(selector, headers, required=False,
+                                   allow_unobserved_arrangements=True)
+                  for selector in payload["inputs"]]
+        for selector in payload["shared_columns"].values():
+            resolve_selector(selector, headers, allow_unobserved_arrangements=True)
+    except ImportFailure:
+        return "A relevant header or duplicate arrangement changed", False
+    if any(column is None for result in inputs for column in result.values()):
+        return "Known source columns are absent", True
+    return "Matched the current successful relationship", True
+
+
+def _stored_source_signature(value, payload):
+    if (payload is None or not isinstance(value, dict)
+            or set(value) - {"inputs", "ignored_columns"}
+            or value.get("inputs") != payload["inputs"]
+            or not isinstance(value.get("ignored_columns", []), list)):
+        return None
+    try:
+        for selector in value.get("ignored_columns", []):
+            ColumnSelector.model_validate(selector)
+    except ValueError:
+        return None
+    return value
+
+
+async def accept_mapping(request, engine, cid, uid, iid, body: MappingRequest):
+    """Save one revisioned mapping snapshot without promoting current rule heads."""
     async with engine.begin() as db:
         row = await _lock_mutable(db, cid, uid, iid, body.expected_revision)
-        _files, units, _layouts = await load_sources(db, cid, iid)
-        _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
-        layout = (await db.execute(text("""
-            SELECT structurefingerprint FROM import.sourcelayouts
-            WHERE importid = :iid AND companyid = :cid AND sourcelayoutid = :layout FOR UPDATE
-        """), {"iid": iid, "cid": cid, "layout": layout_id})).mappings().first()
-        if layout is None:
-            raise HTTPException(404, "Source layout not found.")
-        await _reject_headerless_mapping(db, cid, iid, layout_id, body.column_mapping)
-        definitions = await list_period_definitions(row["payrollperiodid"], cid, db, active_only=True)
-        validate_mapping(body.column_mapping, [], definitions,
-                         max_column=_policy(request).max_columns_per_unit, require_work_date=False)
-        selected = (await db.execute(text("""
-            SELECT count(*) FROM import.filesourceunits WHERE importid = :iid AND companyid = :cid
-                AND sourcelayoutid = :layout AND isselected
-        """), {"iid": iid, "cid": cid, "layout": layout_id})).scalar_one()
-        if not selected:
-            raise failure("IMPORT_LAYOUT_NOT_SELECTED", "Select at least one source unit in this layout before mapping it.", 422)
-        await clear_derived_state(db, cid, iid, reset_mapping=False)
-        await db.execute(text("""
-            UPDATE import.sourcelayouts SET columnmapping = CAST(:mapping AS jsonb), mappingfingerprint = NULL
-            WHERE importid = :iid AND companyid = :cid AND sourcelayoutid = :layout
-        """), {"mapping": _json(body.column_mapping), "iid": iid, "cid": cid, "layout": layout_id})
-        await db.execute(text("""
-            UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
-                updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
-        """), {"uid": uid, "iid": iid, "cid": cid})
+        await _save_mapping(request, db, cid, uid, iid, row, body)
         return await metadata(db, cid, iid, policy=_policy(request))
+
+
+async def _prepare_current_rules(request, db, cid, uid, iid):
+    """Reuse unambiguous successful rules during mutation, never during a GET."""
+    if await db.scalar(text("""
+        SELECT EXISTS (SELECT 1 FROM import.PayrollWorkPendingRules
+                       WHERE CompanyID=:cid AND ImportID=:iid)
+    """), {"cid": cid, "iid": iid}):
+        return
+    row = await load_import(db, cid, iid)
+    _files, units, layouts = await load_sources(db, cid, iid)
+    selected = {item["sourcelayoutid"] for item in units if item["isselected"]}
+    headers = {item["sourcelayoutid"]: (item["inspectionmetadata"] or {}).get("header_cells", [])
+               for item in layouts if item["sourcelayoutid"] in selected}
+    if not headers:
+        return
+    definitions = await list_period_definitions(row["payrollperiodid"], cid, db, active_only=True)
+    operational = {item["target"] for item in mapping_targets(definitions)}
+    definitions_by_id = {item.pay_definition_id: item for item in definitions
+                         if target_key(item) in operational}
+    heads = (await db.execute(text("""
+        SELECT h.PayDefinitionID, h.Revision, r.RulePayload, r.SourceSignature, r.TargetMeaning,
+               r.RuleContractVersion, r.SourceContractVersion, r.TargetContractVersion,
+               r.CanonicalizationVersion, origin.Status AS OriginStatus
+        FROM import.PayrollWorkRuleHeads h
+        JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=h.RuleVersionID
+          AND r.CompanyID=h.CompanyID AND r.BranchID=h.BranchID AND r.PayDefinitionID=h.PayDefinitionID
+        JOIN import.Imports origin ON origin.ImportID=r.OriginImportID AND origin.CompanyID=r.CompanyID
+        WHERE h.CompanyID=:cid AND h.BranchID=:bid AND h.PayDefinitionID=ANY(:definitions)
+        ORDER BY h.PayDefinitionID FOR UPDATE OF h
+    """), {"cid": cid, "bid": row["branchid"],
+           "definitions": sorted(definitions_by_id)})).mappings().all()
+    groups = defaultdict(list)
+    for head in heads:
+        definition = definitions_by_id[head["paydefinitionid"]]
+        payload = _stored_rule_payload(head["rulepayload"])
+        signature = _stored_source_signature(head["sourcesignature"], payload)
+        if (head["originstatus"] != "Completed" or payload is None
+                or head["targetmeaning"] != _target_meaning(definition)
+                or head["rulecontractversion"] != RULE_CONTRACT_VERSION
+                or head["sourcecontractversion"] != SOURCE_CONTRACT
+                or head["targetcontractversion"] != TARGET_CONTRACT
+                or head["canonicalizationversion"] != CANONICALIZATION
+                or signature is None
+                or not {"DriverNumber", "EmployeeKey", "DriverName"}.intersection(payload["shared_columns"])):
+            continue
+        try:
+            resolutions = [resolve_selector(item, headers, required=False,
+                                            allow_unobserved_arrangements=True)
+                           for item in payload["inputs"]]
+            for selector in payload["shared_columns"].values():
+                resolve_selector(selector, headers, allow_unobserved_arrangements=True)
+        except ImportFailure:
+            continue
+        if not any(column is not None for result in resolutions for column in result.values()):
+            continue
+        groups[encoded(payload["shared_columns"])].append((head, definition, payload, resolutions))
+    supplied_groups = [items for items in groups.values()
+                       if any(column is not None for _head, _definition, _payload, resolutions in items
+                              for resolution in resolutions for column in resolution.values())]
+    # Different source dependencies or competing owners need an explicit choice.
+    if len(supplied_groups) != 1:
+        return
+    candidates = supplied_groups[0]
+    consumed = {}
+    for head, _definition, _payload, resolutions in candidates:
+        for resolution in resolutions:
+            for layout_id, column in resolution.items():
+                if column is None:
+                    continue
+                key = (layout_id, column)
+                if key in consumed:
+                    return
+                consumed[key] = head["paydefinitionid"]
+    shared = candidates[0][2]["shared_columns"]
+    selected_inputs = [selector for _head, _definition, payload, _resolutions in candidates
+                       for selector in payload["inputs"]]
+    ignores = {}
+    for head, _definition, _payload, _resolutions in candidates:
+        for selector in head["sourcesignature"].get("ignored_columns", []):
+            try:
+                selector = _selector_payload(ColumnSelector.model_validate(selector))
+                resolve_selector(selector, headers, required=False, allow_unobserved_arrangements=True)
+            except (ImportFailure, ValueError):
+                continue
+            if any(selectors_overlap(selector, item) for item in [*selected_inputs, *shared.values()]):
+                continue
+            ignores[selector_identity(selector)] = selector
+    try:
+        ensure_duplicate_outcomes(headers, [*selected_inputs, *shared.values(), *ignores.values()],
+                                  allow_unobserved_arrangements=True)
+    except ImportFailure:
+        return
+    body = MappingRequest.model_validate({
+        "expected_revision": row["revision"], "shared_columns": shared,
+        "ignored_columns": list(ignores.values()),
+        "targets": [{"target": target_key(definition), "transform": payload["transform"],
+                     "inputs": payload["inputs"], "expected_head_revision": head["revision"]}
+                    for head, definition, payload, _resolutions in candidates],
+    })
+    await _save_mapping(request, db, cid, uid, iid, row, body)
+
+
+async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
+    """Persist validated proposals under the caller's period and Import locks."""
+    roles = {"DriverNumber", "EmployeeKey", "DriverName", "WorkDate"}
+    await require_supported_import_contract(db, cid, iid)
+    _files, units, layouts = await load_sources(db, cid, iid)
+    _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
+    selected_layout_ids = {u["sourcelayoutid"] for u in units if u["isselected"]}
+    if not selected_layout_ids:
+        raise failure("IMPORT_SOURCE_SELECTION_REQUIRED", "Select at least one source unit before mapping.", 422)
+    layout_headers = {}
+    for layout in layouts:
+        if layout["sourcelayoutid"] not in selected_layout_ids:
+            continue
+        inspection = layout["inspectionmetadata"] or {}
+        if "header_cells" not in inspection:
+            raise failure("IMPORT_HEADER_REQUIRED", "Every selected source must have a readable header.", 422)
+        layout_headers[layout["sourcelayoutid"]] = inspection["header_cells"]
+
+    if set(body.shared_columns) - roles:
+        raise failure("IMPORT_SHARED_COLUMN_INVALID", "Only Driver identifiers and WorkDate can be shared columns.", 422)
+    definitions = await list_period_definitions(row["payrollperiodid"], cid, db, active_only=True)
+    importable_targets = {item["target"] for item in mapping_targets(definitions)
+                          if item["target"].startswith("Definition:")}
+    definitions_by_target = {target_key(item): item for item in definitions
+                             if target_key(item) in importable_targets}
+    branch_id = row["branchid"]
+    active_ids = {item.pay_definition_id for item in definitions
+                  if target_key(item) in importable_targets}
+    head_rows = (await db.execute(text("""
+        SELECT h.PayDefinitionID, h.RuleVersionID, h.Revision, r.RuleFingerprint,
+               r.TargetMeaning, r.SourceSignature, r.RulePayload, r.OriginImportID,
+               origin.Status AS OriginStatus
+        FROM import.PayrollWorkRuleHeads h
+        JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=h.RuleVersionID
+          AND r.CompanyID=h.CompanyID AND r.BranchID=h.BranchID AND r.PayDefinitionID=h.PayDefinitionID
+        JOIN import.Imports origin ON origin.ImportID=r.OriginImportID AND origin.CompanyID=r.CompanyID
+        WHERE h.CompanyID=:cid AND h.BranchID=:bid AND h.PayDefinitionID=ANY(:definitions)
+        ORDER BY h.PayDefinitionID FOR UPDATE OF h
+    """), {"cid": cid, "bid": branch_id, "definitions": sorted(active_ids)})).mappings().all()
+    heads_by_definition = {item["paydefinitionid"]: item for item in head_rows}
+    pending_rows = (await db.execute(text("""
+        SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, p.ExpectedHeadRevision,
+               p.PayrollPeriodDefinitionID, p.RateDefinitionID,
+               r.RuleFingerprint, r.TargetMeaning, r.SourceSignature, r.RulePayload,
+               r.OriginImportID, origin.Status AS OriginStatus
+        FROM import.PayrollWorkPendingRules p
+        JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+          AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+        JOIN import.Imports origin ON origin.ImportID=r.OriginImportID AND origin.CompanyID=r.CompanyID
+        WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.BranchID=:bid
+    """), {"iid": iid, "cid": cid, "bid": branch_id})).mappings().all()
+    pending_by_definition = {item["paydefinitionid"]: item for item in pending_rows}
+    if len(body.targets) > len(definitions_by_target):
+        raise failure("IMPORT_RULE_TARGET_INVALID", "Too many targets for this period's frozen inputs.", 422)
+    confirmed_selectors = []
+    for candidate in [*pending_rows, *head_rows]:
+        if "originstatus" in candidate and candidate["originstatus"] != "Completed":
+            continue
+        payload = _stored_rule_payload(candidate["rulepayload"])
+        if payload is not None:
+            confirmed_selectors.extend(payload["inputs"])
+            confirmed_selectors.extend(payload["shared_columns"].values())
+            signature = _stored_source_signature(candidate["sourcesignature"], payload)
+            if signature is not None:
+                confirmed_selectors.extend(signature.get("ignored_columns", []))
+    observed = [describe_headers(headers) for headers in layout_headers.values()]
+    reference_budget = sum(item["headed_column_count"] for item in observed) + len(confirmed_selectors)
+    alternative_budget = (sum(len(item["duplicate_header_signatures"]) + 1 for item in observed)
+                          + sum(len(item.get("occurrences") or []) for item in confirmed_selectors
+                                if isinstance(item, dict)))
+    references = [*body.shared_columns.values(), *body.ignored_columns,
+                  *(selector for target in body.targets for selector in target.inputs)]
+    if (len(body.ignored_columns) > reference_budget
+            or any(len(target.inputs) > reference_budget for target in body.targets)
+            or any(len(item.occurrences or []) > alternative_budget for item in references)):
+        raise failure("IMPORT_MAPPING_CONFIGURATION_TOO_LARGE",
+                      "Mapping choices exceed the supplied headers and known saved relationships.", 422)
+    if any(len(item.header.encode("utf-8")) > _policy(request).max_cell_text_bytes for item in references):
+        raise failure("IMPORT_MAPPING_HEADER_TOO_LARGE",
+                      "A selected header exceeds the current source-text resource limit.", 422)
+
+    def known_selector(selector, definition_id=None):
+        normalized = _selector_payload(ColumnSelector.model_validate(selector))
+        for candidate in [*pending_rows, *head_rows]:
+            if definition_id is not None and candidate["paydefinitionid"] != definition_id:
+                continue
+            if "originstatus" in candidate and candidate["originstatus"] != "Completed":
+                continue
+            payload = _stored_rule_payload(candidate["rulepayload"])
+            if payload is None:
+                continue
+            confirmed = [*payload["inputs"], *payload["shared_columns"].values()]
+            signature = _stored_source_signature(candidate["sourcesignature"], payload)
+            if signature is not None:
+                confirmed.extend(signature.get("ignored_columns", []))
+            if normalized in confirmed:
+                return True
+        return False
+
+    def resolve_request(selector, definition_id=None):
+        confirmed = known_selector(selector, definition_id)
+        return resolve_selector(selector, layout_headers, required=not confirmed,
+                                allow_unobserved_arrangements=confirmed)
+
+    role_owners = []
+    role_physical_owners = {}
+    for role, selector in body.shared_columns.items():
+        if any(selectors_overlap(selector.model_dump(), previous)
+               for previous, _previous_role in role_owners):
+            raise failure("IMPORT_SHARED_COLUMN_AMBIGUOUS",
+                          "One source occurrence cannot serve two structural roles.", 422)
+        role_owners.append((selector.model_dump(), role))
+        resolved = resolve_request(selector.model_dump())
+        for layout_id, column in resolved.items():
+            if column is None:
+                continue
+            key = (layout_id, column)
+            if key in role_physical_owners:
+                raise failure("IMPORT_SHARED_COLUMN_AMBIGUOUS",
+                              "One physical column cannot serve two structural roles.", 422)
+            role_physical_owners[key] = role
+    if len({item.target for item in body.targets}) != len(body.targets):
+        raise failure("IMPORT_RULE_TARGET_DUPLICATE", "Submit each Pay Item target only once.", 422)
+    if not body.targets and not body.shared_columns and not body.ignored_columns:
+        raise failure("IMPORT_MAPPING_EMPTY", "Provide at least one mapping or explicit duplicate outcome.", 422)
+
+    ignored_resolved = [resolve_request(item.model_dump())
+                        for item in body.ignored_columns]
+    ignored_identities = {selector_identity(item.model_dump()) for item in body.ignored_columns}
+    if len(ignored_identities) != len(body.ignored_columns):
+        raise failure("IMPORT_COLUMN_OUTCOME_DUPLICATE", "A duplicate occurrence may be ignored only once.", 422)
+    ignored_physical = {(layout_id, column) for resolved in ignored_resolved
+                        for layout_id, column in resolved.items() if column is not None}
+    target_resolved = {}
+    quantity_owners = []
+    quantity_physical_owners = {}
+    quantity_selectors = []
+    for rule in body.targets:
+        definition = definitions_by_target.get(rule.target)
+        if definition is None:
+            raise failure("IMPORT_RULE_TARGET_INVALID", "Pay Item target is not an active frozen definition in this period.", 422)
+        resolved = []
+        for selector in rule.inputs:
+            selector_data = selector.model_dump()
+            if any(selectors_overlap(selector_data, previous) for previous, _previous_target in quantity_owners):
+                raise failure("IMPORT_QUANTITY_COLUMN_REUSED",
+                              "A quantity occurrence can supply only one Pay Item target.", 422)
+            if any(selectors_overlap(selector_data, shared.model_dump())
+                   for shared in body.shared_columns.values()):
+                raise failure("IMPORT_STRUCTURAL_COLUMN_AS_QUANTITY",
+                              "A Driver or WorkDate column cannot also supply a quantity.", 422)
+            if any(selectors_overlap(selector_data, item.model_dump()) for item in body.ignored_columns):
+                raise failure("IMPORT_COLUMN_OUTCOME_DUPLICATE",
+                              "A column occurrence cannot be both used and ignored.", 422)
+            quantity_owners.append((selector_data, rule.target))
+            quantity_selectors.append(selector_data)
+            physical = resolve_request(selector_data, definition.pay_definition_id)
+            for layout_id, column in physical.items():
+                if column is None:
+                    continue
+                key = (layout_id, column)
+                if key in quantity_physical_owners:
+                    raise failure("IMPORT_QUANTITY_COLUMN_REUSED",
+                                  "A physical quantity occurrence can supply only one target input.", 422)
+                if key in role_physical_owners:
+                    raise failure("IMPORT_STRUCTURAL_COLUMN_AS_QUANTITY",
+                                  "A Driver or WorkDate column cannot also supply a quantity.", 422)
+                quantity_physical_owners[key] = rule.target
+            resolved.append(physical)
+        target_resolved[rule.target] = (definition, rule, resolved)
+
+    outcome_selectors = [selector.model_dump() for selector in body.shared_columns.values()]
+    outcome_selectors.extend(item.model_dump() for item in body.ignored_columns)
+    outcome_selectors.extend(quantity_selectors)
+    for selector in body.ignored_columns:
+        if any(selectors_overlap(selector.model_dump(), item) for item, _target in quantity_owners) or any(
+                selectors_overlap(selector.model_dump(), value.model_dump())
+                for value in body.shared_columns.values()):
+            raise failure("IMPORT_COLUMN_OUTCOME_DUPLICATE", "A column occurrence cannot be both used and ignored.", 422)
+
+    prepared = {}
+    shared_json = {role: _selector_payload(selector) for role, selector in body.shared_columns.items()}
+
+    ignored_json = sorted((_selector_payload(item) for item in body.ignored_columns), key=encoded)
+    remembered = {selector_identity(item) for item in ignored_json}
+    consumed = [*shared_json.values(), *quantity_selectors]
+    for candidate in [*pending_rows, *head_rows]:
+        if "originstatus" in candidate and candidate["originstatus"] != "Completed":
+            continue
+        source = _stored_source_signature(candidate["sourcesignature"], _stored_rule_payload(candidate["rulepayload"]))
+        if source is None:
+            continue
+        payload = _stored_rule_payload(candidate["rulepayload"])
+        if payload["shared_columns"] != shared_json:
+            continue
+        requested = next((entry for entry in body.targets
+                          if definitions_by_target[entry.target].pay_definition_id == candidate["paydefinitionid"]), None)
+        if requested is not None:
+            requested_inputs = sorted((_selector_payload(item) for item in requested.inputs), key=encoded)
+            if requested_inputs != payload["inputs"] or requested.transform != payload["transform"]:
+                continue
+        else:
+            try:
+                present = any(column is not None for selector in payload["inputs"]
+                              for column in resolve_selector(selector, layout_headers, required=False,
+                                                             allow_unobserved_arrangements=True).values())
+            except ImportFailure:
+                continue
+            if not present:
+                continue
+        for ignored in source.get("ignored_columns", []):
+            try:
+                ignored = _selector_payload(ColumnSelector.model_validate(ignored))
+                resolve_selector(ignored, layout_headers, required=False,
+                                 allow_unobserved_arrangements=True)
+            except (ImportFailure, ValueError):
+                continue
+            identity = selector_identity(ignored)
+            if identity in remembered or any(selectors_overlap(ignored, item) for item in consumed):
+                continue
+            ignored_json.append(ignored)
+            remembered.add(identity)
+    ignored_json.sort(key=encoded)
+    outcome_selectors = [*shared_json.values(), *quantity_selectors, *ignored_json]
+
+
+    async def save_or_reuse(definition, transform, input_payload, source_signature, *, head_revision,
+                            replace_existing, payload_shared=None, reuse_version_id=None):
+        pay_definition_id = definition.pay_definition_id
+        meaning = _target_meaning(definition)
+        payload = {"payload_version": 1, "transform": transform, "inputs": input_payload,
+                   "shared_columns": payload_shared if payload_shared is not None else shared_json}
+        # Ancillary Ignore choices help repeat setup, but are not dependencies
+        # of another target's quantity meaning.
+        source_signature = {"inputs": input_payload, "ignored_columns": ignored_json}
+        fingerprint_value = fingerprint("payroll-work-rule-v1", {
+            "target": meaning, "source": {"inputs": input_payload}, "payload": payload})
+        if len(_json({"source": source_signature, "target": meaning, "payload": payload}).encode("utf-8")) > _policy(request).max_mapping_request_bytes:
+            raise failure("IMPORT_MAPPING_CONFIGURATION_TOO_LARGE",
+                          "Saved mapping metadata exceeds the current configuration resource limit.", 422)
+        head = heads_by_definition.get(pay_definition_id)
+        actual_head = head["revision"] if head else 0
+        if head_revision is not None and head_revision != actual_head:
+            raise failure("IMPORT_RULE_HEAD_STALE", "The current saved rule changed. Read it again and retry.")
+        same_head = bool(head and head["targetmeaning"] == meaning
+                         and head["rulefingerprint"] == fingerprint_value
+                         and _stored_rule_payload(head["rulepayload"]) is not None)
+        if head and not same_head and not replace_existing:
+            raise failure("IMPORT_RULE_REPLACEMENT_REQUIRED",
+                          "This target already has a saved rule. Confirm replacement to change it.", 409)
+        existing = pending_by_definition.get(pay_definition_id)
+        existing_is_current_completed_head = bool(
+            head and head["ruleversionid"] == existing["ruleversionid"]
+            and head["originstatus"] == "Completed") if existing else False
+        existing_version_is_owned_or_current = bool(
+            existing and (existing["originimportid"] == iid or existing_is_current_completed_head))
+        if (existing and existing_version_is_owned_or_current
+                and existing["targetmeaning"] == meaning
+                and existing["rulefingerprint"] == fingerprint_value
+                and existing["sourcesignature"] == source_signature):
+            rule_version_id = existing["ruleversionid"]
+            pending_revision = (existing["revision"] if existing["expectedheadrevision"] == actual_head
+                                else existing["revision"] + 1)
+        elif reuse_version_id is not None and head["sourcesignature"] == source_signature:
+            rule_version_id = reuse_version_id
+            pending_revision = (existing["revision"] if existing else 0) + 1
+        elif (same_head and head["originstatus"] == "Completed"
+              and head["sourcesignature"] == source_signature):
+            rule_version_id = head["ruleversionid"]
+            pending_revision = (existing["revision"] if existing else 0) + 1
+        else:
+            values = {"cid": cid, "bid": branch_id, "definition": pay_definition_id,
+                      "iid": iid, "pid": row["payrollperiodid"], "fingerprint": fingerprint_value,
+                      "source": _json(source_signature), "meaning": _json(meaning),
+                      "payload": _json(payload), "uid": uid,
+                      "rule_version": RULE_CONTRACT_VERSION, "source_version": SOURCE_CONTRACT,
+                      "target_version": TARGET_CONTRACT, "canonicalization": CANONICALIZATION}
+            rule_version_id = (await db.execute(text("""
+                INSERT INTO import.PayrollWorkRuleVersions
+                    (CompanyID, BranchID, PayDefinitionID, OriginImportID, OriginPayrollPeriodID,
+                     RuleContractVersion, SourceContractVersion, TargetContractVersion, CanonicalizationVersion,
+                     RuleFingerprint, SourceSignature, TargetMeaning, RulePayload, CreatedByUserID)
+                VALUES (:cid,:bid,:definition,:iid,:pid,:rule_version,:source_version,:target_version,
+                        :canonicalization,:fingerprint,CAST(:source AS jsonb),
+                        CAST(:meaning AS jsonb),CAST(:payload AS jsonb),:uid)
+                RETURNING RuleVersionID
+            """), values)).scalar_one()
+            pending_revision = (existing["revision"] if existing else 0) + 1
+        rate_id = definition.rate_definition_id
+        if (existing and existing_version_is_owned_or_current
+                and existing["targetmeaning"] == meaning
+                and existing["rulefingerprint"] == fingerprint_value
+                and existing["sourcesignature"] == source_signature
+                and existing["ruleversionid"] == rule_version_id
+                and existing["expectedheadrevision"] == actual_head
+                and existing["payrollperioddefinitionid"] == definition.payroll_period_definition_id
+                and existing["ratedefinitionid"] == rate_id):
+            return
+        # Every actual binding insert/update advances its own pending revision
+        # exactly once; only the exact no-op above preserves the old revision.
+        pending_revision = existing["revision"] + 1 if existing else 1
+        params = {"iid": iid, "cid": cid, "bid": branch_id, "pid": row["payrollperiodid"],
+                  "definition": pay_definition_id, "ppd": definition.payroll_period_definition_id,
+                  "rate": rate_id, "rule": rule_version_id, "revision": pending_revision,
+                  "head_revision": actual_head, "uid": uid}
+        if existing:
+            await db.execute(text("""
+                UPDATE import.PayrollWorkPendingRules SET PayrollPeriodDefinitionID=:ppd,
+                    RateDefinitionID=:rate, RuleVersionID=:rule, Revision=:revision,
+                    ExpectedHeadRevision=:head_revision, UpdatedByUserID=:uid, UpdatedAtUtc=NOW()
+                WHERE ImportID=:iid AND CompanyID=:cid AND PayDefinitionID=:definition
+            """), params)
+        else:
+            await db.execute(text("""
+                INSERT INTO import.PayrollWorkPendingRules
+                    (ImportID,CompanyID,BranchID,PayrollPeriodID,PayDefinitionID,
+                     PayrollPeriodDefinitionID,RateDefinitionID,RuleVersionID,Revision,
+                     ExpectedHeadRevision,UpdatedByUserID)
+                VALUES (:iid,:cid,:bid,:pid,:definition,:ppd,:rate,:rule,:revision,:head_revision,:uid)
+            """), params)
+        prepared[pay_definition_id] = rule_version_id
+
+    for target, (definition, rule, resolved) in sorted(
+            target_resolved.items(), key=lambda item: item[1][0].pay_definition_id):
+        selectors = sorted((_selector_payload(selector) for selector in rule.inputs), key=encoded)
+        source_signature = {"inputs": selectors}
+        await save_or_reuse(definition, rule.transform, selectors, source_signature,
+                            head_revision=rule.expected_head_revision,
+                            replace_existing=rule.replace_existing)
+
+    # Reuse an unchanged confirmed rule only when its complete semantic meaning,
+    # selectors and shared dependencies match this receiving-period setup.
+    requested_ids = {item.pay_definition_id for item, _rule, _resolved in target_resolved.values()}
+    head_candidates = list(head_rows)
+    candidates = {}
+    auto_selector_owners = []
+    auto_physical_usage = defaultdict(set)
+    for head in head_candidates:
+        did = head["paydefinitionid"]
+        if did in requested_ids or head["originstatus"] != "Completed":
+            continue
+        definition = next((item for item in definitions if item.pay_definition_id == did), None)
+        payload = _stored_rule_payload(head["rulepayload"])
+        if definition is None or payload is None or head["targetmeaning"] != _target_meaning(definition):
+            continue
+        if payload["shared_columns"] != shared_json:
+            continue
+        source_signature = _stored_source_signature(head["sourcesignature"], payload)
+        if source_signature is None:
+            continue
+        try:
+            input_resolutions = [resolve_selector(item, layout_headers, required=False,
+                                                  allow_unobserved_arrangements=True)
+                                 for item in payload["inputs"]]
+            for selector in payload["shared_columns"].values():
+                resolve_selector(selector, layout_headers, required=False,
+                                 allow_unobserved_arrangements=True)
+        except ImportFailure:
+            continue
+        if not any(column is not None for result in input_resolutions for column in result.values()):
+            continue
+        if any(selectors_overlap(item, prior) for item in payload["inputs"]
+               for prior, _target in quantity_owners):
+            continue
+        if any(selectors_overlap(item, prior) for item in payload["inputs"]
+               for prior, _role in role_owners):
+            continue
+        if any(selectors_overlap(item, ignored) for item in payload["inputs"]
+               for ignored in ignored_json):
+            continue
+        if any((layout_id, column) in role_physical_owners or (layout_id, column) in ignored_physical
+               for resolution in input_resolutions for layout_id, column in resolution.items()
+               if column is not None):
+            continue
+        auto_selector_owners.extend((item, did) for item in payload["inputs"])
+        for resolution in input_resolutions:
+            for layout_id, column in resolution.items():
+                if column is not None:
+                    auto_physical_usage[(layout_id, column)].add(did)
+        candidates[did] = (head, definition, payload, source_signature)
+
+    # If confirmed heads collide, leave every involved target unresolved.
+    conflicted_targets = {did for owners in auto_physical_usage.values()
+                          if len(owners) > 1 for did in owners}
+    for index, (selector, did) in enumerate(auto_selector_owners):
+        for other, other_did in auto_selector_owners[index + 1:]:
+            if did != other_did and selectors_overlap(selector, other):
+                conflicted_targets.update((did, other_did))
+    for did in conflicted_targets:
+        candidates.pop(did, None)
+    auto_selectors = [selector for _head, _definition, payload, _source in candidates.values()
+                      for selector in payload["inputs"]]
+    ensure_duplicate_outcomes(layout_headers, outcome_selectors + auto_selectors,
+                              allow_unobserved_arrangements=True)
+
+    for definition in definitions:
+        did = definition.pay_definition_id
+        if not definition.is_active or did in requested_ids:
+            continue
+        existing = pending_by_definition.get(did)
+        candidate = candidates.get(did)
+        if existing and candidate is None:
+            await db.execute(text("""
+                DELETE FROM import.PayrollWorkPendingRules
+                WHERE ImportID=:iid AND CompanyID=:cid AND PayDefinitionID=:definition
+            """), {"iid": iid, "cid": cid, "definition": did})
+        if candidate:
+            head, definition, payload, source_signature = candidate
+            await save_or_reuse(definition, payload["transform"], payload["inputs"], source_signature,
+                                head_revision=head["revision"], replace_existing=False,
+                                payload_shared=payload["shared_columns"],
+                                reuse_version_id=head["ruleversionid"])
+    if set(pending_by_definition) - active_ids:
+        for did in set(pending_by_definition) - active_ids:
+            await db.execute(text("""
+                DELETE FROM import.PayrollWorkPendingRules
+                WHERE ImportID=:iid AND CompanyID=:cid AND PayDefinitionID=:definition
+            """), {"iid": iid, "cid": cid, "definition": did})
+
+    await clear_derived_state(db, cid, iid, reset_mapping=False)
+    for layout_id in selected_layout_ids:
+        ignored_physical = {
+            str(column): "Ignore" for selector in ignored_json
+            if (column := resolve_selector(selector, layout_headers, required=False,
+                                           allow_unobserved_arrangements=True)[layout_id]) is not None
+        }
+        await db.execute(text("""
+            UPDATE import.SourceLayouts SET ColumnMapping=CAST(:resolution AS jsonb), MappingFingerprint=NULL
+            WHERE ImportID=:iid AND CompanyID=:cid AND SourceLayoutID=:layout
+        """), {"resolution": _json(ignored_physical),
+               "iid": iid, "cid": cid, "layout": layout_id})
+    await db.execute(text("""
+        UPDATE import.imports SET revision=revision+1, status='NeedsMapping',
+            updatedbyuserid=:uid, updatedatutc=NOW() WHERE importid=:iid AND companyid=:cid
+    """), {"uid": uid, "iid": iid, "cid": cid})
 
 
 async def _reject_headerless_mapping(db, cid: int, iid: int, layout_id: int, mapping: dict[str, str]) -> None:
@@ -787,7 +1528,69 @@ async def _reject_headerless_mapping(db, cid: int, iid: int, layout_id: int, map
             )
 
 
-def _materialize_batch(files, units, layouts, policy, product_policy=None):
+def _layout_rule_mappings(layouts, units, pending_rules):
+    """Compile immutable target rules into bounded per-layout preview instructions."""
+    selected_layout_ids = {unit["sourcelayoutid"] for unit in units if unit["isselected"]}
+    headers_by_layout = {layout["sourcelayoutid"]: (layout["inspectionmetadata"] or {}).get("header_cells", [])
+                         for layout in layouts if layout["sourcelayoutid"] in selected_layout_ids}
+    mappings = {}
+    quantity_rules = {}
+    duplicate_selectors = []
+    for rule in pending_rules:
+        payload = _stored_rule_payload(rule["rulepayload"])
+        if payload is None:
+            raise failure("IMPORT_RULE_PAYLOAD_UNSUPPORTED",
+                          "A saved target rule uses an unsupported mapping format. Remap this target.", 409)
+        duplicate_selectors.extend(payload["inputs"])
+        duplicate_selectors.extend(payload["shared_columns"].values())
+    for layout in layouts:
+        layout_id = layout["sourcelayoutid"]
+        if layout_id not in headers_by_layout:
+            continue
+        headers = headers_by_layout[layout_id]
+        resolution = layout.get("columnmapping") or {}
+        ignores = []
+        for occurrence in describe_headers(headers)["header_occurrences"]:
+            if resolution.get(str(occurrence["source_column"])) == "Ignore":
+                selector = {"header": occurrence["normalized_label"]}
+                if occurrence["duplicate_signature"]:
+                    selector["occurrences"] = [{
+                        "duplicate_signature": occurrence["duplicate_signature"],
+                        "occurrence_ordinal": occurrence["occurrence_ordinal"],
+                    }]
+                ignores.append(selector)
+        ensure_duplicate_outcomes({layout_id: headers}, duplicate_selectors + ignores,
+                                  allow_unobserved_arrangements=True)
+    for layout_id, headers in headers_by_layout.items():
+        detail = describe_headers(headers)
+        mapping = {str(item["source_column"]): "Ignore" for item in detail["header_occurrences"]}
+        mappings[layout_id] = mapping
+    for rule in pending_rules:
+        payload = _stored_rule_payload(rule["rulepayload"])
+        if payload is None:
+            raise failure("IMPORT_RULE_PAYLOAD_UNSUPPORTED",
+                          "A saved target rule uses an unsupported mapping format. Remap this target.", 409)
+        target = f"Definition:{rule['payrollperioddefinitionid']}"
+        selectors = payload["inputs"]
+        resolved_inputs = [resolve_selector(selector, headers_by_layout, required=False,
+                                             allow_unobserved_arrangements=True)
+                           for selector in selectors]
+        for layout_id in headers_by_layout:
+            columns = [resolved[layout_id] for resolved in resolved_inputs]
+            quantity_rules.setdefault(layout_id, []).append({
+                "target": target, "transform": payload["transform"], "columns": columns,
+                    "source_signature": {"inputs": payload["inputs"]},
+            })
+        for role, selector in payload["shared_columns"].items():
+            resolved = resolve_selector(selector, headers_by_layout, required=False,
+                                        allow_unobserved_arrangements=True)
+            for layout_id, column in resolved.items():
+                if column is not None:
+                    mappings[layout_id][str(column)] = role
+    return mappings, quantity_rules
+
+
+def _materialize_batch(files, units, layouts, policy, product_policy=None, pending_rules=None):
     if product_policy is None:
         from app.product_policy import DEFAULT_PRODUCT_POLICY
         product_policy = DEFAULT_PRODUCT_POLICY
@@ -836,10 +1639,11 @@ def _materialize_batch(files, units, layouts, policy, product_policy=None):
     if any(unit["sourcelayoutid"] not in layouts_by_id for unit in selected):
         raise ImportFailure("IMPORT_LAYOUT_REQUIRED", "Every selected source unit must belong to a layout.")
     aggregate_rows = aggregate_cells = candidates = 0
+    rule_mappings, quantity_rules = _layout_rule_mappings(layouts, units, pending_rules or [])
     for unit in selected:
         inspection = unit["inspectionmetadata"] or {}
         layout = layouts_by_id[unit["sourcelayoutid"]]
-        mapping = layout["columnmapping"]
+        mapping = rule_mappings.get(unit["sourcelayoutid"], {})
         if not mapping:
             raise ImportFailure("IMPORT_MAPPING_REQUIRED", "Accept a mapping for every selected source layout.")
         imported_rows = inspection.get("imported_row_count")
@@ -849,7 +1653,9 @@ def _materialize_batch(files, units, layouts, policy, product_policy=None):
             imported_rows = max(0, int(imported_rows))
         aggregate_rows += imported_rows
         aggregate_cells += int(inspection.get("cell_count", 0))
-        candidates += imported_rows * sum(target.startswith("Definition:") for target in mapping.values())
+        candidates += imported_rows * sum(
+            any(column is not None for column in rule["columns"])
+            for rule in quantity_rules.get(unit["sourcelayoutid"], []))
     if aggregate_rows > policy.max_data_rows:
         raise ImportFailure("IMPORT_DATA_ROW_LIMIT_EXCEEDED", "Selected units exceed the configured aggregate row limit.")
     if aggregate_cells > policy.max_selected_cells:
@@ -877,7 +1683,8 @@ def _materialize_batch(files, units, layouts, policy, product_policy=None):
             source_rows.append({"source_unit_id": unit["sourceunitid"], "file_ordinal": unit["fileordinal"],
                 "unit_name": unit["unitname"], "unit_kind": unit["unitkind"],
                 "structure_fingerprint": layout["structurefingerprint"],
-                "mapping": {str(key): value for key, value in layout["columnmapping"].items()},
+                "mapping": rule_mappings.get(unit["sourcelayoutid"], {}),
+                "quantity_rules": quantity_rules.get(unit["sourcelayoutid"], []),
                 "date_source": unit["datesource"] or {}, "date_order": unit["dateorder"],
                 "materialized": materialized_by_name[unit["unitname"]]})
     return source_rows
@@ -902,6 +1709,7 @@ def _stable_identifiers(sources):
 async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
     policy = _policy(request)
     started_rule_context = None
+    pending_rules = None
     async with admission(request):
         async with engine.begin() as db:
             row = await load_import(db, cid, iid)
@@ -914,11 +1722,20 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
             files, units, layouts = await load_sources(db, cid, iid, include_canonical=True)
             started_rule_context = await current_rule_context(db, cid, iid)
+            pending_rules = [dict(item) for item in (await db.execute(text("""
+                SELECT p.PayDefinitionID, p.PayrollPeriodDefinitionID, r.RulePayload
+                FROM import.PayrollWorkPendingRules p
+                JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+                  AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID
+                  AND r.PayDefinitionID=p.PayDefinitionID
+                WHERE p.ImportID=:iid AND p.CompanyID=:cid
+                ORDER BY p.PayDefinitionID
+            """), {"iid": iid, "cid": cid})).mappings()]
             if any(file["contentpurgedatutc"] is not None for file in files):
                 raise failure("IMPORT_CONTENT_PURGED", "Source file content has been purged and cannot be previewed.")
             default_date = row["defaultworkdate"]
         materialized = await anyio.to_thread.run_sync(partial(
-            _materialize_batch, files, units, layouts, policy, _product_policy(request)))
+            _materialize_batch, files, units, layouts, policy, _product_policy(request), pending_rules))
         files = units = layouts = None
         for source in materialized:
             date_source = source["date_source"]
