@@ -1,10 +1,10 @@
 # Flussra C2 Import Product Contract
 
-**Status:** Agreed product decisions, 2026-10-26. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. Publication is documentation-only; implementation, migrations and preservation-gap fixes require separate execution authorization.
+**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A03 have been implemented and focused-verified on the foundation continuation; this does not claim the revised import experience, extraction or payroll application is complete.
 
 **Continuation baseline:** `codex/c2-import-foundation`, implementation at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e` and documentation through `f15bf96`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
 
-**Authority:** This document records product decisions; the companion [C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md) owns delivery and the [technical design](FLUSSRA_C2_IMPORT_DESIGN.md) owns engineering boundaries and historical evidence. They now describe one revised ordinary-work contract. Superseded assumptions remain in Git history, not as competing current instructions. A rule recorded here is not a claim that it is implemented. No implementation, schema or deployed behavior changes with publication.
+**Authority:** This document records product decisions; the companion [C2 product plan](FLUSSRA_C2_IMPORT_PLAN.md) owns delivery and the [technical design](FLUSSRA_C2_IMPORT_DESIGN.md) owns engineering boundaries and historical evidence. They now describe one revised ordinary-work contract. Superseded assumptions remain in Git history, not as competing current instructions. A rule recorded here is not by itself a claim that it is implemented; implementation status is stated separately above and in the plan.
 
 ## 1. Purpose and boundaries
 
@@ -271,11 +271,11 @@ Reference preview implementation `6498453` contains `completed_notice` and a ded
 
 Reference locations: `backend/app/imports/preview_service.py` (`completed_notice`, `enrich_metadata`) and `backend/tests/test_import_preview_api.py` (`test_completed_import_notice_uses_fixture_state_and_new_import_still_previews_current_facts`) on `6498453`. Foundation counterparts for review are `backend/app/imports/batch_service.py` metadata and semantic identity/publication boundaries.
 
-### 12.2 Pending behavior: paginated-read contract-version validation
+### 12.2 Implemented behavior: paginated-read contract-version validation
 
-The reference preview validates supported contract versions before paginated rows/issues reads. Foundation's full metadata loader validates versions, but `backend/app/imports/readmodels.py`'s shared `_read_identity` helper checks scope/revision/fingerprint without repeating those contract-version checks for rows/issues/source-record reads.
+The foundation continuation now routes metadata, mutations and all rows/issues/source-record pages through the shared supported-contract checker. Editable previews also compare their stored pending-rule context with the current target heads. Completed and cancelled history retains its original page reads after later successful head changes, while its own stored contract versions and revision/fingerprint remain checked.
 
-**Disposition: pending implementation/preservation review in A03/A10; no implementation now.** The fail-closed supported-version guarantee applies consistently to metadata, every retained rows/issues/source-record page, mutations and final commit alongside tenant/revision/fingerprint protection. Reconcile that shared enforcement boundary with the versioned new source/rule contracts. Do not add obsolete-version adapters or preserve an old helper/API solely for compatibility.
+**Disposition: implemented and focused-verified in A03.** The fail-closed supported-version guarantee applies consistently to metadata, every retained rows/issues/source-record page and mutations alongside tenant/revision/fingerprint protection. A10 still owns the separately pending completed-import recognition/notice behavior in §12.1. Do not add obsolete-version adapters or preserve an old helper/API solely for compatibility.
 
 ## 13. Open decisions and implementation acceptance prerequisites
 
@@ -285,6 +285,6 @@ The product choices are settled; the technical design and stage gates own their 
 2. Authoritative deployment request/proxy deadline and process memory/concurrency budget for A11 acceptance. Existing results do not certify new-cap performance or authorize jobs/polling.
 3. Detailed dedicated Status import and any new ordinal tier-count ceiling remain separately deferred domain work.
 4. Stage-local versioned schemas/DTOs, categorical suitability/date grammar coverage and remembered identity-acceptance details must implement the boundaries and tests in the design without inventing Company-wide reuse or new semantic equivalence. Escalate a genuinely new product ambiguity rather than silently changing this contract.
-5. Both preservation behaviors in §12 remain unimplemented pending their assigned stage review/verification. This revision records their intended disposition, not a fix.
+5. Completed-import recognition/notice in §12.1 remains pending A10 implementation/preservation review. Paginated-read contract-version validation in §12.2 was implemented and focused-verified in A03.
 
-The existing implementation and historical test/benchmark evidence remain preserved. They do not prove conformance to this revised contract or mark A01-A12/Slice B accepted. Future implementation requires separate execution authorization and fresh focused correctness, schema/retention/concurrency and realistic workload verification. This documentation revision changes no code, schema or payroll data.
+The existing implementation and historical test/benchmark evidence remain preserved. They do not prove conformance to the complete revised contract or mark A04-A12/Slice B accepted. A03's schema and runtime changes passed its focused verification and SQL/Alembic authority comparison; later stages still require separate execution authorization and fresh focused correctness, retention/concurrency and realistic workload verification.

@@ -6,9 +6,11 @@ from functools import partial
 import anyio
 from sqlalchemy import text
 
+from app.imports.contracts import require_supported_import_contract
 from app.imports.errors import ImportFailure
 from app.imports.mapping import canonical, encoded
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY, ImportResourcePolicy
+from app.imports.rules import require_preview_rule_context
 from app.imports.runtime import authorize, failure
 from app.payroll.period_definitions import list_period_definitions
 
@@ -81,7 +83,7 @@ def project_source_record(item: dict, cell_offset: int, cell_limit: int) -> dict
 
 async def _read_identity(db, cid: int, uid: int, iid: int, revision: int, plan_fingerprint: str):
     row = (await db.execute(text("""
-        SELECT w.payrollperiodid, w.planfingerprint, w.previewcounts, i.revision
+        SELECT w.payrollperiodid, w.planfingerprint, w.previewcounts, i.revision, i.status
         FROM import.imports i JOIN import.payrollworkimports w
           ON w.importid = i.importid AND w.companyid = i.companyid
         WHERE i.importid = :iid AND i.companyid = :cid
@@ -89,8 +91,14 @@ async def _read_identity(db, cid: int, uid: int, iid: int, revision: int, plan_f
     if row is None:
         raise ImportFailure("IMPORT_NOT_FOUND", "Import not found.", 404)
     await authorize(db, cid, uid, row["payrollperiodid"], mutate=False)
+    await require_supported_import_contract(db, cid, iid)
     if row["revision"] != revision or row["planfingerprint"] != plan_fingerprint or not plan_fingerprint:
         raise failure("IMPORT_PREVIEW_STALE", "Preview changed. Read current metadata before requesting another page.")
+    # A live preview is bound to the current pending-rule context. Terminal
+    # Imports retain their historical reads even after a later successful
+    # Import advances a target's current rule head.
+    if row["status"] in ("NeedsMapping", "NeedsReview"):
+        await require_preview_rule_context(db, cid, iid)
     return row
 
 

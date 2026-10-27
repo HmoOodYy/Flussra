@@ -73,7 +73,7 @@ async def _copy_records(db, table: str, columns: tuple[str, ...], records) -> No
 
 
 async def persist_preview(db, *, company_id: int, import_id: int, branch_id: int,
-                          period_id: int, result: dict) -> None:
+                          period_id: int, result: dict, rule_context_fingerprint: str) -> None:
     """Publish one fully prepared preview inside the caller's final transaction."""
     if not result.get("_prepared"):
         raise ValueError("Preview persistence requires preparation outside the publication transaction.")
@@ -149,3 +149,9 @@ async def persist_preview(db, *, company_id: int, import_id: int, branch_id: int
     """), {"iid": import_id, "cid": company_id, "mapping": result["mapping_fingerprint"],
            "content": result["content_fingerprint"], "plan": result["plan_fingerprint"],
            "counts": _json(result["counts"]), "summary": _json(result["counts"])})
+    await db.execute(text("""
+        INSERT INTO import.payrollworkpreviewrulecontexts
+            (importid, companyid, branchid, payrollperiodid, fingerprint)
+        VALUES (:iid, :cid, :bid, :pid, :fingerprint)
+    """), {"iid": import_id, "cid": company_id, "bid": branch_id,
+           "pid": period_id, "fingerprint": rule_context_fingerprint})

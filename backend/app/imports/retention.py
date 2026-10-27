@@ -33,6 +33,10 @@ async def purge_payroll_work_import_details(db: AsyncConnection, *, company_id: 
             WHERE importid = :iid AND companyid = :cid
         """), {"iid": iid, "cid": company_id})
         await db.execute(text("""
+            UPDATE import.FileCanonicalData SET Payload = NULL, PurgedAtUtc = NOW()
+            WHERE ImportID = :iid AND CompanyID = :cid AND Payload IS NOT NULL
+        """), {"iid": iid, "cid": company_id})
+        await db.execute(text("""
             UPDATE import.filesources SET filecontent = NULL, contentpurgedatutc = NOW(),
                 inspectionmetadata = NULL
             WHERE importid = :iid AND companyid = :cid

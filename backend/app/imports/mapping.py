@@ -9,11 +9,11 @@ from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 
+from app.imports.contracts import CANONICALIZATION_VERSION
 from app.imports.errors import ImportFailure
 from app.payroll.definition_calculation import is_method_operational, quantity_error
 
 IDENTIFIERS = {"DriverNumber", "EmployeeKey", "DriverName"}
-CANONICALIZATION_VERSION = 3
 NUMBER = re.compile(r"^-?\d+(?:\.\d+)?$", re.ASCII)
 DATE_PARTS = re.compile(r"^(\d{1,4})[/.-](\d{1,2})[/.-](\d{1,4})$", re.ASCII)
 

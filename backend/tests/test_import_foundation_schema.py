@@ -6,7 +6,7 @@ from uuid import uuid4
 import psycopg2
 import pytest
 
-from app.db.schema_guard import _check_import_foundation
+from app.db.schema_guard import _check_import_foundation, _check_import_rule_lifecycle
 from tests.db_state import IMPORT_FILE_DETAIL_WRITABLE_TRIGGER, suspended_test_triggers_sync
 from tests.schema_helpers import _alembic, _disposable_database, _schema_database
 
@@ -47,6 +47,7 @@ def envelope(cur, cid, uid, *, kind="People", source="Integration"):
 def test_generic_records_need_no_file_payroll_or_driver_authority(foundation):
     with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
         assert _check_import_foundation(cur) == []
+        assert _check_import_rule_lifecycle(cur) == []
         cid, uid = identities(cur)
         iid = envelope(cur, cid, uid)
         cur.execute("""INSERT INTO import.importsourcerecords (importid, companyid, locator, payload)

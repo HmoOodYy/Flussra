@@ -10,8 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.imports.contracts import CANONICALIZATION_VERSION
 from app.imports.errors import ImportFailure
-from app.imports.mapping import CANONICALIZATION_VERSION
 from app.imports.policy import ImportResourcePolicy
 from app.imports.runtime import authorize
 from app.product_policy import ProductPolicy

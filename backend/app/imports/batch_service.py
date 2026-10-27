@@ -15,6 +15,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.imports.contracts import (
+    CANONICALIZATION_VERSION,
+    FILE_SOURCE_CONTRACT_VERSION,
+    IMPORT_CONTRACT_VERSION,
+    SOURCE_CONTRACT_VERSION,
+    TARGET_CONTRACT_VERSION,
+    require_supported_import_contract,
+)
 from app.imports.errors import ImportFailure
 from app.imports.files import inspect_source_file, read_source_units
 from app.imports.mapping import (
@@ -33,6 +41,7 @@ from app.imports.payroll_context import context_identity, load_context
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY, ImportResourcePolicy
 from app.imports.preview_model import build_batch_preview
 from app.imports.preview_store import persist_preview, prepare_preview
+from app.imports.rules import current_rule_context
 from app.imports.runtime import admission, authorize, failure
 from app.imports.staging import clear_derived_state
 from app.imports.transport import FilePayload, receive_files
@@ -40,11 +49,11 @@ from app.payroll.mutation_lock import _lock_period_for_mutation
 from app.payroll.period_definitions import list_period_definitions
 from app.payroll.schemas import SOURCE_ENTRY_STATUSES
 
-IMPORT_CONTRACT = 1
-SOURCE_CONTRACT = 2
-FILE_SOURCE_CONTRACT = 2
-TARGET_CONTRACT = 2
-CANONICALIZATION = 3
+IMPORT_CONTRACT = IMPORT_CONTRACT_VERSION
+SOURCE_CONTRACT = SOURCE_CONTRACT_VERSION
+FILE_SOURCE_CONTRACT = FILE_SOURCE_CONTRACT_VERSION
+TARGET_CONTRACT = TARGET_CONTRACT_VERSION
+CANONICALIZATION = CANONICALIZATION_VERSION
 MAX_IMPORT_METADATA_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_response_bytes
 
 
@@ -145,10 +154,7 @@ async def load_import(db: AsyncConnection, cid: int, iid: int):
     """), {"cid": cid, "iid": iid})).mappings().first()
     if row is None:
         raise HTTPException(404, "Import not found.")
-    if (row["importkind"] != "PayrollWork" or row["sourcekind"] != "File"
-            or row["contractversion"] != IMPORT_CONTRACT or row["sourceversion"] != SOURCE_CONTRACT
-            or row["targetversion"] != TARGET_CONTRACT or row["canonicalizationversion"] != CANONICALIZATION):
-        raise failure("IMPORT_CONTRACT_UNSUPPORTED", "This staged Import version is unsupported. Reset/re-upload the files.")
+    await require_supported_import_contract(db, cid, iid)
     return row
 
 
@@ -768,6 +774,7 @@ def _stable_identifiers(sources):
 
 async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
     policy = _policy(request)
+    started_rule_context = None
     async with admission(request):
         async with engine.begin() as db:
             row = await load_import(db, cid, iid)
@@ -777,6 +784,7 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             if period.status not in SOURCE_ENTRY_STATUSES or row["status"] not in ("NeedsMapping", "NeedsReview") or row["detailpurgedatutc"]:
                 raise failure("IMPORT_NOT_EDITABLE", "This Import is no longer editable.")
             files, units, layouts = await load_sources(db, cid, iid)
+            started_rule_context = await current_rule_context(db, cid, iid)
             if any(file["contentpurgedatutc"] is not None or file["filecontent"] is None for file in files):
                 raise failure("IMPORT_CONTENT_PURGED", "Source file content has been purged and cannot be previewed.")
             default_date = row["defaultworkdate"]
@@ -830,13 +838,18 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
         started_revision = body.expected_revision
         async with engine.begin() as db:
             await _lock_mutable(db, cid, uid, iid, started_revision)
+            published_rule_context = await current_rule_context(db, cid, iid)
+            if published_rule_context != started_rule_context:
+                raise failure("IMPORT_RULE_CONTEXT_STALE",
+                              "Saved mapping rules changed while the preview was being prepared. Refresh and retry.")
             current_context = await load_context(db, cid, period, dates=sorted(dates), identifiers=identifiers)
             if fingerprint("relational-context", context_identity(current_context)) != context_token:
                 raise failure("IMPORT_CONTEXT_STALE", "Payroll context changed while the preview was being prepared. Refresh and retry.")
             _current_files, current_units, current_layouts = await load_sources(db, cid, iid)
             await clear_derived_state(db, cid, iid, reset_mapping=False)
             await persist_preview(db, company_id=cid, import_id=iid, branch_id=period.branch_id,
-                                  period_id=period.payroll_period_id, result=result)
+                                  period_id=period.payroll_period_id, result=result,
+                                  rule_context_fingerprint=published_rule_context)
             current_unit_ids = {unit["sourceunitid"] for unit in current_units}
             for source_unit_id, date_order, encoding, delimiter, inspection_json in inspection_updates:
                 if source_unit_id not in current_unit_ids:

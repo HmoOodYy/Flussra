@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 from decimal import Decimal
 from uuid import uuid4
@@ -113,6 +114,19 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
         response = await upload(p3c_client, tenant, pid, data)
         assert response.status_code == 200, response.text
         iid = response.json()["import_id"]
+        canonical_payload = b'{"canonical_file_version":1}'
+        async with p3c_engine.begin() as db:
+            file_id = (await db.execute(text("""
+                SELECT FileSourceID FROM import.FileSources
+                WHERE ImportID=:iid AND CompanyID=:cid
+            """), {"iid": iid, "cid": tenant.company_id})).scalar_one()
+            await db.execute(text("""
+                INSERT INTO import.FileCanonicalData
+                    (FileSourceID, ImportID, CompanyID, FormatVersion, Payload, ByteCount, HashSha256)
+                VALUES (:file_id, :iid, :cid, 1, :payload, :byte_count, :digest)
+            """), {"file_id": file_id, "iid": iid, "cid": tenant.company_id,
+                   "payload": canonical_payload, "byte_count": len(canonical_payload),
+                   "digest": hashlib.sha256(canonical_payload).hexdigest()})
         if desired in ("NeedsReview", "Completed"):
             preview = await _map_and_preview(p3c_client, tenant, response.json(), definition_id)
             assert preview["status"] == "NeedsReview"
@@ -150,6 +164,11 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
     async with p3c_engine.begin() as db:
         await purge_payroll_work_import_details(db, company_id=tenant.company_id, period_id=pid, actor_id=tenant.owner)
     assert [details(tenant, iid)[1] for iid, _, _ in staged] == [before[1] + 1 for _, _, before in staged]
+    assert rows(tenant, """
+        SELECT count(*) FROM import.FileCanonicalData
+        WHERE CompanyID=%s AND Payload IS NULL AND PurgedAtUtc IS NOT NULL
+          AND ByteCount > 0 AND HashSha256 ~ '^[0-9a-f]{64}$'
+    """, tenant.company_id)[0][0] == len(staged)
     assert rows(tenant,
         "SELECT payrollperiodauditevidenceeventid FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid=%s ORDER BY 1", pid) == evidence_before
     with pytest.raises(DBAPIError, match="IMPORT_PURGE_SCOPE|IMPORT_IMMUTABLE"):

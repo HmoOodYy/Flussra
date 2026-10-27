@@ -143,7 +143,7 @@ def _seed_0086_company(cursor, code: str) -> tuple[int, int]:
 
 def test_fresh_upgrade_reaches_head_with_the_durable_driver_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0095",)
+    assert cur.fetchone() == ("0096",)
 
     def columns(table: str, schema: str = "core") -> set[str]:
         cur.execute("""
@@ -254,6 +254,10 @@ def test_no_function_or_view_still_reads_the_profile_meaning_of_driverid(cur):
               'fn_guard_used_rate_definition_scope',
               -- Immutable calculation evidence (0089): DriverID there is the permanent Driver.
               'fn_guard_snapshot_minmax_rule_scope', 'fn_guard_final_line_insert')
+          -- Import guards (0095/0096) validate stable DriverID and DriverAssignmentID links;
+          -- they do not query the former profile meaning of DriverID.
+          AND NOT (n.nspname = 'import' AND p.proname IN (
+              'fn_guard_payroll_work_detail', 'fn_guard_review_decision', 'fn_guard_applied_change'))
           AND p.prosrc ~* '(\mdriverid\M|driver_id|fn_effectivedriverprofile|fn_drivercoversworkdate|drivercode)'
     """)
     assert cur.fetchall() == []

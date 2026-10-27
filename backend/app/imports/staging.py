@@ -7,6 +7,8 @@ async def clear_derived_state(db: AsyncConnection, cid: int, iid: int, *, reset_
                               retention: bool = False) -> None:
     """Clear only derived preview detail, retaining physical source identity."""
     params = {"iid": iid, "cid": cid}
+    for table in ("payrollworkreviewdecisions", "payrollworkpreviewrulecontexts"):
+        await db.execute(text(f"DELETE FROM import.{table} WHERE importid = :iid AND companyid = :cid"), params)
     for table in (
         "importissues", "payrollworkrecordidentifiers", "payrollworkrecords",
         "payrollworkpreviewgroups", "payrollworkdrivermatches", "filesourcerecords",

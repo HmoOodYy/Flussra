@@ -558,6 +558,144 @@ def _check_import_foundation(cur) -> list[str]:
     return errors
 
 
+def _check_import_rule_lifecycle(cur) -> list[str]:
+    """Verify the forward canonical-payload and rule-history schema boundary."""
+    errors: list[str] = []
+    tables = {
+        "filecanonicaldata": ("filesourceid", "importid", "companyid", "formatversion", "payload",
+                              "bytecount", "hashsha256", "purgedatutc"),
+        "payrollworkruleversions": ("ruleversionid", "companyid", "branchid", "paydefinitionid",
+                                    "originimportid", "originpayrollperiodid", "rulefingerprint",
+                                    "sourcesignature", "targetmeaning", "rulepayload", "createdbyuserid"),
+        "payrollworkpendingrules": ("importid", "companyid", "branchid", "payrollperiodid",
+                                    "paydefinitionid", "payrollperioddefinitionid", "ratedefinitionid",
+                                    "ruleversionid", "revision", "expectedheadrevision", "updatedbyuserid"),
+        "payrollworkruleheads": ("companyid", "branchid", "paydefinitionid", "ruleversionid",
+                                 "revision", "activatedbyimportid", "activatedpayrollperiodid",
+                                 "activatedbyuserid"),
+        "payrollworkreviewdecisions": ("decisionid", "importid", "companyid", "branchid",
+                                       "payrollperiodid", "decisionkey", "contractversion",
+                                       "reviewedrevision", "planfingerprint", "decisionkind", "choice",
+                                       "basisjson", "actoruserid"),
+        "payrollworkappliedchanges": ("changeid", "importid", "companyid", "branchid", "payrollperiodid",
+                                      "paydefinitionid", "payrollperioddefinitionid", "ratedefinitionid",
+                                      "ruleversionid", "driverid", "driverassignmentid", "workdate",
+                                      "draftlineid", "evidenceeventid", "reviewedrevision", "planfingerprint",
+                                      "contractversion", "action"),
+        "payrollworkpreviewrulecontexts": ("importid", "companyid", "branchid", "payrollperiodid", "fingerprint"),
+    }
+    for table, columns in tables.items():
+        cur.execute("SELECT to_regclass(%s)", (f"import.{table}",))
+        if cur.fetchone()[0] is None:
+            errors.append(f"Missing Import lifecycle table import.{table} (0096).")
+            continue
+        cur.execute("""SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s)
+            AND attnum > 0 AND NOT attisdropped""", (f"import.{table}",))
+        found = {row[0] for row in cur.fetchall()}
+        for column in columns:
+            if column not in found:
+                errors.append(f"Missing Import lifecycle column import.{table}.{column} (0096).")
+        cur.execute("""SELECT count(*) FROM pg_constraint WHERE conrelid = to_regclass(%s)
+            AND contype = 'f' AND convalidated""", (f"import.{table}",))
+        validated = cur.fetchone()[0]
+        cur.execute("""SELECT count(*) FROM pg_constraint WHERE conrelid = to_regclass(%s)
+            AND contype = 'f'""", (f"import.{table}",))
+        total = cur.fetchone()[0]
+        if total == 0 or validated != total:
+            errors.append(f"Import lifecycle table import.{table} has missing or unvalidated scope foreign keys.")
+
+    cur.execute("""
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conrelid = to_regclass('import.payrollworkpendingrules')
+          AND c.conname = 'uq_payrollworkpendingrules_importtargetrule'
+          AND c.contype = 'u' AND c.convalidated
+          AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(num,pos)
+                    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num ORDER BY k.pos)
+              = ARRAY['importid','paydefinitionid','ruleversionid']::text[]
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing exact pending-target/rule unique key required by durable applied-change links (0096).")
+    cur.execute("""
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conrelid = to_regclass('import.payrollworkappliedchanges')
+          AND c.confrelid = to_regclass('import.payrollworkpendingrules')
+          AND c.conname = 'fk_payrollworkappliedchanges_pendingruleversion'
+          AND c.contype = 'f' AND c.convalidated
+          AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(num,pos)
+                    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num ORDER BY k.pos)
+              = ARRAY['importid','paydefinitionid','ruleversionid']::text[]
+          AND ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(num,pos)
+                    JOIN pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=k.num ORDER BY k.pos)
+              = ARRAY['importid','paydefinitionid','ruleversionid']::text[]
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing exact validated applied-change to pending-rule version FK (0096).")
+
+    guards = (
+        ("filecanonicaldata", "trg_filecanonicaldata_writable", "fn_guard_file_canonical_data", 31),
+        ("filecanonicaldata", "trg_filecanonicaldata_notruncate", "fn_guard_file_canonical_data", 34),
+        ("payrollworkruleversions", "trg_payrollworkruleversions_writable", "fn_guard_rule_version", 31),
+        ("payrollworkruleversions", "trg_payrollworkruleversions_notruncate", "fn_guard_rule_version", 34),
+        ("payrollworkpendingrules", "trg_payrollworkpendingrules_writable", "fn_guard_pending_rule", 31),
+        ("payrollworkpendingrules", "trg_payrollworkpendingrules_notruncate", "fn_guard_pending_rule", 34),
+        ("payrollworkruleheads", "trg_payrollworkruleheads_writable", "fn_guard_rule_head", 31),
+        ("payrollworkruleheads", "trg_payrollworkruleheads_notruncate", "fn_guard_rule_head", 34),
+        ("payrollworkreviewdecisions", "trg_payrollworkreviewdecisions_writable", "fn_guard_review_decision", 31),
+        ("payrollworkreviewdecisions", "trg_payrollworkreviewdecisions_notruncate", "fn_guard_review_decision", 34),
+        ("payrollworkappliedchanges", "trg_payrollworkappliedchanges_writable", "fn_guard_applied_change", 31),
+        ("payrollworkappliedchanges", "trg_payrollworkappliedchanges_notruncate", "fn_guard_applied_change", 34),
+        ("payrollworkpreviewrulecontexts", "trg_payrollworkpreviewrulecontexts_writable", "fn_guard_preview_rule_context", 31),
+        ("payrollworkpreviewrulecontexts", "trg_payrollworkpreviewrulecontexts_notruncate", "fn_guard_preview_rule_context", 34),
+    )
+    for table, trigger, function, events in guards:
+        cur.execute("""
+            SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE t.tgrelid = to_regclass(%s) AND t.tgname = %s
+              AND t.tgenabled IN ('O','A') AND t.tgtype = %s
+              AND n.nspname = 'import' AND p.proname = %s
+        """, (f"import.{table}", trigger, events, function))
+        if cur.fetchone() is None:
+            errors.append(f"Missing or disabled Import lifecycle guard {table}.{trigger} -> {function} (0096).")
+    cur.execute("""
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE t.tgrelid = to_regclass('import.filesources') AND t.tgname = 'trg_filesources_canonicalretention'
+          AND t.tgenabled IN ('O','A') AND t.tgtype = 19
+          AND n.nspname = 'import' AND p.proname = 'fn_guard_file_canonical_retention'
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing or disabled canonical-payload-before-original retention guard (0096).")
+    cur.execute("""
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE t.tgrelid = to_regclass('import.payrollworkappliedchanges')
+          AND t.tgname = 'trg_payrollworkappliedchanges_completedimport'
+          AND t.tgenabled IN ('O','A') AND t.tgconstraint <> 0
+          AND t.tgdeferrable AND t.tginitdeferred
+          AND n.nspname = 'import' AND p.proname = 'fn_require_applied_import_completed'
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing deferred Completed-Import gate for durable applied-change links (0096).")
+    for name in ("ix_filecanonicaldata_import", "ix_payrollworkruleversions_origin",
+                 "ix_payrollworkpendingrules_ruleversion", "ix_payrollworkruleheads_ruleversion",
+                 "ix_payrollworkreviewdecisions_import", "ix_payrollworkappliedchanges_import"):
+        if not _index_exists(cur, "import", name):
+            errors.append(f"Missing Import lifecycle lookup index import.{name} (0096).")
+    for function, markers in (
+        ("fn_guard_file_canonical_data", ("import_purge_id", "payload", "purgedatutc")),
+        ("fn_guard_pending_rule", ("import_rule_reuse_unconfirmed", "expectedheadrevision")),
+        ("fn_guard_rule_head", ("completed", "mappingfingerprint", "contentfingerprint", "planfingerprint")),
+        ("fn_guard_review_decision", ("fn_require_current_pending_head", "reviewedrevision")),
+        ("fn_guard_applied_change", ("correlationid", "sourcerevision", "source_created", "expected_head_revision")),
+    ):
+        cur.execute("SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure(%s)", (f"import.{function}()",))
+        row = cur.fetchone()
+        if row is None or any(marker not in row[0].lower() for marker in markers):
+            errors.append(f"Missing or drifted Import lifecycle semantic guard import.{function}() (0096).")
+    return errors
+
+
 def _check_target_physical_authorities(cur) -> list[str]:
     errors: list[str] = []
     for qualified in _RETIRED_TABLES:
@@ -1018,6 +1156,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     temporal_errors.extend(_check_company_status_catalog(cur))
     temporal_errors.extend(_check_target_physical_authorities(cur))
     temporal_errors.extend(_check_import_foundation(cur))
+    temporal_errors.extend(_check_import_rule_lifecycle(cur))
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)
