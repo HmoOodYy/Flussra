@@ -36,22 +36,25 @@ V1 accepts normal, organized `.xlsx` or `.csv` tables:
 
 Presentation-only cells do not extend the import table. Formatting, styles, fonts, colors and data validations in empty rows/columns do not make them data.
 
-Data beneath an absent header is ignored automatically, without requiring a decision for each such column. After inspection, show a clear notice, for example: **Some data was ignored because no column header was provided. Please review your file.** This is disclosed omission, not hidden data loss. How those populated headerless columns affect the column ceiling remains open (§13).
+Data beneath an absent header is ignored automatically, without requiring a decision for each such column. After inspection, show a clear notice, for example: **Some data was ignored because no column header was provided. Please review your file.** This is disclosed omission, not hidden data loss. Ignored headerless columns do not consume the 40-column allowance; inspecting them still falls under separate physical-input/resource safeguards.
 
-Populated hidden-column treatment remains open. A possible future color/style-based Import type requires separate study and is outside this contract.
+Populated hidden columns participate in inspection and mapping, count toward the column allowance, and must be clearly identified as hidden. Visibility does not hide actual data from validation. A possible future color/style-based Import type requires separate study and is outside this contract.
 
 ### 2.3 Header compatibility and the 40-column limit
 
 Initial structure comparison examines **column names/headers**, not column contents. Do not inspect sample payroll values to decide initial header similarity.
 
-- Repeated daily structures count once: `Driver | Code | A | B` in six files is four unique columns, not twenty-four.
+External header matching ignores capitalization and surrounding whitespace: `Hours`, `hours` and ` Hours ` are equivalent labels. Preserve enough original label/position information to explain mappings and distinguish duplicate occurrences. Other equivalence transformations are not authorized by this rule. Internal display-name changes still require affected remapping (§4.3).
+
+- Repeated daily structures count once: `Driver | Code | A | B` in six files is four columns in the combined structure, not twenty-four.
 - Partially overlapping structures may participate in the same source setup. `Driver | Code | A | B` and `Driver | Code | A | C` have the union `Driver | Code | A | B | C`: five unique columns.
 - Files with completely different column sets are rejected from the same setup.
-- The header union must contain at most **40 unique columns**, including identity, name, code, date, filter and other included columns, not merely pay-item quantities.
+- The combined structure must contain at most **40 columns**, including identity, name, code, date, filter and other included columns, not merely pay-item quantities. Corresponding columns in repeated compatible files share a slot in that structure; separate physical columns within one file never collapse merely because their normalized labels match.
+- Duplicate labels within one file count individually: `Driver | Code | Hours | Hours | Hours` consumes **five** columns. Another daily file with that same structure does not double the count to ten. The three Hours occurrences also require the explicit resolution in §5.
 - Reject an incompatible or over-limit setup as a whole; do not silently truncate or partially accept it.
 - Count the imported header structure during bounded inspection, before payroll interpretation. Format-only empty columns do not count.
 
-Header normalization and the interaction of duplicate-header multiplicity with the 40-column ceiling are not yet settled. Separate row/cell/batch ceilings must account for physical input size even when labels repeat.
+Separate physical-column, row/cell and batch ceilings must account for inspection work, including ignored data. These resource safeguards are distinct from deduplicating corresponding columns across compatible daily files. A changed duplicate count or arrangement still requires renewed resolution; counting does not make an incompatible duplicate rule reusable.
 
 ## 3. Upload, canonical data and formulas
 
@@ -64,11 +67,11 @@ Header normalization and the interaction of duplicate-header multiplicity with t
 
 The repository's existing decimal byte convention applies: 1 MB = 1,000,000 bytes. The upload ceiling is enforced before extraction. Extract a canonical import representation and measure it before the actual mapping/payroll interpretation proceeds. Do not generate a cleaned Excel workbook merely to measure its compressed size.
 
-Canonical import data includes the retained headers, cell values, formulas, cached formula results and types needed for interpretation. Exclude presentation-only colors, fonts, borders, styles, formatting, data validations and other unnecessary presentation metadata. Preserve interpretation meaning derived from the original workbook, including date/time/duration types; discarding display styles must not discard semantic type information.
+Canonical import data includes all headed table data before mapping: headers, cell values, formulas, cached formula results and types needed for interpretation. Include headed columns the user may later choose to Ignore; that mapping choice does not reduce the admission measurement. Headerless data excluded from the import table is excluded from this representation, while its inspection remains resource-bounded. Exclude presentation-only colors, fonts, borders, styles, formatting, data validations and other unnecessary presentation metadata. Preserve interpretation meaning derived from the original workbook, including date/time/duration types; discarding display styles must not discard semantic type information.
 
 Canonical data at or below 1 MB is eligible for further processing; above 1 MB is rejected. Extraction is itself bounded parsing work, not a cost-free operation. Retain applicable file-content, archive/decompression, XML, numeric-precision and resource protections while extracting. This product revision does not authorize removing security checks or making any batch unbounded.
 
-The deterministic canonical representation, its encoding/measurement details and treatment of ignored data must be specified before implementation. No serialized format or new batch maximum is selected here.
+The deterministic canonical representation and its encoding/measurement details must be specified before implementation, using the accounting boundary above. No serialized format or new batch maximum is selected here.
 
 ### 3.2 Formula results
 
@@ -103,8 +106,10 @@ Direct mapping supplies one input quantity. Explicit Sum can combine eligible nu
 
 Preserve mapping, sum/filter rules and confirmed setup independently of original uploaded files. Explain that keeping the confirmed internal and external names/structure avoids repeating setup.
 
+Saved setup is **Branch-specific in V1**, within its Company. A confirmation in one Branch does not automatically authorize reuse in another Branch. This scope also governs the reusable source interpretation associated with that setup; it does not create a Company-wide source catalog. Company-wide sharing would require a separately explicit capability. Per-period application still uses the receiving period's frozen domain authority.
+
 - An absent known column means this upload did not supply that input. Its saved relationship remains valid; missing coverage may warn.
-- A changed external name, such as `Miles` becoming `Total Distance`, must not be assumed equivalent. Remap only the affected relationship.
+- A changed external name beyond the accepted case/surrounding-whitespace normalization, such as `Miles` becoming `Total Distance`, must not be assumed equivalent. Remap only the affected relationship.
 - A changed internal display name also requires affected remapping, even if the underlying internal identifier is stable.
 - Changed relevant structure or interpretation dependencies require renewed resolution for the affected mapping, rather than a whole-file reset of unrelated mappings.
 - Header stability is a reuse condition, not proof that an external system's units or business meaning have not changed. Import must not invent an interpretation of an unconfirmed semantic change.
@@ -193,7 +198,7 @@ For a recognized, unchanged source with compatible saved rules, the only normal 
 - The originally stated six-level ceiling belongs to the ordinal/product domain, not an import-specific reinterpretation. Do not invent a new topology or infer source column capacity from six levels; any discrepancy with current domain enforcement needs domain reconciliation before implementation.
 - Where payroll already normalizes supported formats/units, reuse that same authority. Import must not invent separate hour, distance or quantity semantics. An unsupported format is not made supported merely by this principle.
 - A Company may create up to **50 pay items**. A Branch may use at most **15 payroll input concepts, including Status**. Status consumes one slot even though it is a separate domain. These are broader product/domain rules, not just Import DTO limits.
-- Whether retired concepts release slots, and the applicable governance/effective-period enforcement, need explicit domain decisions. Existing snapshots and domain data are not modified by recording these limits.
+- Count currently usable concepts toward the Company/Branch limits. Retiring a concept frees its slot; historical definitions and frozen period snapshots remain preserved. Detailed governance/effective-period enforcement still needs domain reconciliation. Recording this rule does not alter existing domain data or historical snapshots.
 
 ## 9. Missing data, correction, confirmation and recovery
 
@@ -236,9 +241,9 @@ No implementation work is deleted by this contract. Existing assets can be reuse
 |---|---|---|
 | Setup scope | Many heterogeneous source-layout groups in one batch | One source setup; compatible/partially overlapping header sets only |
 | Worksheets/header | Multiple selected worksheets; header detection/selection | One sheet/file, one table, first-row header; no merged table cells |
-| Capacity | Configurable 128 columns/unit and aggregate operational defaults | 40 unique headers/setup; 10 MB uploaded and 1 MB canonical data/file; final aggregate ceilings pending measurements |
+| Capacity | Configurable 128 columns/unit and aggregate operational defaults | 40 columns in the combined structure; duplicates within a file count individually, corresponding daily columns count once; 10 MB uploaded and 1 MB canonical headed data/file; aggregate ceilings pending measurements |
 | Presentation | Reader retains interpreted values/types under workbook safety rules | Presentation excluded from canonical byte size and data-column extent; formula information and cached results retained |
-| Mapping | Per-import layout mappings; automatic cross-import reuse deferred | Per-target reusable relationships and transformations; latest successfully completed replacement becomes current |
+| Mapping | Per-import layout mappings; automatic cross-import reuse deferred | Branch-specific reusable per-target relationships and transformations; latest successfully completed replacement becomes current |
 | Changed structure | Regroup/invalidate layout and preview | Preserve absent known-column relationships; remap affected changed relationships, including internal display-name changes |
 | Quantity mapping | One source column per target; duplicate target assignment rejected | Direct input or explicit eligible Sum; no reuse of quantity occurrences |
 | Duplicate headers | Ambiguous auto-suggestions; no multi-column target sum | Explicit per-occurrence resolution and numeric sum/ignore choices; changed duplicate arrangement invalidates that rule |
@@ -248,7 +253,7 @@ No implementation work is deleted by this contract. Existing assets can be reuse
 | Coverage/corrections | Partial supplied sets, blank/zero distinction, omitted facts untouched | Preserve those guarantees and explicitly classify missing coverage as warning-only |
 | Ordinal | Existing progressive domain calculation | Reuse domain after final quantity aggregation; hypothetical binary-prefix reader omitted |
 | Status | Separate domain; Status import deferred | Dedicated text-only Status import required as a separate later design |
-| Payroll domain capacity | Dynamic frozen definitions; benchmark counts were not domain limits | New Company/Branch product ceilings; retirement/governance enforcement unresolved |
+| Payroll domain capacity | Dynamic frozen definitions; benchmark counts were not domain limits | New Company/Branch ceilings count currently usable concepts; retirement frees slots while preserving history; effective-period governance still needs design |
 | Apply/security | Canonical internal bulk boundary exists; no public decision/apply flow | Preserve canonical authority, isolation, staleness, evidence and atomicity; public flow still needs implementation |
 
 ### 12.1 Pending behavior: completed-import recognition/notice
@@ -269,15 +274,14 @@ The reference preview validates supported contract versions before paginated row
 
 These points are explicitly not resolved by this document:
 
-1. Header normalization: case, whitespace, Unicode and other equivalence rules.
-2. Populated hidden columns; whether ignored populated headerless columns and duplicate occurrences count toward the 40-column ceiling.
-3. Deterministic canonical data representation/encoding, exact byte-accounting boundary and treatment of ignored content/formula information.
-4. Total files/rows/cells/canonical batch bytes and any revised operational admission bounds, after realistic measurements. Retain existing applicable safeguards meanwhile.
-5. Company/Branch active-versus-retired counting, effective-period governance and any reconciliation of the stated ordinal ceiling with existing domain enforcement.
-6. Detailed Status import contract and its separately approved implementation scope.
-7. Categorical suitability checks, duplicate-occurrence compatibility, date text grammars/locales and saved-pattern matching details.
-8. Detailed persistence/activation/ownership of reusable per-target rules, the scope of remembered identity acceptances, and their interaction with period snapshots and retention. Do not invent a source-system business catalog or additive contribution model.
-9. Revised content/repeat identity and consistent supported-version enforcement, including the two preservation-review behaviors in §12.
-10. Deployment request/proxy deadline, memory/concurrency budget and revised workload acceptance. Existing measurements do not prove new-cap performance; no worker/job architecture or arbitrary latency target is approved.
+1. Detailed normalization mechanics beyond the settled external case/surrounding-whitespace equivalence. Do not infer additional semantic equivalence.
+2. Detailed deterministic canonical data representation/encoding and byte measurement within the settled headed-table accounting boundary, including formula information.
+3. Total files/physical columns/rows/cells/canonical batch bytes and any revised operational admission bounds, after realistic measurements. Retain existing applicable safeguards meanwhile.
+4. Effective-period governance for the settled currently-usable concept limits and any reconciliation of the stated ordinal ceiling with existing domain enforcement. Retirement releases slots; that policy is no longer open.
+5. Detailed Status import contract and its separately approved implementation scope.
+6. Categorical suitability checks, duplicate-occurrence compatibility, date text grammars/locales and saved-pattern matching details.
+7. Detailed persistence/activation/ownership of Branch-specific reusable per-target rules, the scope of remembered identity acceptances, and their interaction with period snapshots and retention. Do not invent Company-wide automatic reuse, a source-system business catalog or an additive contribution model.
+8. Revised content/repeat identity and consistent supported-version enforcement, including the two preservation-review behaviors in §12.
+9. Deployment request/proxy deadline, memory/concurrency budget and revised workload acceptance. Existing measurements do not prove new-cap performance; no worker/job architecture or arbitrary latency target is approved.
 
 The existing implementation and recorded test/benchmark evidence remain preserved at the continuation baseline. They do not prove conformance to this new contract. Future implementation requires an explicit reconciliation plan and authorization, followed by focused correctness, schema/retention/concurrency and realistic workload verification of the changed behavior. Recording these decisions executes none of that work.
