@@ -11,6 +11,87 @@ from tests.db_state import (
 )
 
 
+@asynccontextmanager
+async def track_function_client_pay_definitions(client, engine):
+    """Retire only PayDefinitions successfully created through this function client.
+
+    The shared test database retains history, so teardown uses the normal retirement
+    authority and never deletes rows or guesses ownership from names/global diffs.
+    Session-scoped clients are deliberately not wrapped by this helper.
+    """
+    created: set[tuple[int, int]] = set()
+
+    async def record(response):
+        path = response.request.url.path
+        direct = path == "/compensation/pay-definitions" and response.request.method == "POST"
+        approval = (response.request.method == "POST" and path.endswith("/decide")
+                    and "/compensation/pay-definition-requests/" in path)
+        if not ((direct and response.status_code == 201) or (approval and response.status_code == 200)):
+            return
+        await response.aread()
+        try:
+            body = response.json()
+            if direct:
+                pay_definition_id = body["pay_definition_id"]
+            else:
+                pay_definition_id = body.get("approved_pay_definition_id")
+            company_id = body["company_id"]
+            if pay_definition_id is not None:
+                created.add((int(company_id), int(pay_definition_id)))
+        except (KeyError, TypeError, ValueError):
+            raise AssertionError(f"successful definition creation lacked ownership IDs: {path}")
+
+    hooks = client.event_hooks.setdefault("response", [])
+    hooks.append(record)
+    body_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
+    try:
+        yield
+    except BaseException as exc:
+        body_error = exc
+    finally:
+        try:
+            hooks.remove(record)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        if created:
+            from app.compensation.definitions import retire_definition
+
+            try:
+                async with engine.begin() as db:
+                    admin = (await db.execute(_text("""
+                        SELECT c.companyid, u.userid
+                        FROM core.companies c
+                        JOIN sec.users u ON u.companyid=c.companyid
+                        WHERE c.companycode='DEMO' AND lower(u.username)='admin'
+                    """))).mappings().one_or_none()
+                if admin is None:
+                    raise AssertionError("Cannot resolve the seeded DEMO company admin for owned definitions")
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            else:
+                demo_company_id = int(admin["companyid"])
+                for company_id, pay_definition_id in sorted(created):
+                    if company_id != demo_company_id:
+                        continue
+                    try:
+                        async with engine.begin() as db:
+                            await retire_definition(
+                                company_id, int(admin["userid"]), pay_definition_id, db,
+                            )
+                    except BaseException as exc:
+                        exc.add_note(
+                            f"Retiring function-owned PayDefinition {pay_definition_id} failed"
+                        )
+                        cleanup_errors.append(exc)
+
+    errors = ([body_error] if body_error is not None else []) + cleanup_errors
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("test body and owned PayDefinition cleanup failed", errors)
+
+
 async def _audit_snapshot(db, entities: list[tuple[str, list[str]]]) -> list[dict]:
     """Capture exact append-only AuditLog rows for test-owned entity identities."""
     predicates = []

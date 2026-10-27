@@ -23,6 +23,7 @@ from tests.compensation_api_fixtures import (
     p3c_tenant,  # noqa: F401 - register shared fixtures
 )
 from tests.compensation_database_fixtures import p3b_database  # noqa: F401
+from tests.ownership import track_function_client_pay_definitions
 from tests.payroll_runtime_fixtures import (
     assign_weekly_setup,
     build_payroll_tenant,
@@ -32,6 +33,148 @@ from tests.payroll_runtime_fixtures import (
 from tests.test_p3c_compensation_concurrency import _blocked_with_pid
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_definition_tracking_does_not_suppress_body_failure(
+    test_app, test_engine,
+):
+    import httpx
+    from httpx import ASGITransport
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
+        with pytest.raises(RuntimeError, match="body failed"):
+            async with track_function_client_pay_definitions(client, test_engine):
+                raise RuntimeError("body failed")
+
+
+async def test_definition_tracking_reports_body_and_cleanup_errors_and_continues(
+    monkeypatch,
+):
+    import httpx
+
+    from app.compensation import definitions
+    from tests.ownership import track_function_client_pay_definitions
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def one_or_none(self):
+            return {"companyid": 1, "userid": 7}
+
+    class Connection:
+        async def execute(self, *_args, **_kwargs):
+            return Result()
+
+    class Transaction:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Transaction()
+
+    created_ids = iter((101, 102))
+    attempts = []
+
+    async def response(request):
+        return httpx.Response(
+            201, json={"company_id": 1, "pay_definition_id": next(created_ids)}, request=request,
+        )
+
+    async def retire(_company_id, _user_id, pay_definition_id, _db):
+        attempts.append(pay_definition_id)
+        if pay_definition_id == 101:
+            raise ValueError("first retirement failed")
+
+    monkeypatch.setattr(definitions, "retire_definition", retire)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(response), base_url="http://test") as client:
+        with pytest.raises(ExceptionGroup) as failure:
+            async with track_function_client_pay_definitions(client, Engine()):
+                await client.post("/compensation/pay-definitions")
+                await client.post("/compensation/pay-definitions")
+                raise RuntimeError("body failed")
+    assert attempts == [101, 102]
+    assert any(isinstance(error, RuntimeError) for error in failure.value.exceptions)
+    assert any(isinstance(error, ValueError) for error in failure.value.exceptions)
+
+
+async def test_function_client_retires_only_its_created_definitions(
+    session_client, auth_token, test_engine, test_app,
+):
+    import httpx
+    from httpx import ASGITransport
+    from sqlalchemy import text
+
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    session_created = await session_client.post(
+        "/compensation/pay-definitions", headers=headers, json=_definition_body(),
+    )
+    assert session_created.status_code == 201, session_created.text
+    session_id = session_created.json()["pay_definition_id"]
+    company_id = session_created.json()["company_id"]
+
+    async with httpx.AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
+        async with track_function_client_pay_definitions(client, test_engine):
+            function_created = await client.post(
+                "/compensation/pay-definitions", headers=headers, json=_definition_body(),
+            )
+            assert function_created.status_code == 201, function_created.text
+            function_id = function_created.json()["pay_definition_id"]
+            assert function_created.json()["company_id"] == company_id
+
+    async with test_engine.connect() as db:
+        rows = (await db.execute(text("""
+            SELECT paydefinitionid, status FROM payroll.paydefinitions
+            WHERE companyid=:company AND paydefinitionid = ANY(:ids)
+            ORDER BY paydefinitionid
+        """), {"company": company_id, "ids": [session_id, function_id]})).all()
+        history = await db.scalar(text("""
+            SELECT count(*) FROM payroll.ratedefinitions
+            WHERE companyid=:company AND paydefinitionid=:definition
+        """), {"company": company_id, "definition": function_id})
+    statuses = {int(row.paydefinitionid): row.status for row in rows}
+    assert statuses[session_id] == "Active"
+    assert statuses[function_id] == "Retired"
+    assert history == 1
+    retired = await session_client.post(
+        f"/compensation/pay-definitions/{session_id}/retire", headers=headers,
+    )
+    assert retired.status_code == 200, retired.text
+
+
+async def test_repeated_function_client_scopes_do_not_accumulate_active_definitions(
+    auth_token, test_engine, test_app,
+):
+    import httpx
+    from httpx import ASGITransport
+    from sqlalchemy import text
+
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    active_before = None
+    async with test_engine.connect() as db:
+        active_before = await db.scalar(text("""
+            SELECT count(*) FROM payroll.paydefinitions p
+            JOIN core.companies c ON c.companyid=p.companyid
+            WHERE c.companycode='DEMO' AND p.status='Active'
+        """))
+    async with httpx.AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as client:
+        for _ in range(51):
+            async with track_function_client_pay_definitions(client, test_engine):
+                response = await client.post(
+                    "/compensation/pay-definitions", headers=headers, json=_definition_body(),
+                )
+                assert response.status_code == 201, response.text
+    async with test_engine.connect() as db:
+        active_after = await db.scalar(text("""
+            SELECT count(*) FROM payroll.paydefinitions p
+            JOIN core.companies c ON c.companyid=p.companyid
+            WHERE c.companycode='DEMO' AND p.status='Active'
+        """))
+    assert active_after == active_before
 
 
 @pytest.fixture(name="tenant")

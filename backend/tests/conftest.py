@@ -414,13 +414,16 @@ async def session_db_conn(test_engine) -> AsyncGenerator[AsyncConnection, None]:
 @pytest_asyncio.fixture
 async def client(test_app) -> AsyncGenerator[httpx.AsyncClient, None]:
     """Async HTTP client for each test function."""
+    from tests.ownership import track_function_client_pay_definitions
+
     # httpx >= 0.20 removed the app= shorthand; use ASGITransport instead.
     transport = ASGITransport(app=test_app)
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://test",
     ) as c:
-        yield c
+        async with track_function_client_pay_definitions(c, test_app.state.engine):
+            yield c
 
 
 # ---------------------------------------------------------------------------

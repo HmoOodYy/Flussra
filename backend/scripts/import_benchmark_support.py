@@ -12,6 +12,38 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _clear_settings_cache() -> None:
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+
+@contextmanager
+def _workload_environment(values: dict[str, str]):
+    """Temporarily configure this disposable workload process and restore it exactly."""
+    keys = tuple(values)
+    before = {key: os.environ.get(key) for key in keys}
+    _clear_settings_cache()
+    try:
+        os.environ.update(values)
+        yield
+    finally:
+        for key, value in before.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        _clear_settings_cache()
+
+
+def _raise_collected_errors(errors: list[BaseException], message: str) -> None:
+    if not errors:
+        return
+    if len(errors) == 1:
+        raise errors[0]
+    raise BaseExceptionGroup(message, errors)
+
+
 def memory_snapshot():
     """Process working-set evidence; includes fixture and interpreter overhead."""
     if os.name != "nt":
@@ -39,25 +71,47 @@ def memory_snapshot():
 
 @contextmanager
 def private_database():
-    os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@127.0.0.1:1/configuration_only")
-    os.environ.setdefault("SECRET_KEY", "disposable-import-workload-secret-never-use-outside-local-benchmarks")
-    os.environ["ENVIRONMENT"] = "test"
-    from tests.conftest import _stop_test_postgresql_safely
-    from tests.database_templates import SchemaDatabases
-    from tests.postgresql_compat import create_test_postgresql
+    pg_bin = next((path for path in sorted(
+        glob.glob(r"C:\Program Files\PostgreSQL\*\bin"), reverse=True
+    ) if os.path.exists(os.path.join(path, "initdb.exe"))), None)
+    environment = {
+        "DATABASE_URL": "postgresql+asyncpg://test:test@127.0.0.1:1/configuration_only",
+        "SECRET_KEY": "disposable-import-workload-secret-never-use-outside-local-benchmarks",
+        "ENVIRONMENT": "test",
+    }
+    if pg_bin:
+        environment["PATH"] = pg_bin + os.pathsep + os.environ.get("PATH", "")
+    with _workload_environment(environment):
+        from tests.conftest import _stop_test_postgresql_safely
+        from tests.database_templates import SchemaDatabases
+        from tests.postgresql_compat import create_test_postgresql
 
-    paths = sorted(glob.glob(r"C:\Program Files\PostgreSQL\*\bin"), reverse=True)
-    if paths:
-        os.environ["PATH"] = paths[0] + os.pathsep + os.environ.get("PATH", "")
-    cluster = create_test_postgresql()
-    cluster.start()
-    databases = SchemaDatabases(cluster.dsn(), ROOT)
-    try:
-        with databases.database("quantity_workload") as dsn:
-            yield dsn
-    finally:
-        databases.close()
-        _stop_test_postgresql_safely(cluster)
+        cluster = None
+        databases = None
+        errors: list[BaseException] = []
+        body_error: BaseException | None = None
+        try:
+            cluster = create_test_postgresql()
+            cluster.start()
+            databases = SchemaDatabases(cluster.dsn(), ROOT)
+            with databases.database("quantity_workload") as dsn:
+                yield dsn
+        except BaseException as exc:
+            body_error = exc
+        finally:
+            if databases is not None:
+                try:
+                    databases.close()
+                except BaseException as exc:
+                    errors.append(exc)
+            if cluster is not None:
+                try:
+                    _stop_test_postgresql_safely(cluster)
+                except BaseException as exc:
+                    errors.append(exc)
+        if body_error is not None:
+            errors.insert(0, body_error)
+        _raise_collected_errors(errors, "workload database and cleanup failed")
 
 
 @asynccontextmanager
@@ -70,23 +124,45 @@ async def application(dsn):
     from app.main import create_app
 
     url = f"postgresql+asyncpg://{dsn['user']}@{dsn['host']}:{dsn['port']}/{dsn['database']}"
-    os.environ["DATABASE_URL"] = url
-    os.environ["ENVIRONMENT"] = "test"
+    before = {key: os.environ.get(key) for key in ("DATABASE_URL", "ENVIRONMENT")}
+    engine = None
+    app = None
+    errors: list[BaseException] = []
+    body_error: BaseException | None = None
     get_settings.cache_clear()
-    engine = create_async_engine(url)
-    app = create_app()
-    app.state.engine = engine
-
-    async def connection():
-        async with engine.begin() as db:
-            yield db
-
-    app.dependency_overrides[get_db] = connection
     try:
+        os.environ["DATABASE_URL"] = url
+        os.environ["ENVIRONMENT"] = "test"
+        engine = create_async_engine(url)
+        app = create_app()
+        app.state.engine = engine
+
+        async def connection():
+            async with engine.begin() as db:
+                yield db
+
+        app.dependency_overrides[get_db] = connection
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://workload.test") as client:
             yield client, engine, app
+    except BaseException as exc:
+        body_error = exc
     finally:
-        await engine.dispose()
+        if app is not None:
+            app.dependency_overrides.clear()
+        if engine is not None:
+            try:
+                await engine.dispose()
+            except BaseException as exc:
+                errors.append(exc)
+        for key, value in before.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        get_settings.cache_clear()
+    if body_error is not None:
+        errors.insert(0, body_error)
+    _raise_collected_errors(errors, "workload application and cleanup failed")
 
 
 async def seed_period(client, engine, dsn, *, drivers: int, definitions: int, days: int = 31):

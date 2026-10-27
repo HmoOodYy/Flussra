@@ -30,6 +30,7 @@ from scripts.import_benchmark_support import (
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIOS = ("representative_csv", "monthly_daily_csv", "monthly_daily_xlsx", "rare_csv", "issue_heavy_csv")
+CURRENT_SCENARIOS = ("current_daily_csv", "current_daily_xlsx", "current_daily_issue_csv")
 
 
 def source_files(scene, fixture):
@@ -42,7 +43,8 @@ def source_files(scene, fixture):
         for day in selected_days:
             for driver in drivers:
                 writer.writerow([driver["drivernumber"], *([day.isoformat()] if date_column else []),
-                    *[("invalid" if scene == "issue_heavy_csv" else "1") for _ in selected_definitions]])
+                    *[("invalid" if scene in ("issue_heavy_csv", "current_daily_issue_csv") else "1")
+                      for _ in selected_definitions]])
         return buffer.getvalue().encode("utf-8")
     if scene == "monthly_daily_csv":
         # Two different layouts share a Driver/day grid; each supplies half the dynamic definitions.
@@ -63,6 +65,25 @@ def source_files(scene, fixture):
             return [("monthly.xlsx", buffer.getvalue())]
         finally:
             book.close()
+    if scene in CURRENT_SCENARIOS:
+        if scene == "current_daily_xlsx":
+            from openpyxl import Workbook
+            files = []
+            for day in days:
+                book = Workbook(write_only=True)
+                try:
+                    sheet = book.create_sheet(day.isoformat())
+                    sheet.append(["DriverNumber", *[definition.code for definition in definitions]])
+                    for driver in drivers:
+                        sheet.append([driver["drivernumber"], *[1 for _ in definitions]])
+                    buffer = io.BytesIO()
+                    book.save(buffer)
+                    files.append((f"{day.isoformat()}.xlsx", buffer.getvalue()))
+                finally:
+                    book.close()
+            return files
+        return [(f"{day.isoformat()}.csv", csv_bytes(definitions, [day], date_column=False))
+                for day in days]
     return [("supplied.csv", csv_bytes(definitions, days, date_column=True))]
 
 
@@ -152,18 +173,57 @@ async def timed_request(client, path, headers, send, phases):
         "ordinary_get_max_seconds": max(probes) if probes else None, "memory": memory_snapshot()}
 
 
+def _file_shapes(files):
+    """Describe generated upload tables; this is not canonical extraction evidence."""
+    shapes = []
+    for name, payload in files:
+        if name.endswith(".csv"):
+            rows = list(csv.reader(io.StringIO(payload.decode("utf-8"))))
+            header_columns = len(rows[0]) if rows else 0
+            data_rows = max(0, len(rows) - 1)
+            worksheet_count = 0
+        else:
+            from openpyxl import load_workbook
+
+            workbook = load_workbook(io.BytesIO(payload), read_only=True, data_only=True)
+            try:
+                worksheet_count = len(workbook.sheetnames)
+                rows = list(workbook.active.iter_rows(values_only=True))
+                header_columns = len(rows[0]) if rows else 0
+                data_rows = max(0, len(rows) - 1)
+            finally:
+                workbook.close()
+        shapes.append({"name": name, "upload_bytes": len(payload), "header_columns": header_columns,
+                       "data_rows": data_rows, "table_cells": (data_rows + bool(header_columns)) * header_columns,
+                       "worksheets": worksheet_count})
+    return shapes
+
+
 async def measure(scene, dsn, *, profile_cleanup=False):
     from sqlalchemy import event, text
 
     from app.imports.retention import purge_payroll_work_import_details
     from tests.payroll_runtime_fixtures import force_status
 
-    dimensions = ((20, 4, 7) if scene == "representative_csv" else
+    dimensions = ((150, 14, 31) if scene in CURRENT_SCENARIOS else
+                  (20, 4, 7) if scene == "representative_csv" else
                   (1000, 20, 10) if scene in ("rare_csv", "issue_heavy_csv") else (150, 20, 31))
     async with application(dsn) as (client, engine, _app):
         fixture = await seed_period(client, engine, dsn, drivers=dimensions[0], definitions=dimensions[1], days=dimensions[2])
         tenant, period = fixture["tenant"], fixture["period"]
         files = source_files(scene, fixture)
+        policy_metadata = None
+        if scene in CURRENT_SCENARIOS:
+            response = await client.get(
+                f"/payroll/periods/{period['payroll_period_id']}/imports/policy", headers=tenant.admin,
+            )
+            assert response.status_code == 200, response.text
+            policy_metadata = response.json()
+            assert policy_metadata["product_policy"]["max_company_pay_items"] == 50
+            assert policy_metadata["product_policy"]["max_branch_input_concepts"] == 15
+            assert policy_metadata["product_policy"]["max_import_combined_columns"] == 40
+            assert policy_metadata["product_policy"]["max_import_canonical_file_bytes"] == 1_000_000
+            assert policy_metadata["import_resource_policy"]["max_file_bytes"] == 10_000_000
         async with engine.connect() as db:
             database_temp_before = dict((await db.execute(text("""SELECT temp_files,temp_bytes
                 FROM pg_stat_database WHERE datname=current_database()"""))).mappings().one())
@@ -225,7 +285,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                     files=[("file", (name, data, "application/octet-stream")) for name, data in files],
                     headers={**tenant.admin, "Idempotency-Key": str(uuid4())}), phases)
             iid = upload["import_id"]
-            if scene.startswith("monthly_daily"):
+            if scene.startswith("monthly_daily") or scene in CURRENT_SCENARIOS:
                 units = []
                 for file in upload["files"]:
                     for unit in file["units"]:
@@ -257,6 +317,54 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                     json={"expected_revision": upload["revision"], "column_mapping": mapping}, headers=tenant.admin)
                 assert response.status_code == 200, response.text
                 upload = response.json()
+            if scene in CURRENT_SCENARIOS:
+                import json
+
+                from app.imports.contracts import (
+                    CANONICALIZATION_VERSION,
+                    FILE_SOURCE_CONTRACT_VERSION,
+                    RULE_CONTRACT_VERSION,
+                    SOURCE_CONTRACT_VERSION,
+                    TARGET_CONTRACT_VERSION,
+                )
+                from app.imports.mapping import definition_meaning, fingerprint
+                from app.imports.rules import bind_pending_rule
+
+                definition = fixture["definitions"][0]
+                target = next(item for item in fixture["definitions"]
+                              if item.pay_definition_id == definition.pay_definition_id)
+                payload = {"kind": "Direct", "source_field": target.code}
+                async with engine.begin() as db:
+                    rule_id = await db.scalar(text("""
+                        INSERT INTO import.PayrollWorkRuleVersions
+                            (CompanyID, BranchID, PayDefinitionID, OriginImportID,
+                             OriginPayrollPeriodID, RuleContractVersion, SourceContractVersion,
+                             TargetContractVersion, CanonicalizationVersion, RuleFingerprint,
+                             SourceSignature, TargetMeaning, RulePayload, CreatedByUserID)
+                        VALUES (:cid,:bid,:definition,:iid,:pid,:rule_version,:source_version,
+                                :target_version,:canonical_version,:fingerprint,
+                                CAST(:source AS jsonb),CAST(:meaning AS jsonb),CAST(:payload AS jsonb),:uid)
+                        RETURNING RuleVersionID
+                    """), {"cid": tenant.company_id, "bid": period["branch_id"],
+                           "definition": definition.pay_definition_id, "iid": iid,
+                           "pid": period["payroll_period_id"], "fingerprint": fingerprint("rule", payload),
+                           "rule_version": RULE_CONTRACT_VERSION,
+                           "source_version": SOURCE_CONTRACT_VERSION,
+                           "target_version": TARGET_CONTRACT_VERSION,
+                           "canonical_version": CANONICALIZATION_VERSION,
+                           "source": json.dumps({"kind": "Direct", "header": target.code,
+                                                 "file_contract_version": FILE_SOURCE_CONTRACT_VERSION}),
+                           "meaning": json.dumps(definition_meaning(definition)),
+                           "payload": json.dumps(payload), "uid": tenant.owner})
+                    await bind_pending_rule(db, company_id=tenant.company_id, user_id=tenant.owner,
+                        import_id=iid, expected_import_revision=upload["revision"],
+                        pay_definition_id=definition.pay_definition_id,
+                        period_definition_id=definition.payroll_period_definition_id,
+                        rate_definition_id=definition.rate_definition_id, rule_version_id=rule_id,
+                        expected_head_revision=0)
+                latest = await client.get(f"/payroll/imports/{iid}", headers=tenant.admin)
+                assert latest.status_code == 200, latest.text
+                upload = latest.json()
             sql_count = 0
             sql_seconds = 0
             sql_writes.clear()
@@ -286,6 +394,9 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                     (SELECT count(*) FROM import.filesources WHERE importid=:iid) AS files,
                     (SELECT count(*) FROM import.filesourceunits WHERE importid=:iid) AS units,
                     (SELECT count(*) FROM import.sourcelayouts WHERE importid=:iid) AS layouts"""), params)).mappings().one())
+                if scene in CURRENT_SCENARIOS:
+                    counts["pending_rules"] = await db.scalar(text(
+                        "SELECT count(*) FROM import.PayrollWorkPendingRules WHERE ImportID=:iid"), params)
             assert counts["canonical_lines"] == counts["source_events"] == 0
             query = {"expected_revision": refreshed["revision"], "plan_fingerprint": refreshed["preview"]["plan_fingerprint"]}
             response_sizes = {}
@@ -309,15 +420,25 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                     FROM pg_stat_database WHERE datname=current_database()"""))).mappings().one())
             return {"scenario": scene, "python": platform.python_version(), "platform": platform.platform(),
                 "transport": "HTTPX ASGITransport, real disposable PostgreSQL, production guards enabled",
-                "dimensions": {"drivers": dimensions[0], "definitions": dimensions[1], "days": dimensions[2]},
+                "dimensions": {"drivers": dimensions[0], "definitions": dimensions[1],
+                               "ordinary_definitions": dimensions[1],
+                               "days": dimensions[2], "files": len(files),
+                               "worksheets_per_file": (1 if scene == "current_daily_xlsx" else
+                                                        0 if scene in CURRENT_SCENARIOS else None)},
                 "file_bytes": sum(len(data) for _, data in files), "initial_memory": initial_memory,
+                "file_shapes": _file_shapes(files) if scene in CURRENT_SCENARIOS else None,
                 "ingress": ingress, "preview": initial, "refresh": refresh, "counts": counts,
                 "preview_counts": preview["preview"]["counts"], "purge_seconds": purge,
                 "purge_sql_write_seconds": purge_statements,
                 "page_response_bytes": response_sizes, "final_memory": memory_snapshot(),
                 "database_temp_before": database_temp_before, "database_temp_after": database_temp_after,
                 "cleanup_plans": cleanup_plans,
-                "temporary_files_left": sorted(str(path) for path in set(Path(tempfile.gettempdir()).iterdir()) - temporary_before)}
+                "temporary_files_left": sorted(str(path) for path in set(Path(tempfile.gettempdir()).iterdir()) - temporary_before),
+                "effective_policy": policy_metadata,
+                "coverage": ({"legal_policy_shape": True, "canonical_extraction_and_admission": False,
+                    "canonical_byte_measurement": False,
+                    "combined_column_enforcement": False, "full_mapping_identity_date_aggregation_and_repeat_semantics": False,
+                    "final_revised_contract_acceptance": False} if scene in CURRENT_SCENARIOS else None)}
         finally:
             phases.restore()
             event.remove(engine.sync_engine, "before_cursor_execute", before)
@@ -328,17 +449,25 @@ async def measure(scene, dsn, *, profile_cleanup=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")
+    parser.add_argument("--scenario", choices=(*SCENARIOS, *CURRENT_SCENARIOS, "current", "all"), default="all")
     parser.add_argument("--profile-cleanup", action="store_true",
                         help="Instrument real group deletion/FK lookup with EXPLAIN ANALYZE (extra overhead).")
     parser.add_argument("--output", type=Path, default=ROOT / ".artifacts/import-batch-benchmark.json")
     args = parser.parse_args()
-    if args.profile_cleanup and args.scenario == "all":
+    if args.profile_cleanup and args.scenario in ("all", "current"):
         parser.error("Use --profile-cleanup with one explicit scenario.")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.scenario == "all":
         results = []
         for scene in SCENARIOS:
+            path = args.output.with_name(args.output.stem + "-" + scene + ".json")
+            subprocess.run([sys.executable, "-m", "scripts.benchmark_import_files", "--scenario", scene,
+                            "--output", str(path)], check=True, env=os.environ.copy())
+            results.append(json.loads(path.read_text(encoding="utf-8")))
+        args.output.write_text(json.dumps(results, indent=2), encoding="utf-8")
+    elif args.scenario == "current":
+        results = []
+        for scene in CURRENT_SCENARIOS:
             path = args.output.with_name(args.output.stem + "-" + scene + ".json")
             subprocess.run([sys.executable, "-m", "scripts.benchmark_import_files", "--scenario", scene,
                             "--output", str(path)], check=True, env=os.environ.copy())

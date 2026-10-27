@@ -19,11 +19,11 @@ from tests.compensation_api_fixtures import (  # noqa: F401 - register isolated 
     p3c_http_client,
 )
 from tests.compensation_database_fixtures import p3b_database  # noqa: F401
+from tests.db_state import TriggerIdentity, suspended_test_triggers
 from tests.payroll_runtime_fixtures import build_payroll_tenant, open_period_with_grid
 from tests.schema_helpers import _alembic, _disposable_database
 
 pytestmark = pytest.mark.asyncio
-
 
 @pytest.fixture(name="tenant")
 def payroll_tenant(p3b_dsn):
@@ -259,6 +259,13 @@ async def test_preview_publishes_rule_context_and_attached_unsupported_version_f
             json={"expected_revision": preview["revision"]}, headers=tenant.admin)
         assert cancelled.status_code == 409 and cancelled.json()["detail"]["code"] == "IMPORT_CONTRACT_UNSUPPORTED"
 
+    trigger_for = {
+        ("import.Imports", "trg_imports_envelope"): TriggerIdentity("import", "imports", "trg_imports_envelope"),
+        ("import.Imports", "trg_imports_payrollwork"): TriggerIdentity("import", "imports", "trg_imports_payrollwork"),
+        ("import.FileSourceBatches", "trg_importdetail_writable"): TriggerIdentity("import", "filesourcebatches", "trg_importdetail_writable"),
+        ("import.PayrollWorkImports", "trg_importdetail_writable"): TriggerIdentity("import", "payrollworkimports", "trg_importdetail_writable"),
+        ("import.PayrollWorkImports", "trg_imports_payrollwork"): TriggerIdentity("import", "payrollworkimports", "trg_imports_payrollwork"),
+    }
     base_version_cases = (
         ("import.Imports", "trg_imports_envelope", "ContractVersion", "ImportID", import_id, 1,
          "trg_imports_payrollwork"),
@@ -267,63 +274,52 @@ async def test_preview_publishes_rule_context_and_attached_unsupported_version_f
         ("import.PayrollWorkImports", "trg_importdetail_writable", "CanonicalizationVersion", "ImportID", import_id, 3, None),
     )
     for table, first_trigger, column, owner_column, owner_id, baseline, second_trigger in base_version_cases:
+        trigger_ids = (trigger_for[(table, first_trigger)],) + (
+            (trigger_for[(table, second_trigger)],) if second_trigger else ()
+        )
         async with p3c_engine.begin() as db:
-            await db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {first_trigger}"))
-            if second_trigger:
-                await db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {second_trigger}"))
-            await db.execute(text(f"UPDATE {table} SET {column}=99 WHERE {owner_column}=:iid"), {"iid": owner_id})
-            await db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {first_trigger}"))
-            if second_trigger:
-                await db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {second_trigger}"))
+            async with suspended_test_triggers(db, trigger_ids):
+                await db.execute(text(f"UPDATE {table} SET {column}=99 WHERE {owner_column}=:iid"), {"iid": owner_id})
         await assert_all_reads_reject()
         async with p3c_engine.begin() as db:
-            await db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {first_trigger}"))
-            if second_trigger:
-                await db.execute(text(f"ALTER TABLE {table} DISABLE TRIGGER {second_trigger}"))
-            await db.execute(text(f"UPDATE {table} SET {column}=:version WHERE {owner_column}=:iid"),
-                             {"version": baseline, "iid": owner_id})
-            await db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {first_trigger}"))
-            if second_trigger:
-                await db.execute(text(f"ALTER TABLE {table} ENABLE TRIGGER {second_trigger}"))
+            async with suspended_test_triggers(db, trigger_ids):
+                await db.execute(text(f"UPDATE {table} SET {column}=:version WHERE {owner_column}=:iid"),
+                                 {"version": baseline, "iid": owner_id})
 
     async with p3c_engine.connect() as db:
         file_id = (await db.execute(text("""
             SELECT FileSourceID FROM import.FileSources WHERE ImportID=:iid AND CompanyID=:cid
         """), {"iid": import_id, "cid": tenant.company_id})).scalar_one()
     async with p3c_engine.begin() as db:
-        await db.execute(text("ALTER TABLE import.FileSources DISABLE TRIGGER trg_importdetail_writable"))
-        await db.execute(text("UPDATE import.FileSources SET ContractVersion=99 WHERE FileSourceID=:fid"), {"fid": file_id})
-        await db.execute(text("ALTER TABLE import.FileSources ENABLE TRIGGER trg_importdetail_writable"))
+        async with suspended_test_triggers(db, (TriggerIdentity("import", "filesources", "trg_importdetail_writable"),)):
+            await db.execute(text("UPDATE import.FileSources SET ContractVersion=99 WHERE FileSourceID=:fid"), {"fid": file_id})
     await assert_all_reads_reject()
     async with p3c_engine.begin() as db:
-        await db.execute(text("ALTER TABLE import.FileSources DISABLE TRIGGER trg_importdetail_writable"))
-        await db.execute(text("UPDATE import.FileSources SET ContractVersion=2 WHERE FileSourceID=:fid"), {"fid": file_id})
-        await db.execute(text("ALTER TABLE import.FileSources ENABLE TRIGGER trg_importdetail_writable"))
+        async with suspended_test_triggers(db, (TriggerIdentity("import", "filesources", "trg_importdetail_writable"),)):
+            await db.execute(text("UPDATE import.FileSources SET ContractVersion=2 WHERE FileSourceID=:fid"), {"fid": file_id})
 
     # Simulate an older stored canonical payload version; ordinary inserts reject it.
     _stable_id, period_definition_id, rate_definition_id = await _target(
         p3c_engine, tenant, period, period_definition_id)
     async with p3c_engine.begin() as db:
         canonical_payload = b'{"canonical_file_version":9}'
-        await db.execute(text("ALTER TABLE import.FileCanonicalData DISABLE TRIGGER trg_filecanonicaldata_writable"))
-        await db.execute(text("""
-            INSERT INTO import.FileCanonicalData
-                (FileSourceID, ImportID, CompanyID, FormatVersion, Payload, ByteCount, HashSha256)
-            VALUES (:file_id, :iid, :cid, 9, :payload, :byte_count, :hash)
-        """), {"file_id": file_id, "iid": import_id, "cid": tenant.company_id,
-               "payload": canonical_payload, "byte_count": len(canonical_payload),
-               "hash": hashlib.sha256(canonical_payload).hexdigest()})
-        await db.execute(text("ALTER TABLE import.FileCanonicalData ENABLE TRIGGER trg_filecanonicaldata_writable"))
+        async with suspended_test_triggers(db, (TriggerIdentity("import", "filecanonicaldata", "trg_filecanonicaldata_writable"),)):
+            await db.execute(text("""
+                INSERT INTO import.FileCanonicalData
+                    (FileSourceID, ImportID, CompanyID, FormatVersion, Payload, ByteCount, HashSha256)
+                VALUES (:file_id, :iid, :cid, 9, :payload, :byte_count, :hash)
+            """), {"file_id": file_id, "iid": import_id, "cid": tenant.company_id,
+                   "payload": canonical_payload, "byte_count": len(canonical_payload),
+                   "hash": hashlib.sha256(canonical_payload).hexdigest()})
     await assert_all_reads_reject()
     async with p3c_engine.begin() as db:
-        await db.execute(text("ALTER TABLE import.FileCanonicalData DISABLE TRIGGER trg_filecanonicaldata_writable"))
-        await db.execute(text("DELETE FROM import.FileCanonicalData WHERE FileSourceID=:fid"), {"fid": file_id})
-        await db.execute(text("ALTER TABLE import.FileCanonicalData ENABLE TRIGGER trg_filecanonicaldata_writable"))
+        async with suspended_test_triggers(db, (TriggerIdentity("import", "filecanonicaldata", "trg_filecanonicaldata_writable"),)):
+            await db.execute(text("DELETE FROM import.FileCanonicalData WHERE FileSourceID=:fid"), {"fid": file_id})
 
     # Simulate an old attached rule version with an unsupported source contract.
     async with p3c_engine.begin() as db:
-        await db.execute(text("ALTER TABLE import.PayrollWorkRuleVersions DISABLE TRIGGER trg_payrollworkruleversions_writable"))
-        rule_id = (await db.execute(text("""
+        async with suspended_test_triggers(db, (TriggerIdentity("import", "payrollworkruleversions", "trg_payrollworkruleversions_writable"),)):
+            rule_id = (await db.execute(text("""
             INSERT INTO import.PayrollWorkRuleVersions
                 (CompanyID, BranchID, PayDefinitionID, OriginImportID, OriginPayrollPeriodID,
                  RuleContractVersion, SourceContractVersion, TargetContractVersion,
@@ -332,22 +328,20 @@ async def test_preview_publishes_rule_context_and_attached_unsupported_version_f
             VALUES (:cid, :bid, :definition, :iid, :pid, 1, 9, 2, 3,
                     :fingerprint, '{}'::jsonb, '{}'::jsonb, '{"kind":"mapping"}'::jsonb, :uid)
             RETURNING RuleVersionID
-        """), {"cid": tenant.company_id, "bid": period["branch_id"],
-               "definition": definition_id, "iid": import_id, "pid": period["payroll_period_id"],
-               "fingerprint": "b" * 64, "uid": tenant.owner})).scalar_one()
-        await db.execute(text("ALTER TABLE import.PayrollWorkRuleVersions ENABLE TRIGGER trg_payrollworkruleversions_writable"))
-        await db.execute(text("ALTER TABLE import.PayrollWorkPendingRules DISABLE TRIGGER trg_payrollworkpendingrules_writable"))
-        await db.execute(text("""
+            """), {"cid": tenant.company_id, "bid": period["branch_id"],
+                   "definition": definition_id, "iid": import_id, "pid": period["payroll_period_id"],
+                   "fingerprint": "b" * 64, "uid": tenant.owner})).scalar_one()
+        async with suspended_test_triggers(db, (TriggerIdentity("import", "payrollworkpendingrules", "trg_payrollworkpendingrules_writable"),)):
+            await db.execute(text("""
             INSERT INTO import.PayrollWorkPendingRules
                 (ImportID, CompanyID, BranchID, PayrollPeriodID, PayDefinitionID,
                  PayrollPeriodDefinitionID, RateDefinitionID, RuleVersionID, Revision,
                  ExpectedHeadRevision, UpdatedByUserID)
             VALUES (:iid, :cid, :bid, :pid, :definition, :ppd, :rate, :rule, 1, 0, :uid)
-        """), {"iid": import_id, "cid": tenant.company_id, "bid": period["branch_id"],
-               "pid": period["payroll_period_id"], "definition": definition_id,
-               "ppd": period_definition_id, "rate": rate_definition_id,
-               "rule": rule_id, "uid": tenant.owner})
-        await db.execute(text("ALTER TABLE import.PayrollWorkPendingRules ENABLE TRIGGER trg_payrollworkpendingrules_writable"))
+            """), {"iid": import_id, "cid": tenant.company_id, "bid": period["branch_id"],
+                   "pid": period["payroll_period_id"], "definition": definition_id,
+                   "ppd": period_definition_id, "rate": rate_definition_id,
+                   "rule": rule_id, "uid": tenant.owner})
     await assert_all_reads_reject()
     assert period_definition_id > 0 and rate_definition_id > 0
 
@@ -785,14 +779,16 @@ async def test_applied_change_rejects_nullable_or_incomplete_source_evidence(
                       ("AfterStateJson", None))
     for column, original_value in invalid_events:
         async with p3c_engine.begin() as db:
-            await db.execute(text("ALTER TABLE payroll.PayrollPeriodAuditEvidenceEvents DISABLE TRIGGER trg_PayrollPeriodAuditEvidenceEvents_Immutable"))
-            if column == "AfterStateJson":
-                await db.execute(text("UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET AfterStateJson=AfterStateJson - 'pay_definition_id' WHERE PayrollPeriodAuditEvidenceEventID=:eid"),
-                                 {"eid": evidence_id})
-            else:
-                await db.execute(text(f"UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET {column}=NULL WHERE PayrollPeriodAuditEvidenceEventID=:eid"),
-                                 {"eid": evidence_id})
-            await db.execute(text("ALTER TABLE payroll.PayrollPeriodAuditEvidenceEvents ENABLE TRIGGER trg_PayrollPeriodAuditEvidenceEvents_Immutable"))
+            async with suspended_test_triggers(db, (TriggerIdentity(
+                "payroll", "payrollperiodauditevidenceevents",
+                "trg_payrollperiodauditevidenceevents_immutable",
+            ),)):
+                if column == "AfterStateJson":
+                    await db.execute(text("UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET AfterStateJson=AfterStateJson - 'pay_definition_id' WHERE PayrollPeriodAuditEvidenceEventID=:eid"),
+                                     {"eid": evidence_id})
+                else:
+                    await db.execute(text(f"UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET {column}=NULL WHERE PayrollPeriodAuditEvidenceEventID=:eid"),
+                                     {"eid": evidence_id})
         with pytest.raises(DBAPIError, match="IMPORT_APPLIED_CHANGE_EVIDENCE"):
             async with p3c_engine.begin() as db:
                 await db.execute(text("""
@@ -811,20 +807,22 @@ async def test_applied_change_rejects_nullable_or_incomplete_source_evidence(
                        "evidence": evidence_id, "revision": preview["revision"],
                        "fingerprint": preview["preview"]["plan_fingerprint"]})
         async with p3c_engine.begin() as db:
-            await db.execute(text("ALTER TABLE payroll.PayrollPeriodAuditEvidenceEvents DISABLE TRIGGER trg_PayrollPeriodAuditEvidenceEvents_Immutable"))
-            if column == "AfterStateJson":
-                await db.execute(text("""
-                    UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET AfterStateJson=AfterStateJson ||
-                    jsonb_build_object('pay_definition_id', CAST(:definition AS INTEGER),
-                                       'payroll_period_definition_id', CAST(:ppd AS BIGINT),
-                                       'rate_definition_id', CAST(:rate AS INTEGER))
-                    WHERE PayrollPeriodAuditEvidenceEventID=:eid
-                """), {"eid": evidence_id, "definition": definition_id, "ppd": ppd_id, "rate": rate_id})
-            else:
-                await db.execute(text(f"UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET {column}=:value WHERE PayrollPeriodAuditEvidenceEventID=:eid"),
-                                 {"eid": evidence_id,
-                                  "value": original_value})
-            await db.execute(text("ALTER TABLE payroll.PayrollPeriodAuditEvidenceEvents ENABLE TRIGGER trg_PayrollPeriodAuditEvidenceEvents_Immutable"))
+            async with suspended_test_triggers(db, (TriggerIdentity(
+                "payroll", "payrollperiodauditevidenceevents",
+                "trg_payrollperiodauditevidenceevents_immutable",
+            ),)):
+                if column == "AfterStateJson":
+                    await db.execute(text("""
+                        UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET AfterStateJson=AfterStateJson ||
+                        jsonb_build_object('pay_definition_id', CAST(:definition AS INTEGER),
+                                           'payroll_period_definition_id', CAST(:ppd AS BIGINT),
+                                           'rate_definition_id', CAST(:rate AS INTEGER))
+                        WHERE PayrollPeriodAuditEvidenceEventID=:eid
+                    """), {"eid": evidence_id, "definition": definition_id, "ppd": ppd_id, "rate": rate_id})
+                else:
+                    await db.execute(text(f"UPDATE payroll.PayrollPeriodAuditEvidenceEvents SET {column}=:value WHERE PayrollPeriodAuditEvidenceEventID=:eid"),
+                                     {"eid": evidence_id,
+                                      "value": original_value})
     assert assignment_id > 0
 
 
