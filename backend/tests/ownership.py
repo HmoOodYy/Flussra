@@ -1,6 +1,7 @@
 """Exact-ID teardown primitives shared by backend integration tests."""
 
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 from sqlalchemy import text as _text
 
@@ -11,6 +12,106 @@ from tests.db_state import (
 )
 
 
+class PayDefinitionOwnership:
+    """Exact PayDefinition IDs created within one test and one engine."""
+
+    def __init__(self, engine):
+        self.engine = engine
+        self.created: set[tuple[int, int]] = set()
+
+
+_active_pay_definition_ownership: ContextVar[PayDefinitionOwnership | None] = ContextVar(
+    "active_test_pay_definition_ownership", default=None,
+)
+
+
+def record_owned_pay_definition(db, company_id: int, definition_id: int) -> None:
+    """Register an exact raw-seeded row only in its matching engine scope."""
+    ownership = _active_pay_definition_ownership.get()
+    if ownership is None or db.engine is not ownership.engine:
+        return
+    ownership.created.add((int(company_id), int(definition_id)))
+
+
+async def _retire_owned_pay_definitions(ownership: PayDefinitionOwnership) -> None:
+    if not ownership.created:
+        return
+
+    from app.compensation.definitions import retire_definition
+
+    cleanup_errors: list[BaseException] = []
+    try:
+        async with ownership.engine.begin() as db:
+            admin = (await db.execute(_text("""
+                SELECT c.companyid, u.userid
+                FROM core.companies c
+                JOIN sec.users u ON u.companyid=c.companyid
+                WHERE c.companycode='DEMO' AND lower(u.username)='admin'
+            """))).mappings().one_or_none()
+        if admin is None:
+            raise AssertionError("Cannot resolve the seeded DEMO company admin for owned definitions")
+    except BaseException as exc:
+        cleanup_errors.append(exc)
+        admin = None
+
+    if admin is not None:
+        demo_company_id = int(admin["companyid"])
+        for company_id, definition_id in sorted(ownership.created):
+            if company_id != demo_company_id:
+                continue
+            try:
+                async with ownership.engine.begin() as db:
+                    status = await db.scalar(_text("""
+                        SELECT status FROM payroll.paydefinitions
+                        WHERE companyid=:company AND paydefinitionid=:definition
+                    """), {"company": company_id, "definition": definition_id})
+                    if status == "Active":
+                        await retire_definition(
+                            company_id, int(admin["userid"]), definition_id, db,
+                        )
+            except BaseException as exc:
+                exc.add_note(f"Retiring function-owned PayDefinition {definition_id} failed")
+                cleanup_errors.append(exc)
+
+    if len(cleanup_errors) == 1:
+        raise cleanup_errors[0]
+    if cleanup_errors:
+        raise BaseExceptionGroup("owned PayDefinition cleanup failed", cleanup_errors)
+
+
+@asynccontextmanager
+async def pay_definition_ownership_scope(engine):
+    """Own exact IDs for one explicit function-scoped test lifetime."""
+    current = _active_pay_definition_ownership.get()
+    if current is not None and current.engine is engine:
+        yield current
+        return
+
+    ownership = PayDefinitionOwnership(engine)
+    token = _active_pay_definition_ownership.set(ownership)
+    body_error: BaseException | None = None
+    cleanup_errors: list[BaseException] = []
+    try:
+        yield ownership
+    except BaseException as exc:
+        body_error = exc
+    finally:
+        try:
+            await _retire_owned_pay_definitions(ownership)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+        try:
+            _active_pay_definition_ownership.reset(token)
+        except BaseException as exc:
+            cleanup_errors.append(exc)
+
+    errors = ([body_error] if body_error is not None else []) + cleanup_errors
+    if len(errors) == 1:
+        raise errors[0]
+    if errors:
+        raise BaseExceptionGroup("test body and owned PayDefinition cleanup failed", errors)
+
+
 @asynccontextmanager
 async def track_function_client_pay_definitions(client, engine):
     """Retire only PayDefinitions successfully created through this function client.
@@ -19,7 +120,23 @@ async def track_function_client_pay_definitions(client, engine):
     authority and never deletes rows or guesses ownership from names/global diffs.
     Session-scoped clients are deliberately not wrapped by this helper.
     """
-    created: set[tuple[int, int]] = set()
+    ownership = _active_pay_definition_ownership.get()
+    if ownership is None or ownership.engine is not engine:
+        async with pay_definition_ownership_scope(engine):
+            async with _track_function_client_pay_definitions(client, engine):
+                yield
+        return
+
+    async with _track_function_client_pay_definitions(client, engine, ownership):
+        yield
+
+
+@asynccontextmanager
+async def _track_function_client_pay_definitions(client, engine, ownership=None):
+    if ownership is None:
+        ownership = _active_pay_definition_ownership.get()
+    if ownership is None or ownership.engine is not engine:
+        raise AssertionError("PayDefinition tracker requires a matching ownership scope")
 
     async def record(response):
         path = response.request.url.path
@@ -37,7 +154,7 @@ async def track_function_client_pay_definitions(client, engine):
                 pay_definition_id = body.get("approved_pay_definition_id")
             company_id = body["company_id"]
             if pay_definition_id is not None:
-                created.add((int(company_id), int(pay_definition_id)))
+                ownership.created.add((int(company_id), int(pay_definition_id)))
         except (KeyError, TypeError, ValueError):
             raise AssertionError(f"successful definition creation lacked ownership IDs: {path}")
 
@@ -54,37 +171,6 @@ async def track_function_client_pay_definitions(client, engine):
             hooks.remove(record)
         except BaseException as exc:
             cleanup_errors.append(exc)
-        if created:
-            from app.compensation.definitions import retire_definition
-
-            try:
-                async with engine.begin() as db:
-                    admin = (await db.execute(_text("""
-                        SELECT c.companyid, u.userid
-                        FROM core.companies c
-                        JOIN sec.users u ON u.companyid=c.companyid
-                        WHERE c.companycode='DEMO' AND lower(u.username)='admin'
-                    """))).mappings().one_or_none()
-                if admin is None:
-                    raise AssertionError("Cannot resolve the seeded DEMO company admin for owned definitions")
-            except BaseException as exc:
-                cleanup_errors.append(exc)
-            else:
-                demo_company_id = int(admin["companyid"])
-                for company_id, pay_definition_id in sorted(created):
-                    if company_id != demo_company_id:
-                        continue
-                    try:
-                        async with engine.begin() as db:
-                            await retire_definition(
-                                company_id, int(admin["userid"]), pay_definition_id, db,
-                            )
-                    except BaseException as exc:
-                        exc.add_note(
-                            f"Retiring function-owned PayDefinition {pay_definition_id} failed"
-                        )
-                        cleanup_errors.append(exc)
-
     errors = ([body_error] if body_error is not None else []) + cleanup_errors
     if len(errors) == 1:
         raise errors[0]

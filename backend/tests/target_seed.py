@@ -40,6 +40,9 @@ async def seed_period_definition(
         VALUES (:cid, :code, :name, :input_type, :unit, 'PerUnit') RETURNING paydefinitionid
     """), {"cid": company_id, "code": code, "name": name, "input_type": input_type,
            "unit": unit})).scalar_one()
+    from tests.ownership import record_owned_pay_definition
+
+    record_owned_pay_definition(db, company_id, pay_definition_id)
     rate_definition_id = (await db.execute(text("""
         INSERT INTO payroll.ratedefinitions (companyid, paydefinitionid, shape)
         VALUES (:cid, :pd, 'Scalar') RETURNING ratedefinitionid

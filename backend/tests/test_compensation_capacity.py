@@ -1,6 +1,7 @@
 """Configurable Company and Branch capacity for compensation concepts."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from uuid import uuid4
 
@@ -66,6 +67,9 @@ async def test_definition_tracking_reports_body_and_cleanup_errors_and_continues
         async def execute(self, *_args, **_kwargs):
             return Result()
 
+        async def scalar(self, *_args, **_kwargs):
+            return "Active"
+
     class Transaction:
         async def __aenter__(self):
             return Connection()
@@ -100,6 +104,176 @@ async def test_definition_tracking_reports_body_and_cleanup_errors_and_continues
     assert attempts == [101, 102]
     assert any(isinstance(error, RuntimeError) for error in failure.value.exceptions)
     assert any(isinstance(error, ValueError) for error in failure.value.exceptions)
+
+
+async def test_raw_seeded_pay_definition_is_retired_with_frozen_history_retained(
+    test_engine,
+):
+    from tests.ownership import pay_definition_ownership_scope
+    from tests.target_seed import seed_period_definition
+
+    async with _owned_seed_scratch_period(test_engine) as (branch_id, period_id):
+        async with pay_definition_ownership_scope(test_engine):
+            async with test_engine.connect() as db:
+                await db.execution_options(isolation_level="AUTOCOMMIT")
+                seeded = await seed_period_definition(
+                    db, company_id=1, branch_id=branch_id, period_id=period_id,
+                    active=False,
+                )
+                assert await db.scalar(text("""
+                    SELECT status FROM payroll.paydefinitions
+                    WHERE companyid=1 AND paydefinitionid=:definition
+                """), {"definition": seeded.pay_definition_id}) == "Active"
+
+        async with test_engine.connect() as db:
+            status = await db.scalar(text("""
+                SELECT status FROM payroll.paydefinitions
+                WHERE companyid=1 AND paydefinitionid=:definition
+            """), {"definition": seeded.pay_definition_id})
+            retained = await db.scalar(text("""
+                SELECT count(*) FROM payroll.payrollperioddefinitions
+                WHERE payrollperiodid=:period AND paydefinitionid=:definition
+            """), {"period": period_id, "definition": seeded.pay_definition_id})
+            rates = await db.scalar(text("""
+                SELECT count(*) FROM payroll.ratedefinitions
+                WHERE companyid=1 AND paydefinitionid=:definition
+            """), {"definition": seeded.pay_definition_id})
+    assert status == "Retired"
+    assert retained == 1
+    assert rates == 1
+
+
+async def test_function_db_fixture_propagates_raw_seed_ownership(
+    direct_db, pay_definition_ownership,
+):
+    from tests.target_seed import seed_period_definition
+
+    async with _owned_seed_scratch_period(direct_db.engine) as (branch_id, period_id):
+        seeded = await seed_period_definition(
+            direct_db, company_id=1, branch_id=branch_id, period_id=period_id,
+            active=False,
+        )
+        assert (1, seeded.pay_definition_id) in pay_definition_ownership.created
+
+
+async def test_missing_owned_raw_row_is_tolerated(test_engine):
+    from tests.ownership import pay_definition_ownership_scope, record_owned_pay_definition
+    from tests.target_seed import seed_period_definition
+
+    async with _owned_seed_scratch_period(test_engine) as (branch_id, period_id):
+        async with pay_definition_ownership_scope(test_engine):
+            async with test_engine.connect() as db:
+                transaction = await db.begin()
+                seeded = await seed_period_definition(
+                    db, company_id=1, branch_id=branch_id, period_id=period_id,
+                    active=False,
+                )
+                record_owned_pay_definition(db, 1, seeded.pay_definition_id)
+                await transaction.rollback()
+
+        async with test_engine.connect() as db:
+            assert await db.scalar(text("""
+                SELECT count(*) FROM payroll.paydefinitions
+                WHERE companyid=1 AND paydefinitionid=:definition
+            """), {"definition": seeded.pay_definition_id}) == 0
+
+
+async def test_repeated_raw_seed_scopes_do_not_accumulate_company_capacity(
+    test_engine,
+):
+    from tests.ownership import pay_definition_ownership_scope
+    from tests.target_seed import seed_period_definition
+
+    async with _owned_seed_scratch_period(test_engine) as (branch_id, period_id):
+        async with test_engine.connect() as db:
+            before = int(await db.scalar(text("""
+                SELECT count(*) FROM payroll.paydefinitions p
+                JOIN core.companies c ON c.companyid=p.companyid
+                WHERE c.companycode='DEMO' AND p.status='Active'
+            """)))
+        for _ in range(51):
+            async with pay_definition_ownership_scope(test_engine):
+                async with test_engine.connect() as db:
+                    await db.execution_options(isolation_level="AUTOCOMMIT")
+                    await seed_period_definition(
+                        db, company_id=1, branch_id=branch_id, period_id=period_id,
+                        active=False,
+                    )
+        async with test_engine.connect() as db:
+            after = int(await db.scalar(text("""
+                SELECT count(*) FROM payroll.paydefinitions p
+                JOIN core.companies c ON c.companyid=p.companyid
+                WHERE c.companycode='DEMO' AND p.status='Active'
+            """)))
+        assert after == before
+
+
+@asynccontextmanager
+async def _owned_seed_scratch_period(engine):
+    """Create a retained scratch period, then deactivate its owned branch."""
+    code = "OWN_" + uuid4().hex[:12].upper()
+    branch_id = None
+    try:
+        async with engine.connect() as db:
+            await db.execution_options(isolation_level="AUTOCOMMIT")
+            branch_id = int((await db.execute(text("""
+                INSERT INTO core.branches (companyid, branchcode, branchname, status, timezoneid)
+                VALUES (1, :code, :code, 'Active', 'UTC') RETURNING branchid
+            """), {"code": code})).scalar_one())
+            period_id = int((await db.execute(text("""
+                INSERT INTO payroll.payrollperiods
+                    (companyid, branchid, status, periodcode, periodname, periodtype, startdate, enddate)
+                VALUES (1, :branch, 'Open', :code, :code, 'Week', DATE '2099-01-01', DATE '2099-01-07')
+                RETURNING payrollperiodid
+            """), {"branch": branch_id, "code": code})).scalar_one())
+        yield branch_id, period_id
+    finally:
+        if branch_id is not None:
+            async with engine.connect() as db:
+                await db.execution_options(isolation_level="AUTOCOMMIT")
+                retired_branch_id = await db.scalar(text("""
+                    UPDATE core.branches SET status='Inactive'
+                    WHERE companyid=1 AND branchid=:branch_id AND status='Active'
+                    RETURNING branchid
+                """), {"branch_id": branch_id})
+            assert retired_branch_id == branch_id, (
+                f"Owned scratch branch {branch_id} cleanup did not deactivate exactly one branch"
+            )
+
+
+async def test_private_engine_owned_id_collision_does_not_retire_shared_row(
+    session_client, auth_token, test_engine,
+):
+    from tests.ownership import pay_definition_ownership_scope, record_owned_pay_definition
+
+    response = await session_client.post(
+        "/compensation/pay-definitions",
+        headers={"Authorization": f"Bearer {auth_token}"}, json=_definition_body(),
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+
+    class PrivateConnection:
+        engine = object()
+
+    try:
+        async with pay_definition_ownership_scope(test_engine):
+            record_owned_pay_definition(
+                PrivateConnection(), body["company_id"], body["pay_definition_id"],
+            )
+
+        async with test_engine.connect() as db:
+            status = await db.scalar(text("""
+                SELECT status FROM payroll.paydefinitions
+                WHERE companyid=:company AND paydefinitionid=:definition
+            """), {"company": body["company_id"], "definition": body["pay_definition_id"]})
+        assert status == "Active"
+    finally:
+        retired = await session_client.post(
+            f"/compensation/pay-definitions/{body['pay_definition_id']}/retire",
+            headers={"Authorization": f"Bearer {auth_token}"},
+        )
+        assert retired.status_code == 200, retired.text
 
 
 async def test_function_client_retires_only_its_created_definitions(
