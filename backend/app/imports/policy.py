@@ -27,6 +27,22 @@ class ImportResourcePolicy:
     max_xlsx_members: int = 4_096
     max_xlsx_xml_depth: int = 256
     max_concurrent_requests: int = 2
+    max_response_bytes: int = 2_000_000
+    row_page_default: int = 25
+    row_page_max: int = 100
+    issue_page_default: int = 50
+    issue_page_max: int = 200
+    source_page_default: int = 25
+    source_page_max: int = 100
+    source_cell_page_default: int = 32
+    source_cell_page_max: int = 50
+    target_page_default: int = 50
+    target_page_max: int = 100
+    header_page_default: int = 25
+    header_page_max: int = 25
+    row_detail_sample: int = 5
+    layout_header_sample: int = 12
+    max_header_label_chars: int = 80
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -34,6 +50,16 @@ class ImportResourcePolicy:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        for default_name, maximum_name in (
+            ("row_page_default", "row_page_max"),
+            ("issue_page_default", "issue_page_max"),
+            ("source_page_default", "source_page_max"),
+            ("source_cell_page_default", "source_cell_page_max"),
+            ("target_page_default", "target_page_max"),
+            ("header_page_default", "header_page_max"),
+        ):
+            if getattr(self, default_name) > getattr(self, maximum_name):
+                raise ValueError(f"{default_name} must not exceed {maximum_name}")
 
     @property
     def max_request_body_bytes(self) -> int:

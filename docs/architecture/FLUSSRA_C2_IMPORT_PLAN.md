@@ -1,6 +1,6 @@
 # Flussra C2 Import Plan
 
-**Status:** Revised ordinary-work Import delivery plan, 2026-10-26. The [product contract](FLUSSRA_C2_IMPORT_CONTRACT.md) is the decision authority; the [technical design](FLUSSRA_C2_IMPORT_DESIGN.md) defines implementation boundaries. This plan covers the complete Slice A and Slice B outcome. Publication authorizes documentation only; no implementation, migration or preservation-gap fix has been executed by this revision.
+**Status:** Revised ordinary-work Import delivery plan, 2026-10-26. The [product contract](FLUSSRA_C2_IMPORT_CONTRACT.md) is the decision authority; the [technical design](FLUSSRA_C2_IMPORT_DESIGN.md) defines implementation boundaries. A01's configurable policy and authorized metadata boundary is implemented and focused-verified. A02-A12 and Slice B remain planned; domain-capacity enforcement, new canonical extraction/column semantics and both preservation-gap fixes remain assigned to their later stages. This plan covers the complete outcome without claiming later implementation or deployment acceptance.
 
 **Baseline:** Continue on `codex/c2-import-foundation`, preserving implementation `9e03a66` and documentation through `f15bf96`. Main's safe-upload foundation was merged at `337e3f7` (historical A1). Historical A2 preview `6498453` is reference evidence, not a branch to merge/cherry-pick. The compact batch backend, schema head `0095` and internal canonical quantity writer are preserved assets; they do not already satisfy the revised contract. No connected Import UI or public apply workflow is complete.
 

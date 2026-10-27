@@ -130,7 +130,7 @@ Register every eventual route in authorization inventory. Mutations require payr
 | Currently usable Company pay items | 50 | Canonical definition governance |
 | Branch input concepts including Status | 15 | Effective Branch applicability |
 
-Centralize defaults once; existing Settings loads deployment overrides and supplies validated immutable product/resource policy objects. Product growth changes configured allowances, not database cardinality CHECKs, fixed pay-item fields or duplicated route/UI constants. Expose effective values and stable reasons to authorized clients. No policy editing UI or company entitlement system is required.
+Centralize defaults once; existing Settings loads deployment overrides and supplies validated immutable product/resource policy objects. Product growth changes configured allowances, not database cardinality CHECKs, fixed pay-item fields or duplicated route/UI constants. Expose effective values and stable reasons to authorized clients through `GET /payroll/periods/{period_id}/imports/policy`. The projection reports configured allowances; Company/Branch capacities and source-shape limits are enforced in their later A02/A04/A05 stages. No policy editing UI or company entitlement system is required.
 
 Keep separate operational policy for actual batch files/upload bytes/decompressed bytes, physical columns/rows/cells/candidates, text/XML/package work, preview page/response bytes and concurrent heavy requests. Preserve applicable existing defaults until revised realistic benchmarks justify final aggregate values; do not claim all maximum combinations fit. Avoid unrelated numerical cleanup outside these boundaries.
 
@@ -139,6 +139,16 @@ Capture effective admission-policy identity for diagnostics/preview validation. 
 Count currently usable definitions in canonical direct-create/approval/activation/retirement writers, serialized with compatible scope locks and existing global lock order. Branch checks use effective-dated applicability and include Status once, not once per selectable Status value. Enforce proposed future activation states so deferred changes do not create a later over-capacity branch. Retirement releases usable slots without deleting structure/rates/provenance or changing frozen periods. Preserve existing data and report capacity mismatches; do not silently retire items or reset data to meet a new default.
 
 Storage precision, protocol versions, supported formats, one-sheet/table structure and mathematical validity are explicit contracts, not deployment knobs. Retain exact canonical payroll normalization and existing ordinal topology; no configurable six-tier ceiling is introduced in C2.
+
+### 8.1 Effective policy API and configuration
+
+`GET /payroll/periods/{period_id}/imports/policy` uses the ordinary Company/Branch period-read authority, denies Driver subjects, and requires `payroll.view` or `payroll.entry`. It opens a read-only transaction and returns typed `policy_version`, `policy_fingerprint`, `company_id`, `branch_id`, `period_id`, `product_policy` and `import_resource_policy`. It returns no application settings, connection strings or secrets. The deterministic fingerprint binds versioned effective policy values, not actor/period identities, and is separate from payroll mapping/content fingerprints.
+
+`ProductPolicy` centrally owns the Company/Branch and future canonical-file/combined-column allowances. `ImportResourcePolicy` centrally owns operational defaults, including existing upload admission, page default/maximum sizes, source-detail/header samples and response bytes. `Settings` references those defaults and accepts deployment overrides. Product keys are `PRODUCT_MAX_COMPANY_PAY_ITEMS`, `PRODUCT_MAX_BRANCH_INPUT_CONCEPTS`, `IMPORT_MAX_COMBINED_COLUMNS` and `IMPORT_MAX_CANONICAL_FILE_BYTES`; existing upload/resource keys retain their `IMPORT_` names. Paging settings use `IMPORT_<ROW|ISSUE|SOURCE|SOURCE_CELL|TARGET|HEADER>_PAGE_DEFAULT` and `_PAGE_MAX`; `IMPORT_MAX_RESPONSE_BYTES` controls serialized Import response bounds.
+
+Configuration requires positive integer capacities and page defaults no larger than their maxima; invalid configuration fails before the application serves requests and must not print secret settings in validation errors. Omitted page limits resolve from effective policy, explicit limits are checked against its maximum, and response-byte enforcement includes final metadata/continuation fields. Changing environment configuration requires application re-creation/restart; there is no runtime policy-edit endpoint. Policy objects are immutable, and the UI contract reads effective values instead of copying literals.
+
+This API reports configured product allowances. Their downstream Company/Branch count enforcement (A02), canonical extraction limit (A04) and combined-column semantics (A05) are not implied by the policy metadata. Existing operational admission/response bounds consume the effective resource policy now; historical workload evidence in §11 does not validate arbitrary increased settings.
 
 ## 9. Retention and Slice B canonical application
 

@@ -24,6 +24,7 @@ from app.imports.mapping import (
     target_key,
     validate_mapping,
 )
+from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
 
 
@@ -72,7 +73,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         if (source_date.get("kind") == "column") != (date_column is not None):
             raise ImportFailure("IMPORT_DATE_SOURCE_CONFLICT", "Use either a mapped WorkDate column or one accepted context provider.")
         mapping = validate_mapping(source["mapping"], source["materialized"]["nonempty_columns"], definitions,
-                                   max_column=(policy.max_columns_per_unit if policy else 128),
+                                   max_column=(policy.max_columns_per_unit if policy
+                                               else DEFAULT_IMPORT_RESOURCE_POLICY.max_columns_per_unit),
                                    require_work_date=source_date.get("kind") == "column")
         materialized = source["materialized"]
         inspection = materialized["inspection"]

@@ -8,35 +8,47 @@ from sqlalchemy import text
 
 from app.imports.errors import ImportFailure
 from app.imports.mapping import canonical, encoded
+from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY, ImportResourcePolicy
 from app.imports.runtime import authorize, failure
 from app.payroll.period_definitions import list_period_definitions
 
-MAX_RESPONSE_BYTES = 2_000_000
-ROW_DEFAULT = 25
-ROW_MAX = 100
-ISSUE_DEFAULT = 50
-ISSUE_MAX = 200
-SOURCE_DEFAULT = 25
-SOURCE_MAX = 100
-ROW_DETAIL_SAMPLE = 5
+MAX_RESPONSE_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_response_bytes
+ROW_DEFAULT = DEFAULT_IMPORT_RESOURCE_POLICY.row_page_default
+ROW_MAX = DEFAULT_IMPORT_RESOURCE_POLICY.row_page_max
+ISSUE_DEFAULT = DEFAULT_IMPORT_RESOURCE_POLICY.issue_page_default
+ISSUE_MAX = DEFAULT_IMPORT_RESOURCE_POLICY.issue_page_max
+SOURCE_DEFAULT = DEFAULT_IMPORT_RESOURCE_POLICY.source_page_default
+SOURCE_MAX = DEFAULT_IMPORT_RESOURCE_POLICY.source_page_max
+ROW_DETAIL_SAMPLE = DEFAULT_IMPORT_RESOURCE_POLICY.row_detail_sample
 
 
-def bounded_page(base: dict, items: list[dict], offset: int, limit: int, total: int) -> dict:
+def bounded_page(base: dict, items: list[dict], offset: int, limit: int, total: int,
+                 *, policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY) -> dict:
     response = {**base, "offset": offset, "limit": limit, "filtered_count": total,
                 "items": [], "next_offset": None}
-    size = len(encoded(response).encode("utf-8"))
+    base_size = len(encoded(response).encode("utf-8"))
+    if base_size > policy.max_response_bytes:
+        raise failure("IMPORT_PREVIEW_BASE_TOO_LARGE", "Preview page metadata exceeds the response limit.", 422)
+    selected_size = 0
     for item in items:
-        item_size = len(encoded(item).encode("utf-8")) + 1
-        if size + item_size > MAX_RESPONSE_BYTES:
+        item_size = len(encoded(item).encode("utf-8"))
+        next_count = len(response["items"]) + 1
+        next_offset = offset + next_count if offset + next_count < total else None
+        next_offset_growth = len(str(next_offset)) - len("null") if next_offset is not None else 0
+        projected_size = base_size + selected_size + (1 if next_count > 1 else 0) + item_size + next_offset_growth
+        if projected_size > policy.max_response_bytes:
             if not response["items"]:
                 raise failure("IMPORT_PREVIEW_ITEM_TOO_LARGE", "A source item exceeds the response limit; request source detail separately.", 422)
             break
         response["items"].append(item)
-        size += item_size
+        selected_size += item_size + (1 if next_count > 1 else 0)
     consumed = len(response["items"])
     if offset + consumed < total:
         response["next_offset"] = offset + consumed
-    return canonical(response)
+    result = canonical(response)
+    if len(encoded(result).encode("utf-8")) > policy.max_response_bytes:
+        raise failure("IMPORT_PREVIEW_RESPONSE_TOO_LARGE", "Preview page exceeds the configured response limit.", 422)
+    return result
 
 
 def project_source_record(item: dict, cell_offset: int, cell_limit: int) -> dict:
@@ -83,9 +95,10 @@ async def _read_identity(db, cid: int, uid: int, iid: int, revision: int, plan_f
 
 
 async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
-                    plan_fingerprint: str, offset: int, limit: int, severity: str | None):
-    if limit < 1 or limit > ROW_MAX or offset < 0:
-        raise failure("IMPORT_PAGE_INVALID", f"Rows require limit 1–{ROW_MAX} and a non-negative offset.", 422)
+                    plan_fingerprint: str, offset: int, limit: int, severity: str | None,
+                    *, policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY):
+    if limit < 1 or limit > policy.row_page_max or offset < 0:
+        raise failure("IMPORT_PAGE_INVALID", f"Rows require limit 1–{policy.row_page_max} and a non-negative offset.", 422)
     if severity not in (None, "Error", "Warning", "Conflict"):
         raise failure("IMPORT_SEVERITY_INVALID", "Severity must be Error, Warning or Conflict.", 422)
     async with engine.begin() as db:
@@ -130,7 +143,7 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                 )
                 SELECT * FROM ranked WHERE record_rank <= :sample
                 ORDER BY previewgroupid, record_rank
-            """), {"cid": cid, "iid": iid, "ids": group_ids, "sample": ROW_DETAIL_SAMPLE})).mappings():
+            """), {"cid": cid, "iid": iid, "ids": group_ids, "sample": policy.row_detail_sample})).mappings():
                 records_by_group[record["previewgroupid"]].append(dict(record))
                 record_counts[record["previewgroupid"]] = record["total_records"]
             for candidate in (await db.execute(text("""
@@ -157,7 +170,7 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                 )
                 SELECT * FROM expanded WHERE candidate_rank <= :sample
                 ORDER BY previewgroupid, definition_id, candidate_rank
-            """), {"cid": cid, "iid": iid, "ids": group_ids, "sample": ROW_DETAIL_SAMPLE})).mappings():
+            """), {"cid": cid, "iid": iid, "ids": group_ids, "sample": policy.row_detail_sample})).mappings():
                 values = candidates_by_group[candidate["previewgroupid"]]
                 entry = values.setdefault(str(candidate["definition_id"]), {
                     "candidate_count": candidate["candidate_count"],
@@ -185,7 +198,7 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                     "file_name": record["originalfilename"], "unit_name": record["unitname"],
                     "source_row": record["sourcerownumber"], "skipped": record["isskipped"],
                     "issue_count": len(record_issues),
-                    "issue_codes": [item["code"] for item in record_issues[:5]]})
+                    "issue_codes": [item["code"] for item in record_issues[:policy.row_detail_sample]]})
             for def_id, candidates in candidates_by_group[group["previewgroupid"]].items():
                 values[def_id] = {**definitions_by_id.get(def_id, {"payroll_period_definition_id": int(def_id)}),
                                   **candidates}
@@ -197,12 +210,13 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                 "source_records_sampled": record_counts[group["previewgroupid"]] > len(sources)})
         base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
                 "summary": identity["previewcounts"], "filter": severity}
-        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total))
+        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total, policy=policy))
 
 
-async def read_issues(engine, cid, uid, iid, revision, plan_fingerprint, offset, limit, severity):
-    if limit < 1 or limit > ISSUE_MAX or offset < 0:
-        raise failure("IMPORT_PAGE_INVALID", f"Issues require limit 1–{ISSUE_MAX} and a non-negative offset.", 422)
+async def read_issues(engine, cid, uid, iid, revision, plan_fingerprint, offset, limit, severity,
+                      *, policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY):
+    if limit < 1 or limit > policy.issue_page_max or offset < 0:
+        raise failure("IMPORT_PAGE_INVALID", f"Issues require limit 1–{policy.issue_page_max} and a non-negative offset.", 422)
     if severity not in (None, "Error", "Warning", "Conflict"):
         raise failure("IMPORT_SEVERITY_INVALID", "Severity must be Error, Warning or Conflict.", 422)
     async with engine.begin() as db:
@@ -254,15 +268,17 @@ async def read_issues(engine, cid, uid, iid, revision, plan_fingerprint, offset,
         """), {**params, "offset": offset, "limit": limit})).mappings()]
         base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
                 "summary": identity["previewcounts"], "filter": severity}
-        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total))
+        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total, policy=policy))
 
 
 async def read_sources(engine, cid, uid, iid, revision, plan_fingerprint, offset, limit,
-                       cell_offset: int = 0, cell_limit: int = 32):
-    if limit < 1 or limit > SOURCE_MAX or offset < 0:
-        raise failure("IMPORT_PAGE_INVALID", f"Source records require limit 1–{SOURCE_MAX} and a non-negative offset.", 422)
-    if cell_offset < 0 or cell_limit < 1 or cell_limit > 50:
-        raise failure("IMPORT_CELL_PAGE_INVALID", "Source-cell pages require a non-negative offset and limit 1–50.", 422)
+                       cell_offset: int = 0, cell_limit: int | None = None,
+                       *, policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY):
+    cell_limit = policy.source_cell_page_default if cell_limit is None else cell_limit
+    if limit < 1 or limit > policy.source_page_max or offset < 0:
+        raise failure("IMPORT_PAGE_INVALID", f"Source records require limit 1–{policy.source_page_max} and a non-negative offset.", 422)
+    if cell_offset < 0 or cell_limit < 1 or cell_limit > policy.source_cell_page_max:
+        raise failure("IMPORT_CELL_PAGE_INVALID", f"Source-cell pages require a non-negative offset and limit 1–{policy.source_cell_page_max}.", 422)
     async with engine.begin() as db:
         await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         identity = await _read_identity(db, cid, uid, iid, revision, plan_fingerprint)
@@ -294,4 +310,4 @@ async def read_sources(engine, cid, uid, iid, revision, plan_fingerprint, offset
         items = [project_source_record(item, cell_offset, cell_limit) for item in items]
         base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
                 "summary": identity["previewcounts"], "filter": None}
-        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total))
+        return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total, policy=policy))

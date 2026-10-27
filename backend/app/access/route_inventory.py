@@ -18,6 +18,7 @@ class RouteAuthorization:
 ROUTE_AUTHORIZATION: dict[str, RouteAuthorization] = {
     'POST /payroll/periods/{period_id}/imports': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'GET /payroll/imports/{import_id}': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
+    'GET /payroll/periods/{period_id}/imports/policy': RouteAuthorization('AUTHENTICATED', 'ANY_OF', ('payroll.view', 'payroll.entry'), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'PUT /payroll/imports/{import_id}/interpretation': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'POST /payroll/imports/{import_id}/layouts': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),
     'PUT /payroll/imports/{import_id}/layouts/{layout_id}/mapping': RouteAuthorization('AUTHENTICATED', 'PERMISSION', ('payroll.entry',), None, 'RESOURCE_SPECIFIC', 'DENY', None, None),

@@ -110,7 +110,7 @@ async def _map_custom_and_preview(client, tenant, created, mapping):
 
 
 async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_ownership(
-    p3c_client, p3c_engine, tenant,
+    p3c_client, p3c_app, p3c_engine, tenant, monkeypatch,
 ):
     period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
     driver = await _eligible_driver_date(p3c_engine, tenant, period)
@@ -186,14 +186,35 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
     assert refreshed["preview"]["plan_fingerprint"]
     plan = refreshed["preview"]["plan_fingerprint"]
     query = f"expected_revision={refreshed['revision']}&plan_fingerprint={plan}"
+    settings = p3c_app.state.settings
+    monkeypatch.setattr(settings, "IMPORT_ROW_PAGE_DEFAULT", 1)
+    monkeypatch.setattr(settings, "IMPORT_ROW_PAGE_MAX", 2)
+    monkeypatch.setattr(settings, "IMPORT_ISSUE_PAGE_DEFAULT", 1)
+    monkeypatch.setattr(settings, "IMPORT_ISSUE_PAGE_MAX", 2)
+    monkeypatch.setattr(settings, "IMPORT_SOURCE_PAGE_DEFAULT", 1)
+    monkeypatch.setattr(settings, "IMPORT_SOURCE_PAGE_MAX", 2)
+    monkeypatch.setattr(settings, "IMPORT_SOURCE_CELL_PAGE_DEFAULT", 2)
+    monkeypatch.setattr(settings, "IMPORT_SOURCE_CELL_PAGE_MAX", 2)
     rows = await p3c_client.get(f"/payroll/imports/{created['import_id']}/rows?{query}", headers=tenant.admin)
     issues = await p3c_client.get(f"/payroll/imports/{created['import_id']}/issues?{query}", headers=tenant.admin)
     source_rows = await p3c_client.get(
-        f"/payroll/imports/{created['import_id']}/source-records?{query}&cell_limit=1", headers=tenant.admin,
+        f"/payroll/imports/{created['import_id']}/source-records?{query}", headers=tenant.admin,
     )
     assert rows.status_code == 200, rows.text
     assert rows.json()["filtered_count"] == 2
-    assert len(rows.json()["items"]) == 2
+    assert rows.json()["limit"] == 1
+    assert len(rows.json()["items"]) == 1
+    assert rows.json()["next_offset"] == 1
+    raised_rows = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/rows?{query}&limit=2", headers=tenant.admin,
+    )
+    over_limit_rows = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/rows?{query}&limit=3", headers=tenant.admin,
+    )
+    assert raised_rows.status_code == 200 and raised_rows.json()["limit"] == 2
+    assert len(raised_rows.json()["items"]) == 2
+    assert over_limit_rows.status_code == 422
+    assert over_limit_rows.json()["detail"]["code"] == "IMPORT_PAGE_INVALID"
     invalid_severity = await p3c_client.get(
         f"/payroll/imports/{created['import_id']}/rows?{query}&severity=Unexpected", headers=tenant.admin,
     )
@@ -206,13 +227,41 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
     assert rows.json()["items"][0]["source_records_sampled"] is False
     assert issues.status_code == 200, issues.text
     assert issues.json()["filtered_count"] == 0
+    assert issues.json()["limit"] == 1
+    raised_issue_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/issues?{query}&limit=2", headers=tenant.admin,
+    )
+    over_limit_issue_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/issues?{query}&limit=3", headers=tenant.admin,
+    )
+    assert raised_issue_page.status_code == 200 and raised_issue_page.json()["limit"] == 2
+    assert over_limit_issue_page.status_code == 422
     assert source_rows.status_code == 200, source_rows.text
     assert source_rows.json()["filtered_count"] == 2
+    assert source_rows.json()["limit"] == 1
+    assert len(source_rows.json()["items"]) == 1
+    assert source_rows.json()["next_offset"] == 1
     assert source_rows.json()["items"][0]["cell_count"] == 3
-    assert len(source_rows.json()["items"][0]["cells"]) == 1
+    assert source_rows.json()["items"][0]["cell_limit"] == 2
+    assert len(source_rows.json()["items"][0]["cells"]) == 2
     assert source_rows.json()["items"][0]["values_count"] == 1
     assert source_rows.json()["items"][0]["values_json"] == {}
-    assert source_rows.json()["items"][0]["next_cell_offset"] == 1
+    assert source_rows.json()["items"][0]["next_cell_offset"] == 2
+    raised_source_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&limit=2&cell_limit=2",
+        headers=tenant.admin,
+    )
+    over_limit_source_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&limit=3", headers=tenant.admin,
+    )
+    over_limit_cell_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&cell_limit=3",
+        headers=tenant.admin,
+    )
+    assert raised_source_page.status_code == 200 and raised_source_page.json()["limit"] == 2
+    assert len(raised_source_page.json()["items"]) == 2
+    assert over_limit_source_page.status_code == 422
+    assert over_limit_cell_page.status_code == 422
     second_cell_page = await p3c_client.get(
         f"/payroll/imports/{created['import_id']}/source-records?{query}&cell_offset=1&cell_limit=1",
         headers=tenant.admin,

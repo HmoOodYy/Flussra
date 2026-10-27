@@ -19,13 +19,8 @@ from app.imports.batch_service import (
     read_import,
     update_interpretation,
 )
+from app.imports.policy_metadata import ImportPolicyMetadataResponse, read_period_import_policy
 from app.imports.readmodels import (
-    ISSUE_DEFAULT,
-    ISSUE_MAX,
-    ROW_DEFAULT,
-    ROW_MAX,
-    SOURCE_DEFAULT,
-    SOURCE_MAX,
     read_issues,
     read_rows,
     read_sources,
@@ -42,18 +37,29 @@ async def upload(period_id: int, request: Request,
     return await create_import(request, engine, int(user["cid"]), int(user["sub"]), period_id, idempotency_key)
 
 
+@router.get("/periods/{period_id}/imports/policy", response_model=ImportPolicyMetadataResponse)
+async def effective_policy(period_id: int, request: Request,
+                           user: dict = Depends(get_current_user), engine: AsyncEngine = Depends(get_engine)):
+    settings = request.app.state.settings
+    return await read_period_import_policy(
+        engine, int(user["cid"]), int(user["sub"]), period_id,
+        settings.product_policy, settings.import_resource_policy,
+    )
+
+
 @router.get("/imports/{import_id}")
-async def get_import(import_id: int, target_offset: int = Query(default=0, ge=0),
-                     target_limit: int = Query(default=50, ge=1, le=100),
+async def get_import(import_id: int, request: Request, target_offset: int = Query(default=0, ge=0),
+                     target_limit: int | None = Query(default=None, ge=1),
                      header_layout_id: int | None = Query(default=None, ge=1),
                      header_offset: int = Query(default=0, ge=0),
-                     header_limit: int = Query(default=25, ge=1, le=25),
+                     header_limit: int | None = Query(default=None, ge=1),
                      user: dict = Depends(get_current_user),
                      engine: AsyncEngine = Depends(get_engine)):
+    policy = request.app.state.settings.import_resource_policy
     return await read_import(engine, int(user["cid"]), int(user["sub"]), import_id,
                              target_offset=target_offset, target_limit=target_limit,
                              header_layout_id=header_layout_id, header_offset=header_offset,
-                             header_limit=header_limit)
+                             header_limit=header_limit, policy=policy)
 
 
 @router.put("/imports/{import_id}/interpretation")
@@ -81,28 +87,38 @@ async def refresh_preview(import_id: int, body: RevisionRequest, request: Reques
 
 
 @router.get("/imports/{import_id}/rows")
-async def rows(import_id: int, expected_revision: int = Query(ge=1), plan_fingerprint: str = Query(min_length=64, max_length=64),
-               offset: int = Query(default=0, ge=0), limit: int = Query(default=ROW_DEFAULT, ge=1, le=ROW_MAX),
+async def rows(import_id: int, request: Request, expected_revision: int = Query(ge=1),
+               plan_fingerprint: str = Query(min_length=64, max_length=64),
+               offset: int = Query(default=0, ge=0), limit: int | None = Query(default=None, ge=1),
                severity: str | None = None, user: dict = Depends(get_current_user), engine: AsyncEngine = Depends(get_engine)):
+    policy = request.app.state.settings.import_resource_policy
+    limit = policy.row_page_default if limit is None else limit
     return await read_rows(engine, int(user["cid"]), int(user["sub"]), import_id, expected_revision,
-                           plan_fingerprint, offset, limit, severity)
+                           plan_fingerprint, offset, limit, severity, policy=policy)
 
 
 @router.get("/imports/{import_id}/issues")
-async def issues(import_id: int, expected_revision: int = Query(ge=1), plan_fingerprint: str = Query(min_length=64, max_length=64),
-                 offset: int = Query(default=0, ge=0), limit: int = Query(default=ISSUE_DEFAULT, ge=1, le=ISSUE_MAX),
+async def issues(import_id: int, request: Request, expected_revision: int = Query(ge=1),
+                 plan_fingerprint: str = Query(min_length=64, max_length=64),
+                 offset: int = Query(default=0, ge=0), limit: int | None = Query(default=None, ge=1),
                  severity: str | None = None, user: dict = Depends(get_current_user), engine: AsyncEngine = Depends(get_engine)):
+    policy = request.app.state.settings.import_resource_policy
+    limit = policy.issue_page_default if limit is None else limit
     return await read_issues(engine, int(user["cid"]), int(user["sub"]), import_id, expected_revision,
-                             plan_fingerprint, offset, limit, severity)
+                             plan_fingerprint, offset, limit, severity, policy=policy)
 
 
 @router.get("/imports/{import_id}/source-records")
-async def source_records(import_id: int, expected_revision: int = Query(ge=1), plan_fingerprint: str = Query(min_length=64, max_length=64),
-                         offset: int = Query(default=0, ge=0), limit: int = Query(default=SOURCE_DEFAULT, ge=1, le=SOURCE_MAX),
-                         cell_offset: int = Query(default=0, ge=0), cell_limit: int = Query(default=32, ge=1, le=50),
+async def source_records(import_id: int, request: Request, expected_revision: int = Query(ge=1),
+                         plan_fingerprint: str = Query(min_length=64, max_length=64),
+                         offset: int = Query(default=0, ge=0), limit: int | None = Query(default=None, ge=1),
+                         cell_offset: int = Query(default=0, ge=0), cell_limit: int | None = Query(default=None, ge=1),
                          user: dict = Depends(get_current_user), engine: AsyncEngine = Depends(get_engine)):
+    policy = request.app.state.settings.import_resource_policy
+    limit = policy.source_page_default if limit is None else limit
+    cell_limit = policy.source_cell_page_default if cell_limit is None else cell_limit
     return await read_sources(engine, int(user["cid"]), int(user["sub"]), import_id, expected_revision,
-                              plan_fingerprint, offset, limit, cell_offset, cell_limit)
+                              plan_fingerprint, offset, limit, cell_offset, cell_limit, policy=policy)
 
 
 @router.get("/periods/{period_id}/imports/template.xlsx")
@@ -115,6 +131,8 @@ async def template(period_id: int, request: Request,
 
 
 @router.post("/imports/{import_id}/cancel")
-async def cancel(import_id: int, body: RevisionRequest, user: dict = Depends(get_current_user),
+async def cancel(import_id: int, body: RevisionRequest, request: Request, user: dict = Depends(get_current_user),
                  engine: AsyncEngine = Depends(get_engine)):
-    return await cancel_import(engine, int(user["cid"]), int(user["sub"]), import_id, body.expected_revision)
+    policy = request.app.state.settings.import_resource_policy
+    return await cancel_import(engine, int(user["cid"]), int(user["sub"]), import_id,
+                               body.expected_revision, policy=policy)

@@ -30,7 +30,7 @@ from app.imports.mapping import (
     targets as mapping_targets,
 )
 from app.imports.payroll_context import context_identity, load_context
-from app.imports.policy import ImportResourcePolicy
+from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY, ImportResourcePolicy
 from app.imports.preview_model import build_batch_preview
 from app.imports.preview_store import persist_preview, prepare_preview
 from app.imports.runtime import admission, authorize, failure
@@ -45,7 +45,7 @@ SOURCE_CONTRACT = 2
 FILE_SOURCE_CONTRACT = 2
 TARGET_CONTRACT = 2
 CANONICALIZATION = 3
-MAX_IMPORT_METADATA_BYTES = 2_000_000
+MAX_IMPORT_METADATA_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_response_bytes
 
 
 class RevisionRequest(BaseModel):
@@ -80,7 +80,8 @@ def _json(value) -> str:
     return json.dumps(canonical(value), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-def _enforce_metadata_response_bound(result: dict, max_bytes: int = MAX_IMPORT_METADATA_BYTES) -> dict:
+def _enforce_metadata_response_bound(result: dict,
+                                     max_bytes: int = DEFAULT_IMPORT_RESOURCE_POLICY.max_response_bytes) -> dict:
     if len(_json(result).encode("utf-8")) > max_bytes:
         raise failure("IMPORT_METADATA_TOO_LARGE", "Import metadata exceeds the configured response bound.", 422)
     return result
@@ -183,13 +184,16 @@ def _require_file_source_contract(files: list[dict]) -> None:
                       "This Import contains an unsupported File version. Reset/re-upload the files.")
 
 
-async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: int = 0, target_limit: int = 50,
+async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: int = 0, target_limit: int | None = None,
                    header_layout_id: int | None = None, header_offset: int = 0,
-                   header_limit: int = 25) -> dict:
-    if target_offset < 0 or target_limit < 1 or target_limit > 100:
-        raise failure("IMPORT_TARGET_PAGE_INVALID", "Mapping targets require a non-negative offset and limit 1–100.", 422)
-    if header_offset < 0 or header_limit < 1 or header_limit > 25:
-        raise failure("IMPORT_HEADER_PAGE_INVALID", "Header inspection requires a non-negative offset and limit 1–25.", 422)
+                   header_limit: int | None = None,
+                   policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY) -> dict:
+    target_limit = policy.target_page_default if target_limit is None else target_limit
+    header_limit = policy.header_page_default if header_limit is None else header_limit
+    if target_offset < 0 or target_limit < 1 or target_limit > policy.target_page_max:
+        raise failure("IMPORT_TARGET_PAGE_INVALID", f"Mapping targets require a non-negative offset and limit 1–{policy.target_page_max}.", 422)
+    if header_offset < 0 or header_limit < 1 or header_limit > policy.header_page_max:
+        raise failure("IMPORT_HEADER_PAGE_INVALID", f"Header inspection requires a non-negative offset and limit 1–{policy.header_page_max}.", 422)
     row = await load_import(db, cid, iid)
     files, units, layouts = await load_sources(db, cid, iid)
     period_status = (await db.execute(text("""
@@ -211,10 +215,12 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
     def layout_inspection(value):
         value = value or {}
         headers = value.get("header_cells", [])
-        sample = [str(header)[:80] for header in headers[:12]]
+        sample = [str(header)[:policy.max_header_label_chars]
+                  for header in headers[:policy.layout_header_sample]]
         return {"header_cells": sample, "header_count": len(headers),
                 "header_cells_truncated": len(headers) > len(sample)
-                    or any(len(str(header)) > 80 for header in headers[:12])}
+                    or any(len(str(header)) > policy.max_header_label_chars
+                           for header in headers[:policy.layout_header_sample])}
     targets = []
     definitions = []
     if period_status in SOURCE_ENTRY_STATUSES:
@@ -274,7 +280,7 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
             "content_fingerprint": row["contentfingerprint"], "plan_fingerprint": row["planfingerprint"],
             "counts": row["previewcounts"], "summary": row["reviewsummary"]},
     }
-    return _enforce_metadata_response_bound(result)
+    return _enforce_metadata_response_bound(result, policy.max_response_bytes)
 
 
 def _manifest_payload(payloads: list[FilePayload], inspected: list[dict]) -> list[dict]:
@@ -317,12 +323,13 @@ async def _existing_key(db, cid: int, key: UUID):
     """), {"cid": cid, "key": key})).mappings().first()
 
 
-async def _retry(db, cid: int, uid: int, existing, expected: str) -> dict:
+async def _retry(db, cid: int, uid: int, existing, expected: str,
+                 policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY) -> dict:
     if existing["creationfingerprint"] != expected:
         raise failure("IMPORT_IDEMPOTENCY_CONFLICT", "Idempotency-Key was already used for a different ordered file batch.")
     row = await load_import(db, cid, existing["importid"])
     await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
-    return await metadata(db, cid, row["importid"])
+    return await metadata(db, cid, row["importid"], policy=policy)
 
 
 async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: int,
@@ -342,12 +349,12 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
         async with engine.begin() as db:
             existing = await _existing_key(db, cid, key)
             if existing is not None:
-                return await _retry(db, cid, uid, existing, creation)
+                return await _retry(db, cid, uid, existing, creation, _policy(request))
         async with engine.begin() as db:
             period = await authorize(db, cid, uid, pid, mutate=True)
             existing = await _existing_key(db, cid, key)
             if existing is not None:
-                return await _retry(db, cid, uid, existing, creation)
+                return await _retry(db, cid, uid, existing, creation, _policy(request))
             if period.status not in SOURCE_ENTRY_STATUSES:
                 raise failure("IMPORT_PERIOD_NOT_EDITABLE", "This period no longer accepts PayrollWork imports.")
             await _lock_period_for_mutation(pid, cid, db)
@@ -359,7 +366,7 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
             """), {"cid": cid, "bid": period.branch_id, "correlation": uuid4(), "key": key,
                    "fingerprint": creation, "uid": uid})).scalar_one_or_none()
             if iid is None:
-                return await _retry(db, cid, uid, await _existing_key(db, cid, key), creation)
+                return await _retry(db, cid, uid, await _existing_key(db, cid, key), creation, _policy(request))
             await db.execute(text("""
                 INSERT INTO import.payrollworkimports (importid, companyid, branchid, payrollperiodid)
                 VALUES (:iid, :cid, :bid, :pid)
@@ -418,7 +425,7 @@ async def create_import(request: Request, engine: AsyncEngine, cid: int, uid: in
                         :isselected, :headerrownumber, CAST(:datesource AS jsonb), :sourcelayoutid,
                         CAST(:inspection AS jsonb))
                 """), file_units)
-            return await metadata(db, cid, iid)
+            return await metadata(db, cid, iid, policy=_policy(request))
 
 
 def _inspect_batch(payloads: list[FilePayload], policy: ImportResourcePolicy, labels: list[str]) -> list[dict]:
@@ -469,15 +476,16 @@ def _inspect_accepted_headers(files, units, body, policy):
 
 
 async def read_import(engine: AsyncEngine, cid: int, uid: int, iid: int, *, target_offset: int = 0,
-                      target_limit: int = 50, header_layout_id: int | None = None,
-                      header_offset: int = 0, header_limit: int = 25) -> dict:
+                      target_limit: int | None = None, header_layout_id: int | None = None,
+                      header_offset: int = 0, header_limit: int | None = None,
+                      policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY) -> dict:
     async with engine.begin() as db:
         await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         row = await load_import(db, cid, iid)
         await authorize(db, cid, uid, row["payrollperiodid"], mutate=False)
         return await metadata(db, cid, iid, target_offset=target_offset, target_limit=target_limit,
                               header_layout_id=header_layout_id, header_offset=header_offset,
-                              header_limit=header_limit)
+                              header_limit=header_limit, policy=policy)
 
 
 async def _lock_mutable(db, cid: int, uid: int, iid: int, expected: int):
@@ -615,7 +623,7 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
                 UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
                     updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
             """), {"uid": uid, "iid": iid, "cid": cid})
-            return await metadata(db, cid, iid)
+            return await metadata(db, cid, iid, policy=_policy(request))
 
 
 async def create_layout(request, engine, cid, uid, iid, body: RegroupRequest):
@@ -655,7 +663,7 @@ async def create_layout(request, engine, cid, uid, iid, body: RegroupRequest):
             UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
                 updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
         """), {"uid": uid, "iid": iid, "cid": cid})
-        return await metadata(db, cid, iid)
+        return await metadata(db, cid, iid, policy=_policy(request))
 
 
 async def accept_mapping(request, engine, cid, uid, iid, layout_id, body: MappingRequest):
@@ -685,7 +693,7 @@ async def accept_mapping(request, engine, cid, uid, iid, layout_id, body: Mappin
             UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
                 updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
         """), {"uid": uid, "iid": iid, "cid": cid})
-        return await metadata(db, cid, iid)
+        return await metadata(db, cid, iid, policy=_policy(request))
 
 
 def _materialize_batch(files, units, layouts, policy):
@@ -857,10 +865,11 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
                 UPDATE import.imports SET revision = revision + 1, status = 'NeedsReview',
                     updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
             """), {"uid": uid, "iid": iid, "cid": cid})
-            return await metadata(db, cid, iid)
+            return await metadata(db, cid, iid, policy=_policy(request))
 
 
-async def cancel_import(engine: AsyncEngine, cid: int, uid: int, iid: int, expected: int):
+async def cancel_import(engine: AsyncEngine, cid: int, uid: int, iid: int, expected: int,
+                        policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY):
     async with engine.begin() as db:
         row = await load_import(db, cid, iid)
         await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
@@ -878,4 +887,4 @@ async def cancel_import(engine: AsyncEngine, cid: int, uid: int, iid: int, expec
                     cancelledbyuserid = :uid, cancelledatutc = NOW(), updatedbyuserid = :uid, updatedatutc = NOW()
                 WHERE importid = :iid AND companyid = :cid
             """), {"uid": uid, "iid": iid, "cid": cid})
-        return await metadata(db, cid, iid)
+        return await metadata(db, cid, iid, policy=policy)

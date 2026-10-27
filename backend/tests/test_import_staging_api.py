@@ -239,6 +239,112 @@ async def test_import_read_and_mutation_enforce_company_branch_driver_and_permis
     assert company_isolation.status_code == 404, company_isolation.text
 
 
+async def test_effective_import_policy_is_read_only_and_uses_payroll_read_authorization(
+    p3c_client, p3c_engine, tenant, p3b_dsn,
+):
+    period = await _period(p3c_client, p3c_engine, tenant)
+    before = await _canonical_counts(p3c_engine, period["payroll_period_id"])
+    path = f"/payroll/periods/{period['payroll_period_id']}/imports/policy"
+    reader = make_user(tenant, ["payroll.view"])
+    entry_user = make_user(tenant, ["payroll.entry"])
+    wrong_branch = make_user(tenant, ["payroll.entry"], scope="SpecificBranch", branch_id=tenant.branch_b)
+    driver_user = make_driver_self_user(tenant, ["payroll.entry", "payroll.view"])
+    no_permission = make_user(tenant, [])
+    foreign_tenant = build_payroll_tenant(p3b_dsn)
+
+    anonymous = await p3c_client.get(path)
+    viewed = await p3c_client.get(path, headers=reader)
+    entered = await p3c_client.get(path, headers=entry_user)
+    wrong_branch_response = await p3c_client.get(path, headers=wrong_branch)
+    driver_response = await p3c_client.get(path, headers=driver_user)
+    no_permission_response = await p3c_client.get(path, headers=no_permission)
+    foreign_response = await p3c_client.get(path, headers=foreign_tenant.admin)
+    after = await _canonical_counts(p3c_engine, period["payroll_period_id"])
+
+    assert after == before
+    assert anonymous.status_code == 401
+    assert viewed.status_code == entered.status_code == 200
+    assert wrong_branch_response.status_code == driver_response.status_code == no_permission_response.status_code == 403
+    assert foreign_response.status_code == 404
+    body = viewed.json()
+    assert body["policy_version"] == 1
+    assert body["policy_fingerprint"] == entered.json()["policy_fingerprint"]
+    assert body["company_id"] == tenant.company_id
+    assert body["branch_id"] == period["branch_id"]
+    assert body["period_id"] == period["payroll_period_id"]
+    assert body["product_policy"] == {
+        "max_company_pay_items": 50,
+        "max_branch_input_concepts": 15,
+        "max_import_combined_columns": 40,
+        "max_import_canonical_file_bytes": 1_000_000,
+    }
+    assert body["import_resource_policy"]["max_file_bytes"] == 10_000_000
+    assert body["import_resource_policy"]["max_response_bytes"] == 2_000_000
+    assert body["import_resource_policy"]["max_request_body_bytes"] == 50_256_000
+    assert "DATABASE_URL" not in body
+    assert "SECRET_KEY" not in body
+
+
+async def test_upload_enforces_runtime_configured_file_size(p3c_client, p3c_app, p3c_engine,
+                                                             tenant, monkeypatch):
+    period = await _period(p3c_client, p3c_engine, tenant)
+    monkeypatch.setattr(p3c_app.state.settings, "IMPORT_MAX_FILE_BYTES", 8)
+
+    response = await _upload(p3c_client, tenant, period)
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "IMPORT_FILE_TOO_LARGE"
+
+
+async def test_import_metadata_uses_effective_target_header_and_response_bounds(
+    p3c_client, p3c_app, p3c_engine, tenant, monkeypatch,
+):
+    period = await _period(p3c_client, p3c_engine, tenant)
+    created = await _upload(p3c_client, tenant, period)
+    assert created.status_code == 200, created.text
+    import_id = created.json()["import_id"]
+    layout_id = created.json()["layouts"][0]["layout_id"]
+    settings = p3c_app.state.settings
+    monkeypatch.setattr(settings, "IMPORT_TARGET_PAGE_DEFAULT", 1)
+    monkeypatch.setattr(settings, "IMPORT_TARGET_PAGE_MAX", 2)
+    monkeypatch.setattr(settings, "IMPORT_HEADER_PAGE_DEFAULT", 1)
+    monkeypatch.setattr(settings, "IMPORT_HEADER_PAGE_MAX", 2)
+    monkeypatch.setattr(settings, "IMPORT_LAYOUT_HEADER_SAMPLE", 1)
+    monkeypatch.setattr(settings, "IMPORT_MAX_HEADER_LABEL_CHARS", 5)
+
+    default_page = await p3c_client.get(
+        f"/payroll/imports/{import_id}?header_layout_id={layout_id}", headers=tenant.admin,
+    )
+    raised_page = await p3c_client.get(
+        f"/payroll/imports/{import_id}?target_limit=2&header_layout_id={layout_id}&header_limit=2",
+        headers=tenant.admin,
+    )
+    rejected_target_page = await p3c_client.get(
+        f"/payroll/imports/{import_id}?target_limit=3", headers=tenant.admin,
+    )
+    rejected_header_page = await p3c_client.get(
+        f"/payroll/imports/{import_id}?header_layout_id={layout_id}&header_limit=3", headers=tenant.admin,
+    )
+
+    assert default_page.status_code == 200, default_page.text
+    assert default_page.json()["mapping_target_page"]["limit"] == 1
+    assert default_page.json()["header_page"]["limit"] == 1
+    assert default_page.json()["header_page"]["items"][0] == {"source_column": 1, "label": "Driver Number"}
+    assert default_page.json()["layouts"][0]["inspection"]["header_cells"] == ["Drive"]
+    assert raised_page.status_code == 200, raised_page.text
+    assert raised_page.json()["mapping_target_page"]["limit"] == 2
+    assert raised_page.json()["header_page"]["limit"] == 2
+    assert rejected_target_page.status_code == 422
+    assert rejected_target_page.json()["detail"]["code"] == "IMPORT_TARGET_PAGE_INVALID"
+    assert rejected_header_page.status_code == 422
+    assert rejected_header_page.json()["detail"]["code"] == "IMPORT_HEADER_PAGE_INVALID"
+
+    monkeypatch.setattr(settings, "IMPORT_MAX_RESPONSE_BYTES", 256)
+    bounded_response = await p3c_client.get(f"/payroll/imports/{import_id}", headers=tenant.admin)
+    assert bounded_response.status_code == 422
+    assert bounded_response.json()["detail"]["code"] == "IMPORT_METADATA_TOO_LARGE"
+
+
 async def test_upload_parser_runs_after_auth_transaction_and_before_period_lock_without_payroll_writes(
     p3c_client, p3c_engine, tenant, monkeypatch,
 ):
