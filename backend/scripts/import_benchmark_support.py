@@ -165,7 +165,8 @@ async def application(dsn):
     _raise_collected_errors(errors, "workload application and cleanup failed")
 
 
-async def seed_period(client, engine, dsn, *, drivers: int, definitions: int, days: int = 31):
+async def seed_period(client, engine, dsn, *, drivers: int, definitions: int, days: int = 31,
+                      outside_drivers: int = 0, distinct_names: bool = False):
     import psycopg2
     from sqlalchemy import text
 
@@ -190,6 +191,12 @@ async def seed_period(client, engine, dsn, *, drivers: int, definitions: int, da
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
         for _ in range(drivers - 2):
             make_driver_pair(cur, tenant.company_id, tenant.branch_a)
+        for _ in range(outside_drivers):
+            make_driver_pair(cur, tenant.company_id, tenant.branch_b)
+        if distinct_names:
+            cur.execute("""UPDATE core.employees SET fullname = 'Measured Driver ' || employeeid
+                WHERE companyid = %s AND employeeid IN (SELECT employeeid FROM core.drivers WHERE companyid = %s)""",
+                (tenant.company_id, tenant.company_id))
     for index in range(definitions):
         await rated_definition(client, tenant, rate=None, definition_code=f"Q{index + 1}",
                                definition_name=f"Measured quantity {index + 1}")
@@ -212,5 +219,9 @@ async def seed_period(client, engine, dsn, *, drivers: int, definitions: int, da
             JOIN core.employees e ON e.employeeid=a.employeeid AND e.companyid=a.companyid
             WHERE a.companyid=:cid AND a.branchid=:bid ORDER BY a.driverassignmentid"""),
             {"cid": tenant.company_id, "bid": tenant.branch_a})).mappings()]
+        company_drivers = await db.scalar(text("SELECT count(*) FROM core.drivers WHERE companyid=:cid"),
+                                          {"cid": tenant.company_id})
     assert len(identities) == drivers and len(frozen) == definitions and len(dates) == days
-    return {"tenant": tenant, "period": period, "definitions": frozen, "drivers": identities, "days": dates}
+    assert company_drivers >= drivers + outside_drivers
+    return {"tenant": tenant, "period": period, "definitions": frozen, "drivers": identities, "days": dates,
+            "company_drivers": company_drivers}
