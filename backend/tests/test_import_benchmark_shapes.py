@@ -29,13 +29,17 @@ from scripts.benchmark_import_files import (
     IDENTITY_FINDINGS,
     MISSING_COVERAGE_DAY_INDEX,
     REPEATS,
+    SCENARIO_GROUPS,
+    SINGLE_DAY_SCENARIOS,
     Phases,
     canonical_boundary_payloads,
     category_excluded,
     category_label,
     check_date_review,
+    date_source_for_unit,
     filename_date_selection,
     identity_kind,
+    main,
     mapping_expected,
     mapping_requests,
     renamed_repeat_files,
@@ -46,6 +50,7 @@ from scripts.benchmark_import_files import (
     scenario_coverage,
     scenario_covered_days,
     scenario_dimensions,
+    scenarios_for_selection,
     source_files,
     target_mapping_plan,
     written_date,
@@ -114,6 +119,102 @@ def test_current_daily_xlsx_shapes_have_one_sheet_and_the_same_headers():
                 "DriverNumber", *(f"INPUT_{index}" for index in range(14)))
         finally:
             workbook.close()
+
+
+def test_single_day_ordinary_workloads_stay_outside_the_current_acceptance_group():
+    assert len(CURRENT_SCENARIOS) == 12
+    assert scenarios_for_selection("current") == CURRENT_SCENARIOS
+    assert scenarios_for_selection("single_day") == SINGLE_DAY_SCENARIOS
+    assert SCENARIO_GROUPS["single_day"] == SINGLE_DAY_SCENARIOS
+    assert scenarios_for_selection("single_day_csv") == ("single_day_csv",)
+    assert scenarios_for_selection("single_day_xlsx") == ("single_day_xlsx",)
+    assert set(SINGLE_DAY_SCENARIOS).isdisjoint(CURRENT_SCENARIOS)
+
+    for scenario in SINGLE_DAY_SCENARIOS:
+        fixture = _scenario_fixture(scenario)
+        assert scenario_dimensions(scenario) == (150, 14, 31, 0)
+        assert len(fixture["days"]) == 31
+        covered = scenario_covered_days(scenario, fixture["days"])
+        assert covered == fixture["days"][:1]
+
+        files = source_files(scenario, fixture)
+        assert len(files) == 1
+        name, payload = files[0]
+        assert len(payload) <= DEFAULT_IMPORT_RESOURCE_POLICY.max_file_bytes
+        if scenario == "single_day_csv":
+            assert name == f"{covered[0].isoformat()}.csv"
+            rows = _csv_rows(payload)
+            header = rows[0]
+            assert len(rows) - 1 == 150
+            file = {"type": "csv"}
+            unit = {"inspection": {"filename_date_candidates": [covered[0].isoformat()]}}
+        else:
+            assert name == f"{covered[0].isoformat()}.xlsx"
+            sheet_name, rows = _xlsx_rows(payload)
+            assert sheet_name == covered[0].isoformat()
+            header = rows[0]
+            assert len(rows) - 1 == 150
+            file = {"type": "xlsx"}
+            unit = {"inspection": {"unit_date_candidates": [covered[0].isoformat()]}}
+        assert date_source_for_unit(scenario, file, unit) == {
+            "kind": "filename" if scenario == "single_day_csv" else "sheet",
+            "value": covered[0].isoformat(),
+        }
+        assert header == ["DriverNumber", *(definition.code for definition in fixture["definitions"])]
+        assert all(len(row) == 15 for row in rows)
+        assert combined_column_count([header]) == 15
+        assert combined_column_count([header]) <= DEFAULT_PRODUCT_POLICY.max_import_combined_columns
+        canonical = extract_canonical_file(payload, name)
+        assert canonical["canonical_byte_count"] <= DEFAULT_PRODUCT_POLICY.max_import_canonical_file_bytes
+
+        day_strings = [day.isoformat() for day in fixture["days"]]
+        review = {
+            "recognized_day_count": 1, "recognized_days": day_strings[:1],
+            "recognized_days_truncated": False, "missing_coverage_count": 30,
+            "missing_coverage_days": day_strings[1:], "missing_coverage_days_truncated": False,
+            "unresolved_row_count": 0, "overlap_unit_day_count": 0,
+            "overlap_unit_days": [], "overlap_unit_days_truncated": False,
+            "units": [{"recognized_day_count": 1, "unresolved_row_count": 0}],
+        }
+        coverage = check_date_review(scenario, fixture, review, 1, 512)
+        assert coverage["authority"] == {"single_day_csv": "filename", "single_day_xlsx": "sheet"}[scenario]
+        assert coverage["period_days"] == 31
+        assert coverage["supplied_days"] == 1
+        assert coverage["missing_coverage_count"] == 30
+        assert scenario_coverage(scenario)["final_revised_contract_acceptance"] is False
+
+
+def test_single_day_workloads_follow_current_name_candidate_selection_path():
+    day_value = "2026-01-01"
+    for scenario, file, unit, expected in (
+        ("single_day_csv", {"type": "csv"},
+         {"inspection": {"filename_date_candidates": [day_value]}},
+         {"kind": "filename", "value": day_value}),
+        ("single_day_xlsx", {"type": "xlsx"},
+         {"inspection": {"unit_date_candidates": [day_value]}},
+         {"kind": "sheet", "value": day_value}),
+    ):
+        assert date_source_for_unit(scenario, file, unit) == expected
+
+
+def test_single_day_cli_dispatches_only_its_two_scenarios_without_workload_calls(monkeypatch):
+    calls = []
+    monkeypatch.setattr("scripts.benchmark_import_files.run_scenarios",
+                        lambda scenarios, output: calls.append((tuple(scenarios), output)))
+    monkeypatch.setattr("scripts.benchmark_import_files.private_database",
+                        lambda: pytest.fail("Grouped selection must not create a database in the parent."))
+    monkeypatch.setattr("sys.argv", ["benchmark_import_files", "--scenario", "single_day",
+                                      "--output", "single-day.json"])
+    main()
+    assert calls == [(SINGLE_DAY_SCENARIOS, Path("single-day.json"))]
+
+    calls.clear()
+    monkeypatch.setattr("sys.argv", ["benchmark_import_files", "--scenario", "single_day",
+                                      "--profile-cleanup", "--output", "unused.json"])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 2
+    assert calls == []
 
 
 def test_current_generated_workloads_fit_default_import_policy():

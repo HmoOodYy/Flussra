@@ -40,6 +40,9 @@ CAPABILITY_SCENARIOS = ("current_target_mapping_csv", "current_identity_csv", "c
 ACCEPTANCE_SCENARIOS = ("current_completed_repeat_csv", "current_partial_overlap_csv",
                         "current_canonical_byte_boundary_csv")
 CURRENT_SCENARIOS = (*BASE_CURRENT_SCENARIOS, *CAPABILITY_SCENARIOS, *ACCEPTANCE_SCENARIOS)
+SINGLE_DAY_SCENARIOS = ("single_day_csv", "single_day_xlsx")
+CURRENT_POLICY_SCENARIOS = (*CURRENT_SCENARIOS, *SINGLE_DAY_SCENARIOS)
+SCENARIO_GROUPS = {"current": CURRENT_SCENARIOS, "single_day": SINGLE_DAY_SCENARIOS, "all": SCENARIOS}
 # Drivers in the period Branch, Pay Item definitions, period days, Company Drivers outside that Branch.
 CURRENT_DIMENSIONS = {"current_target_mapping_csv": (150, 10, 31, 0), "current_identity_csv": (150, 4, 31, 1500),
                       "current_date_column_csv": (150, 6, 31, 0), "current_filename_dates_csv": (150, 6, 31, 0),
@@ -47,10 +50,13 @@ CURRENT_DIMENSIONS = {"current_target_mapping_csv": (150, 10, 31, 0), "current_i
                       "current_completed_repeat_csv": (150, 14, 31, 0),
                       "current_partial_overlap_csv": (150, 6, 31, 0),
                       # One uploaded day is measured within a normal 31-day setup period.
-                      "current_canonical_byte_boundary_csv": (150, 1, 31, 0)}
+                      "current_canonical_byte_boundary_csv": (150, 1, 31, 0),
+                      "single_day_csv": (150, 14, 31, 0), "single_day_xlsx": (150, 14, 31, 0)}
 # One day is deliberately absent so the Date review reports missing coverage.
 DATE_AUTHORITIES = {"current_date_column_csv": "column", "current_filename_dates_csv": "filename",
                     "current_sheet_dates_xlsx": "sheet"}
+SINGLE_DAY_DATE_AUTHORITIES = {"single_day_csv": "filename", "single_day_xlsx": "sheet"}
+DATE_AUTHORITIES_BY_SCENARIO = {**DATE_AUTHORITIES, **SINGLE_DAY_DATE_AUTHORITIES}
 MISSING_COVERAGE_DAY_INDEX = 10
 COLUMN_DATE_FILE_DAYS = 7
 STRUCTURAL_HEADERS = ("DriverNumber", "DriverName", "WorkDate")
@@ -67,14 +73,14 @@ NOT_COVERED = ("Successful Import completion/application and active rule-head pr
 
 
 def scenario_dimensions(scene):
-    return (CURRENT_DIMENSIONS.get(scene, (150, 14, 31, 0)) if scene in CURRENT_SCENARIOS else
+    return (CURRENT_DIMENSIONS.get(scene, (150, 14, 31, 0)) if scene in CURRENT_POLICY_SCENARIOS else
             (20, 4, 7, 0) if scene == "representative_csv" else
             (1000, 20, 10, 0) if scene in ("rare_csv", "issue_heavy_csv") else (150, 20, 31, 0))
 
 
 def scenario_covered_days(scene, days):
     """Days with source rows, including the single-day canonical-boundary file."""
-    if scene == "current_canonical_byte_boundary_csv":
+    if scene == "current_canonical_byte_boundary_csv" or scene in SINGLE_DAY_SCENARIOS:
         return list(days[:1])
     return [day for index, day in enumerate(days)
             if not (scene in DATE_AUTHORITIES and index == MISSING_COVERAGE_DAY_INDEX)]
@@ -337,7 +343,14 @@ def source_files(scene, fixture):
             return [("monthly.xlsx", buffer.getvalue())]
         finally:
             book.close()
-    if scene in CURRENT_SCENARIOS:
+    if scene in SINGLE_DAY_SCENARIOS:
+        day = days[0]
+        if scene == "single_day_csv":
+            return [(f"{day.isoformat()}.csv", csv_bytes(definitions, [day], date_column=False))]
+        return [(f"{day.isoformat()}.xlsx", _xlsx_bytes(day.isoformat(),
+                ["DriverNumber", *[definition.code for definition in definitions]],
+                ([driver["drivernumber"], *[1 for _ in definitions]] for driver in drivers)))]
+    if scene in CURRENT_POLICY_SCENARIOS:
         if scene == "current_daily_xlsx":
             from openpyxl import Workbook
             files = []
@@ -645,6 +658,20 @@ def filename_date_selection(_unit):
     return {"kind": "filename"}
 
 
+def date_source_for_unit(scene, file, unit):
+    """Choose the same date authority path as current workloads for inferred-name cases."""
+    authority = DATE_AUTHORITIES.get(scene)
+    if authority == "column":
+        return {"kind": "column"}
+    if authority:
+        return {"kind": authority}
+    candidates = unit["inspection"]["filename_date_candidates" if file["type"] == "csv"
+                                  else "unit_date_candidates"]
+    if len(candidates) != 1:
+        raise AssertionError(candidates)
+    return {"kind": "filename" if file["type"] == "csv" else "sheet", "value": candidates[0]}
+
+
 async def measure_completed_repeat(*, client, engine, tenant, period, fixture, baseline_import_id, original_files,
                                    ordinary_path, phases, preview_once, resources):
     """Measure completed-receipt matching after a real Manual edit, without an apply route."""
@@ -948,10 +975,10 @@ def check_date_review(scene, fixture, review, unit_count, sample_limit):
     assert len(review["units"]) == unit_count
     assert sum(item["recognized_day_count"] for item in review["units"]) == len(covered)
     assert all(item["unresolved_row_count"] == 0 for item in review["units"])
-    expects_missing = (scene in DATE_AUTHORITIES or
+    expects_missing = (scene in DATE_AUTHORITIES_BY_SCENARIO or
                        scene == "current_canonical_byte_boundary_csv")
     assert bool(missing) == expects_missing
-    return {"authority": DATE_AUTHORITIES.get(scene), "sample_limit": sample_limit,
+    return {"authority": DATE_AUTHORITIES_BY_SCENARIO.get(scene), "sample_limit": sample_limit,
             "period_days": len(days), "supplied_days": len(covered),
             "recognized_day_count": review["recognized_day_count"], "recognized_days_sampled": len(review["recognized_days"]),
             "recognized_days_truncated": review["recognized_days_truncated"],
@@ -967,7 +994,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
     from app.imports.retention import purge_payroll_work_import_details
     from tests.payroll_runtime_fixtures import force_status
 
-    current = scene in CURRENT_SCENARIOS
+    current = scene in CURRENT_POLICY_SCENARIOS
     dimensions = scenario_dimensions(scene)
     async with application(dsn) as (client, engine, _app):
         fixture = await seed_period(client, engine, dsn, drivers=dimensions[0], definitions=dimensions[1],
@@ -1098,15 +1125,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 units = []
                 for file in upload["files"]:
                     for unit in file["units"]:
-                        if authority == "column":
-                            source = {"kind": "column"}
-                        elif authority:
-                            # No year in the name: the selected authority is interpreted against the period days.
-                            source = {"kind": authority}
-                        else:
-                            candidates = unit["inspection"]["filename_date_candidates" if file["type"] == "csv" else "unit_date_candidates"]
-                            assert len(candidates) == 1, candidates
-                            source = {"kind": "filename" if file["type"] == "csv" else "sheet", "value": candidates[0]}
+                        source = date_source_for_unit(scene, file, unit)
                         units.append({"source_unit_id": unit["source_unit_id"], "selected": True, "date_source": source})
                 size, send = json_request(client, "PUT", f"/payroll/imports/{iid}/interpretation",
                     {"expected_revision": upload["revision"], "units": units}, tenant.admin)
@@ -1472,7 +1491,7 @@ def scenario_coverage(scene):
             "canonical_byte_measurement": True, "combined_column_enforcement": True,
             "per_target_mapping_direct_and_sum": scene == "current_target_mapping_csv",
             "driver_identity_discovery": scene == "current_identity_csv",
-            "date_authority_inference_and_review": scene in DATE_AUTHORITIES,
+            "date_authority_inference_and_review": scene in DATE_AUTHORITIES_BY_SCENARIO,
             "repeated_rows_and_categories": scene == "current_repeated_rows_csv",
             "completed_input_repeat_after_manual_edit": scene == "current_completed_repeat_csv",
             "partial_column_overlap": scene == "current_partial_overlap_csv",
@@ -1495,21 +1514,25 @@ def run_scenarios(scenes, output):
     output.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 
+def scenarios_for_selection(selection):
+    """Expand only named scenario groups; keep the current acceptance set stable."""
+    return SCENARIO_GROUPS.get(selection, (selection,))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--scenario", choices=(*SCENARIOS, *CURRENT_SCENARIOS, "current", "all"),
+    parser.add_argument("--scenario", choices=(*SCENARIOS, *CURRENT_SCENARIOS,
+                                                 *SINGLE_DAY_SCENARIOS, "current", "single_day", "all"),
                         default="current", help="Current supported shapes by default; named legacy presets are reference workloads.")
     parser.add_argument("--profile-cleanup", action="store_true",
                         help="Instrument real group deletion/FK lookup with EXPLAIN ANALYZE (extra overhead).")
     parser.add_argument("--output", type=Path, default=ROOT / ".artifacts/import-batch-benchmark.json")
     args = parser.parse_args()
-    if args.profile_cleanup and args.scenario in ("all", "current"):
+    if args.profile_cleanup and args.scenario in SCENARIO_GROUPS:
         parser.error("Use --profile-cleanup with one explicit scenario.")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    if args.scenario == "all":
-        run_scenarios(SCENARIOS, args.output)
-    elif args.scenario == "current":
-        run_scenarios(CURRENT_SCENARIOS, args.output)
+    if args.scenario in SCENARIO_GROUPS:
+        run_scenarios(scenarios_for_selection(args.scenario), args.output)
     else:
         with private_database() as dsn:
             result = asyncio.run(measure(args.scenario, dsn, profile_cleanup=args.profile_cleanup))
