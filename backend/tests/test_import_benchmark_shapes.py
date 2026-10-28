@@ -33,6 +33,7 @@ from scripts.benchmark_import_files import (
     canonical_boundary_payloads,
     category_excluded,
     category_label,
+    check_date_review,
     filename_date_selection,
     identity_kind,
     mapping_expected,
@@ -44,6 +45,7 @@ from scripts.benchmark_import_files import (
     run_scenarios,
     scenario_coverage,
     scenario_covered_days,
+    scenario_dimensions,
     source_files,
     target_mapping_plan,
     written_date,
@@ -381,8 +383,16 @@ def test_canonical_boundary_mapping_explicitly_ignores_padded_notes_column():
 
 
 def test_canonical_boundary_workload_constructs_exact_and_one_byte_over_files():
+    assert scenario_dimensions("current_canonical_byte_boundary_csv") == (150, 1, 31, 0)
     fixture = _scenario_fixture("current_canonical_byte_boundary_csv")
+    assert len(fixture["days"]) == 31
+    covered = scenario_covered_days("current_canonical_byte_boundary_csv", fixture["days"])
+    assert covered == fixture["days"][:1]
+    files = source_files("current_canonical_byte_boundary_csv", fixture)
+    assert len(files) == 1 and files[0][0] == f"{covered[0].isoformat()}.csv"
+
     exact, over, evidence = canonical_boundary_payloads(fixture)
+    assert files[0][1] == exact
     accepted = extract_canonical_file(exact, "2026-01-01.csv")
     assert accepted["canonical_byte_count"] == DEFAULT_PRODUCT_POLICY.max_import_canonical_file_bytes
     assert evidence["accepted_canonical_bytes"] == accepted["canonical_byte_count"]
@@ -393,6 +403,26 @@ def test_canonical_boundary_workload_constructs_exact_and_one_byte_over_files():
         extract_canonical_file(over, "2026-01-01.csv")
     assert exc.value.code == "IMPORT_CANONICAL_FILE_TOO_LARGE"
     assert scenario_coverage("current_canonical_byte_boundary_csv")["canonical_byte_boundary_admission"] is True
+
+    days = [day.isoformat() for day in fixture["days"]]
+    review = {
+        "recognized_day_count": 1,
+        "recognized_days": days[:1],
+        "recognized_days_truncated": False,
+        "missing_coverage_count": 30,
+        "missing_coverage_days": days[1:],
+        "missing_coverage_days_truncated": False,
+        "unresolved_row_count": 0,
+        "overlap_unit_day_count": 0,
+        "overlap_unit_days": [],
+        "overlap_unit_days_truncated": False,
+        "units": [{"recognized_day_count": 1, "unresolved_row_count": 0}],
+    }
+    coverage = check_date_review("current_canonical_byte_boundary_csv", fixture, review, 1, 512)
+    assert coverage["period_days"] == 31
+    assert coverage["supplied_days"] == 1
+    assert coverage["recognized_day_count"] == 1
+    assert coverage["missing_coverage_count"] == 30
 
 
 def test_async_benchmark_phase_timer_includes_awaited_snapshot_work():

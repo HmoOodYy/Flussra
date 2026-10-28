@@ -7,7 +7,13 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
-from scripts.benchmark_import_files import canonical_workload_snapshot, import_staging_snapshot
+from scripts.benchmark_import_files import (
+    canonical_workload_snapshot,
+    import_staging_snapshot,
+    scenario_covered_days,
+    scenario_dimensions,
+)
+from scripts.import_benchmark_support import seed_period
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     create_definition,
     grant_applicability,
@@ -113,6 +119,25 @@ async def test_benchmark_snapshots_use_current_draft_and_evidence_ownership_colu
     assert "payitemid" not in evidence
     assert after["rule_heads"] == before["rule_heads"]
     assert await canonical_workload_snapshot(p3c_engine, tenant, period_id) == after
+
+
+async def test_canonical_boundary_fixture_seeds_a_legal_month_period(
+    p3c_client, p3c_engine, tenant,
+):
+    scene = "current_canonical_byte_boundary_csv"
+    drivers, definitions, period_days, outside_drivers = scenario_dimensions(scene)
+    assert (drivers, definitions, period_days, outside_drivers) == (150, 1, 31, 0)
+
+    fixture = await seed_period(
+        p3c_client, p3c_engine, tenant.dsn,
+        drivers=drivers, definitions=definitions, days=period_days,
+        outside_drivers=outside_drivers,
+    )
+
+    assert len(fixture["days"]) == 31
+    assert len(fixture["drivers"]) == 150
+    assert len(fixture["definitions"]) == 1
+    assert len(scenario_covered_days(scene, fixture["days"])) == 1
 
 
 async def test_money_and_review_flags_are_not_accepted_as_input(p3c_client, p3c_engine, tenant):

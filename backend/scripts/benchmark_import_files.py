@@ -46,7 +46,8 @@ CURRENT_DIMENSIONS = {"current_target_mapping_csv": (150, 10, 31, 0), "current_i
                       "current_sheet_dates_xlsx": (150, 6, 31, 0), "current_repeated_rows_csv": (150, 3, 31, 0),
                       "current_completed_repeat_csv": (150, 14, 31, 0),
                       "current_partial_overlap_csv": (150, 6, 31, 0),
-                      "current_canonical_byte_boundary_csv": (150, 1, 1, 0)}
+                      # One uploaded day is measured within a normal 31-day setup period.
+                      "current_canonical_byte_boundary_csv": (150, 1, 31, 0)}
 # One day is deliberately absent so the Date review reports missing coverage.
 DATE_AUTHORITIES = {"current_date_column_csv": "column", "current_filename_dates_csv": "filename",
                     "current_sheet_dates_xlsx": "sheet"}
@@ -72,7 +73,9 @@ def scenario_dimensions(scene):
 
 
 def scenario_covered_days(scene, days):
-    """Days that carry source rows; date scenarios omit one day on purpose."""
+    """Days with source rows, including the single-day canonical-boundary file."""
+    if scene == "current_canonical_byte_boundary_csv":
+        return list(days[:1])
     return [day for index, day in enumerate(days)
             if not (scene in DATE_AUTHORITIES and index == MISSING_COVERAGE_DAY_INDEX)]
 
@@ -945,11 +948,15 @@ def check_date_review(scene, fixture, review, unit_count, sample_limit):
     assert len(review["units"]) == unit_count
     assert sum(item["recognized_day_count"] for item in review["units"]) == len(covered)
     assert all(item["unresolved_row_count"] == 0 for item in review["units"])
-    assert bool(missing) == (scene in DATE_AUTHORITIES)
+    expects_missing = (scene in DATE_AUTHORITIES or
+                       scene == "current_canonical_byte_boundary_csv")
+    assert bool(missing) == expects_missing
     return {"authority": DATE_AUTHORITIES.get(scene), "sample_limit": sample_limit,
+            "period_days": len(days), "supplied_days": len(covered),
             "recognized_day_count": review["recognized_day_count"], "recognized_days_sampled": len(review["recognized_days"]),
             "recognized_days_truncated": review["recognized_days_truncated"],
             "missing_coverage_count": review["missing_coverage_count"], "missing_coverage_days": review["missing_coverage_days"],
+            "missing_coverage_days_truncated": review["missing_coverage_days_truncated"],
             "overlap_unit_day_count": review["overlap_unit_day_count"], "units": len(review["units"]),
             "unit_recognized_day_counts": sorted({item["recognized_day_count"] for item in review["units"]})}
 
@@ -1286,6 +1293,10 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 scenario_checks["canonical_boundary"] = {
                     **canonical_boundary, "effective_product_limit_bytes": policy_metadata["product_policy"][
                         "max_import_canonical_file_bytes"],
+                    "period_days": len(fixture["days"]),
+                    "supplied_days": len(scenario_covered_days(scene, fixture["days"])),
+                    "missing_coverage_count": (len(fixture["days"])
+                        - len(scenario_covered_days(scene, fixture["days"]))),
                     "accepted_preview_counts": refreshed["preview"]["counts"],
                     "accepted_preview_seconds": initial["request_seconds"],
                     "accepted_refresh_seconds": refresh["request_seconds"],
