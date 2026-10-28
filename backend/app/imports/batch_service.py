@@ -71,6 +71,11 @@ from app.imports.preview_store import persist_preview, prepare_preview
 from app.imports.readmodels import bounded_page
 from app.imports.rules import current_rule_context
 from app.imports.runtime import admission, authorize, failure
+from app.imports.semantic_identity import (
+    SEMANTIC_INPUT_VERSION,
+    SemanticInputError,
+    validate_target_receipt,
+)
 from app.imports.staging import clear_derived_state
 from app.imports.target_mapping import (
     ensure_duplicate_outcomes,
@@ -267,6 +272,64 @@ async def _frozen_period_days(db: AsyncConnection, company_id: int, period_id: i
         SELECT WorkDate FROM payroll.PayrollPeriodDays
         WHERE CompanyID=:cid AND PayrollPeriodID=:pid ORDER BY WorkDate
     """), {"cid": company_id, "pid": period_id})).scalars())
+
+
+async def _completed_receipt_snapshot(db: AsyncConnection, *, company_id: int, branch_id: int,
+                                      period_id: int, policy: ImportResourcePolicy) -> list[dict]:
+    bounds = (await db.execute(text("""
+        SELECT count(*) AS import_count,
+            COALESCE(sum(octet_length((w.ReviewSummary->'semantic_input_receipt')::text)), 0) AS byte_count
+        FROM import.Imports i JOIN import.PayrollWorkImports w
+          ON w.ImportID=i.ImportID AND w.CompanyID=i.CompanyID
+        WHERE i.CompanyID=:cid AND i.BranchID=:bid AND w.PayrollPeriodID=:pid
+          AND i.Status='Completed' AND w.ReviewSummary ? 'semantic_input_receipt'
+    """), {"cid": company_id, "bid": branch_id, "pid": period_id})).mappings().one()
+    if (bounds["import_count"] > policy.max_completed_lookup_imports
+            or bounds["byte_count"] > policy.max_completed_lookup_bytes):
+        raise failure("IMPORT_REPEAT_LOOKUP_LIMIT_EXCEEDED",
+                      "Completed Import repeat evidence exceeds the configured lookup limit. No partial repeat check was used.", 409)
+    rows = (await db.execute(text("""
+        SELECT i.ImportID, i.CompletedByUserID, i.CompletedAtUtc,
+            w.ReviewSummary->'semantic_input_receipt' AS Receipt
+        FROM import.Imports i JOIN import.PayrollWorkImports w
+          ON w.ImportID=i.ImportID AND w.CompanyID=i.CompanyID
+        WHERE i.CompanyID=:cid AND i.BranchID=:bid AND w.PayrollPeriodID=:pid
+          AND i.Status='Completed' AND w.ReviewSummary ? 'semantic_input_receipt'
+        ORDER BY i.CompletedAtUtc, i.ImportID
+    """), {"cid": company_id, "bid": branch_id, "pid": period_id})).mappings().all()
+    result = []
+    expected_scope = {"company_id": company_id, "branch_id": branch_id, "period_id": period_id}
+    for row in rows:
+        receipt = row["receipt"]
+        if (not isinstance(receipt, dict) or set(receipt) != {"version", "targets"}
+                or type(receipt["version"]) is not int
+                or receipt["version"] != SEMANTIC_INPUT_VERSION
+                or not isinstance(receipt["targets"], list)):
+            raise failure("IMPORT_REPEAT_RECEIPT_UNSUPPORTED",
+                          "A completed Import has malformed or unsupported repeat evidence; no partial match was used.", 409)
+        targets = []
+        seen = set()
+        for item in receipt["targets"]:
+            try:
+                validated = validate_target_receipt(item)
+            except SemanticInputError as exc:
+                raise failure("IMPORT_REPEAT_RECEIPT_UNSUPPORTED",
+                              "A completed Import has malformed or unsupported repeat evidence; no partial match was used.", 409) from exc
+            if validated["scope"] != expected_scope or validated["pay_definition_id"] in seen:
+                raise failure("IMPORT_REPEAT_RECEIPT_UNSUPPORTED",
+                              "A completed Import repeat receipt has inconsistent scope or duplicate targets.", 409)
+            seen.add(validated["pay_definition_id"])
+            targets.append(validated)
+        result.append({"import_id": row["importid"], "completed_by_user_id": row["completedbyuserid"],
+                       "completed_at": row["completedatutc"], "targets": targets})
+    return result
+
+
+def _repeat_history_token(snapshot: list[dict]) -> str:
+    return fingerprint("completed-import-repeat-history", [
+        {"import_id": item["import_id"], "completed_by_user_id": item["completed_by_user_id"],
+         "completed_at": item["completed_at"], "targets": item["targets"]}
+        for item in snapshot])
 
 
 async def header_labels(db: AsyncConnection, cid: int, pid: int) -> list[str]:
@@ -501,6 +564,19 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
                                    "file_ordinal": unit["fileordinal"],
                                    "count": details["headed_column_count"]}
                                   for unit, details in unit_headers] if headers_available else None)}
+    stored_summary = row["reviewsummary"] or {}
+    repeat_summary = stored_summary.get("repeat_notice") or {
+        "state": "None", "matched_target_count": 0, "supplied_target_count": 0, "targets": []}
+    repeat_targets = {item.get("target"): item for item in repeat_summary.get("targets", [])
+                      if isinstance(item, dict) and isinstance(item.get("target"), str)}
+    for target in target_page:
+        state = target.get("rule_state")
+        if state is not None:
+            state["repeat_notice"] = repeat_targets.get(target["target"])
+    public_summary = {key: value for key, value in stored_summary.items()
+                      if key not in {"semantic_input_receipt", "date_review_full"}}
+    public_summary["repeat_notice"] = {key: value for key, value in repeat_summary.items()
+                                       if key != "targets"}
     result = {
         "import_id": row["importid"], "company_id": row["companyid"], "branch_id": row["branchid"],
         "period_id": row["payrollperiodid"], "import_kind": row["importkind"],
@@ -541,7 +617,7 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
         "header_structure": header_structure,
         "preview": {"mapping_fingerprint": row["mappingfingerprint"],
             "content_fingerprint": row["contentfingerprint"], "plan_fingerprint": row["planfingerprint"],
-            "counts": row["previewcounts"], "summary": row["reviewsummary"]},
+            "counts": row["previewcounts"], "summary": public_summary},
     }
     return _enforce_metadata_response_bound(result, policy.max_response_bytes)
 
@@ -1838,6 +1914,8 @@ def _layout_rule_mappings(layouts, units, pending_rules):
             quantity_rules.setdefault(layout_id, []).append({
                 "target": target, "transform": payload["transform"], "columns": columns,
                     "source_signature": {"inputs": payload["inputs"]},
+                    "inputs": payload["inputs"],
+                    "shared_columns": payload["shared_columns"],
                     "row_handling": payload.get("row_handling"),
                     "filter_selector": payload["shared_columns"].get("Filter"),
             })
@@ -2575,8 +2653,11 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
     policy = _policy(request)
     started_rule_context = None
     pending_rules = None
+    completed_imports = None
+    repeat_history_token = None
     async with admission(request):
         async with engine.begin() as db:
+            await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
             row = await load_import(db, cid, iid)
             period = await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
             if row["revision"] != body.expected_revision:
@@ -2587,6 +2668,10 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
             files, units, layouts = await load_sources(db, cid, iid, include_canonical=True)
             period_days = await _frozen_period_days(db, cid, period.payroll_period_id)
+            completed_imports = await _completed_receipt_snapshot(
+                db, company_id=cid, branch_id=period.branch_id,
+                period_id=period.payroll_period_id, policy=policy)
+            repeat_history_token = _repeat_history_token(completed_imports)
             started_rule_context = await current_rule_context(db, cid, iid)
             pending_rules = [dict(item) for item in (await db.execute(text("""
                 SELECT p.PayDefinitionID, p.PayrollPeriodDefinitionID, r.RulePayload, origin.Status AS OriginStatus
@@ -2614,7 +2699,8 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
         if set(context["days"]) != set(period_days):
             raise failure("IMPORT_CONTEXT_STALE", "The frozen period-day snapshot changed while dates were being interpreted. Refresh and retry.")
         context_token = fingerprint("relational-context", context_identity(context))
-        result = await anyio.to_thread.run_sync(partial(build_batch_preview, materialized, context, policy=policy))
+        result = await anyio.to_thread.run_sync(partial(
+            build_batch_preview, materialized, context, policy=policy, completed_imports=completed_imports))
         definitions = context["definitions"]
         inspection_updates = []
         for source in materialized:
@@ -2635,6 +2721,12 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             if published_rule_context != started_rule_context:
                 raise failure("IMPORT_RULE_CONTEXT_STALE",
                               "Saved mapping rules changed while the preview was being prepared. Refresh and retry.")
+            published_completed_imports = await _completed_receipt_snapshot(
+                db, company_id=cid, branch_id=period.branch_id,
+                period_id=period.payroll_period_id, policy=policy)
+            if _repeat_history_token(published_completed_imports) != repeat_history_token:
+                raise failure("IMPORT_REPEAT_HISTORY_STALE",
+                              "Completed Import history changed while this preview was prepared. Refresh and retry.")
             current_context = await load_context(db, cid, period, dates=dates, identifiers=identifiers,
                                                 resource_policy=policy)
             if fingerprint("relational-context", context_identity(current_context)) != context_token:

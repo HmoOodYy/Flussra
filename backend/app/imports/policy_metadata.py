@@ -56,6 +56,8 @@ class ImportResourcePolicyResponse(BaseModel):
     identity_lookup_batch_rows: int = Field(strict=True, ge=1)
     category_page_default: int = Field(strict=True, ge=1)
     category_page_max: int = Field(strict=True, ge=1)
+    max_completed_lookup_imports: int = Field(strict=True, ge=1)
+    max_completed_lookup_bytes: int = Field(strict=True, ge=1)
     max_response_bytes: int = Field(strict=True, ge=1)
     row_page_default: int = Field(strict=True, ge=1)
     row_page_max: int = Field(strict=True, ge=1)

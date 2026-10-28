@@ -123,7 +123,8 @@ async def load_context(db, cid: int, period, *, dates=None, identifiers=None,
         [row["driverassignmentid"] for row in roster], db)
     date_filter = "AND workdate = ANY(CAST(:dates AS date[]))" if dates is not None else ""
     lines = [dict(row) for row in (await db.execute(text(f"""
-        SELECT driverassignmentid, workdate, payrollperioddefinitionid, quantity
+        SELECT draftlineid, driverassignmentid, workdate, payrollperioddefinitionid, quantity,
+            sourcetype, addedbyuserid
         FROM payroll.payrolldraftlines
         WHERE companyid = :cid AND branchid = :bid AND payrollperiodid = :pid
             AND status <> 'Void' {date_filter}
@@ -154,10 +155,14 @@ async def load_context(db, cid: int, period, *, dates=None, identifiers=None,
         assignments_by_driver[entry["driverid"]].append(entry)
     day_map = {row["workdate"]: row["isconfiguredoffday"] for row in days}
     current_lines = {}
+    current_line_provenance = {}
     existing_source_dates = set()
     for line in lines:
         key = (line["driverassignmentid"], line["workdate"], line["payrollperioddefinitionid"])
         current_lines[key] = line["quantity"]
+        current_line_provenance[key] = {"source_type": line["sourcetype"],
+                                        "draft_line_id": line["draftlineid"],
+                                        "added_by_user_id": line["addedbyuserid"]}
         existing_source_dates.add(key[:2])
     entry_map = {}
     for entry in entries:
@@ -169,6 +174,7 @@ async def load_context(db, cid: int, period, *, dates=None, identifiers=None,
             "name_match_summaries": name_matches,
             "assignments_by_driver": assignments_by_driver, "live_days": live,
             "current_lines": current_lines, "existing_source_dates": existing_source_dates,
+            "current_line_provenance": current_line_provenance,
             "entries": entry_map,
             "period": {"id": pid, "company_id": cid, "branch_id": bid, **business_scope,
                        "start": period.start_date, "end": period.end_date}}
@@ -176,13 +182,18 @@ async def load_context(db, cid: int, period, *, dates=None, identifiers=None,
 
 def context_identity(context) -> dict:
     derived = {"definition_by_id", "drivers_by_id", "identity_indexes", "assignments_by_driver",
-               "current_lines", "existing_source_dates"}
+               "current_lines", "current_line_provenance", "existing_source_dates"}
     identity = {key: ([vars(d) for d in value] if key == "definitions" else value)
                 for key, value in context.items() if key not in derived}
     identity["current_lines"] = sorted((
         {"driver_assignment_id": assignment_id, "work_date": work_date.isoformat(),
          "definition_id": definition_id, "quantity": canonical(quantity)}
         for (assignment_id, work_date, definition_id), quantity in context["current_lines"].items()
+    ), key=encoded)
+    identity["current_line_provenance"] = sorted((
+        {"driver_assignment_id": assignment_id, "work_date": work_date.isoformat(),
+         "definition_id": definition_id, **provenance}
+        for (assignment_id, work_date, definition_id), provenance in context["current_line_provenance"].items()
     ), key=encoded)
     identity["existing_source_dates"] = sorted((
         {"driver_assignment_id": assignment_id, "work_date": work_date.isoformat()}

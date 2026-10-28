@@ -15,6 +15,7 @@ from app.imports.aggregation import (
 )
 from app.imports.date_interpretation import interpret_date, make_date_profile
 from app.imports.errors import ImportFailure
+from app.imports.headers import normalize_header
 from app.imports.identity import resolve_row_identity
 from app.imports.mapping import (
     IDENTIFIERS,
@@ -37,6 +38,12 @@ from app.imports.mapping import (
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
 from app.imports.quantity_math import exact_decimal_sum as _exact_decimal_sum
 from app.imports.quantity_math import parse_sum_operand
+from app.imports.semantic_identity import (
+    SemanticInputError,
+    TargetReceiptAccumulator,
+    canonical_rule_meaning,
+    matching_completed_receipts,
+)
 from app.payroll.definition_calculation import quantity_error
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
 
@@ -223,8 +230,8 @@ def _apply_row_handling(output_rows, definitions_by_target, context, issues, *, 
             contributions = []
             for row in members:
                 value = row["values"][target_id]
-                if value.get("contribution_error"):
-                    contributions.append({"state": "invalid", "error": value["contribution_error"]})
+                if value.get("source_quantity_error"):
+                    contributions.append({"state": "invalid", "error": value["source_quantity_error"]})
                 elif row["context"].get("category_invalid"):
                     contributions.append({"state": "invalid", "error": "Category value is invalid."})
                 elif mode == "FilterThenSum" and row["context"].get("category_decision") is None:
@@ -247,8 +254,8 @@ def _apply_row_handling(output_rows, definitions_by_target, context, issues, *, 
                 possible["values"][target_id]["is_candidate"] = False
                 possible["values"][target_id]["quantity"] = None
                 possible_value = possible["values"][target_id]
-                if possible_value.get("contribution_error"):
-                    contributions.append({"state": "invalid", "error": possible_value["contribution_error"]})
+                if possible_value.get("source_quantity_error"):
+                    contributions.append({"state": "invalid", "error": possible_value["source_quantity_error"]})
                 else:
                     contributions.append({"state": "unresolved_identity"})
             result = aggregate_quantity_contributions(
@@ -332,7 +339,7 @@ def _apply_row_handling(output_rows, definitions_by_target, context, issues, *, 
                              target_id=target_id)
 
 
-def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> dict:
+def build_batch_preview(sources: list[dict], context: dict, *, policy=None, completed_imports=None) -> dict:
     """Normalize selected source units together so duplicates span files/layouts."""
     definitions = context["definitions"]
     definitions_by_target = {target_key(item): item for item in definitions}
@@ -342,7 +349,10 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
     period = context["period"]
     output_rows: list[dict] = []
     issues: list[dict] = []
-    mapping_semantics = []
+    semantic_target_rules = defaultdict(dict)
+    semantic_target_accumulators = {}
+    semantic_target_expected = Counter()
+    target_content_tokens = defaultdict(list)
     data_rows = candidates = selected_cells = 0
 
     row_policy_meanings = {
@@ -402,6 +412,51 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             if target in definition_columns:
                 raise ImportFailure("IMPORT_MAPPING_DUPLICATE_TARGET", "A target rule was resolved more than once.", 422)
             definition_columns[target] = (definitions_by_target[target], rule)
+            definition = definitions_by_target[target]
+            def actual_selector(column, saved):
+                if column is None:
+                    return saved
+                header = inspection["header_cells"][int(column) - 1]
+                normalized = normalize_header(header)
+                occurrence = next((item for item in inspection.get("header_occurrences", [])
+                                   if item["source_column"] == int(column)), None)
+                selector = {"header": normalized}
+                if occurrence and occurrence.get("occurrence_count", 1) > 1:
+                    selector["occurrences"] = [{"occurrence_ordinal": occurrence["occurrence_ordinal"]}]
+                return selector
+            input_pairs = [(actual_selector(column, selector), column)
+                           for selector, column in zip(
+                               rule.get("inputs", rule.get("source_signature", {}).get("inputs", [])),
+                               rule.get("columns", []), strict=True)]
+            input_pairs.sort(key=lambda pair: encoded(pair[0]))
+            effective_inputs = [pair[0] for pair in input_pairs]
+            effective_columns = [pair[1] for pair in input_pairs]
+            date_authority = {"kind": source_date["kind"]}
+            if source_date["kind"] == "column":
+                work_date_column = next((column for column, role in mapped.items() if role == "WorkDate"), None)
+                date_authority["selector"] = actual_selector(
+                    work_date_column, rule.get("shared_columns", {}).get("WorkDate"))
+            semantic_shared = dict(rule.get("shared_columns", {}))
+            for role, selector in list(semantic_shared.items()):
+                role_column = next((column for column, mapped_role in mapped.items() if mapped_role == role), None)
+                semantic_shared[role] = actual_selector(role_column, selector)
+            try:
+                meaning = canonical_rule_meaning(
+                    target_meaning=definition_meaning(definition), transform=rule["transform"],
+                    inputs=effective_inputs,
+                    shared_columns=semantic_shared,
+                    row_handling=rule.get("row_handling") or {"mode": "RejectRepeated"},
+                    date_authority=date_authority)
+            except SemanticInputError:
+                meaning = None
+            semantic_target_rules[target][source.get("source_unit_id")] = {
+                "meaning": meaning, "columns": effective_columns}
+            if meaning is not None:
+                semantic_target_accumulators.setdefault(target, TargetReceiptAccumulator(
+                    scope={"company_id": period["company_id"], "branch_id": period["branch_id"],
+                           "period_id": period["id"]},
+                    pay_definition_id=definition.pay_definition_id,
+                    target_meaning=definition_meaning(definition), rule_meaning=meaning))
         date_column = next((column for column, target in mapped.items() if target == "WorkDate"), None)
         raw_rows = materialized["rows"]
         def has_operand(item, rule):
@@ -509,8 +564,6 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         source["date_profile"] = make_date_profile(source_date["kind"], date_order, date_results)
         source["date_resolved_values"] = sorted({item["resolved_date"] for item in date_results
                                                   if item.get("resolved_date")})
-        mapping_semantics.append({**source_contract, "file_ordinal": source["file_ordinal"],
-                                  "unit_name": source["unit_name"]})
         for source_row in raw_rows:
             cells = source_row["cells"]
             category_cell = cells.get(str(filter_column)) if filter_column is not None else None
@@ -700,6 +753,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
 
             values = {}
             semantic_values = {}
+            semantic_inputs = {}
             for target, (definition, rule) in definition_columns.items():
                 defid = str(definition.payroll_period_definition_id)
                 columns = rule["columns"]
@@ -743,6 +797,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 key = (assignment_id, date_value, definition.payroll_period_definition_id)
                 current_present = key in context["current_lines"] if assignment_id and date_value else False
                 current = context["current_lines"].get(key)
+                current_provenance = context["current_line_provenance"].get(key) if current_present else None
                 if error:
                     outcome = "Invalid"
                 elif is_blank:
@@ -798,10 +853,13 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                  "source_columns": source_columns, "transform": "Sum" if is_sum else "Direct",
                                  "raw_value": raw_value,
                                  "quantity": canonical(value), "is_blank": is_blank, "outcome": outcome,
+                                 "contribution_is_blank": is_blank,
                                  "current_quantity": canonical(current), "current_source_exists": current_present,
+                                 "current_provenance": current_provenance,
                                  "is_candidate": True,
                                  "contribution_quantity": canonical(value),
-                                 "contribution_error": error}
+                                 "contribution_error": error,
+                                 "source_quantity_error": source_quantity_error}
                 semantic_values[definition.code] = (
                     {"transform": "Sum" if is_sum else "Direct", "operands": raw_operands,
                      "blank": is_blank, "quantity": canonical(value), "error": source_quantity_error}
@@ -809,6 +867,43 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                     {"invalid": True, "raw_value": canonical(cell.get("value")), "kind": cell.get("kind"),
                      "formula": bool(cell.get("formula")), "missing_cache": bool(cell.get("missing_cache"))}
                 )
+                source_rule = semantic_target_rules[target].get(source.get("source_unit_id"), {})
+                if meaning := source_rule.get("meaning"):
+                    if not source_columns:
+                        continue
+                    input_selectors = meaning["inputs"]
+                    columns_by_selector = {encoded(selector): column for selector, column in
+                                           zip(input_selectors, source_rule["columns"], strict=True)}
+                    operands = []
+                    if is_sum:
+                        for selector in input_selectors:
+                            column = columns_by_selector[encoded(selector)]
+                            if column is None:
+                                operands.append({"selector": selector, "state": "absent"})
+                                continue
+                            operand_value, operand_error, operand_blank = parse_sum_operand(
+                                cells.get(str(column), _date_cell(None)))
+                            if operand_error:
+                                operands = []
+                                break
+                            operands.append({"selector": selector,
+                                "state": "blank" if operand_blank else "value",
+                                **({} if operand_blank else {"value": operand_value})})
+                    else:
+                        column = columns_by_selector[encoded(input_selectors[0])]
+                        if column is None:
+                            operands = []
+                        else:
+                            operand_value, operand_error, operand_blank = parse_sum_operand(
+                                cells.get(str(column), _date_cell(None)))
+                            if operand_error:
+                                operands = []
+                            else:
+                                operands = [{"selector": input_selectors[0],
+                                    "state": "blank" if operand_blank else "value",
+                                    **({} if operand_blank else {"value": operand_value})}]
+                    if operands:
+                        semantic_inputs[target] = {"rule_meaning": meaning, "operands": operands}
 
             source_semantics = {"identifiers": sorted((item["kind"], item["value"])
                                                         for item in identifiers),
@@ -820,6 +915,74 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                 "unit_kind": source.get("unit_kind"),
                                 "structure": source["structure_fingerprint"],
                                 "source_contract": source["row_contract_fingerprint"], "skipped": skipped}
+            for target in definition_columns:
+                value_key = str(definition_columns[target][0].payroll_period_definition_id)
+                if value_key not in values:
+                    continue
+                semantic_active = not skipped or identity_resolved and date_value is not None
+                if not semantic_active:
+                    continue
+                semantic_target_expected[target] += 1
+                source_rule = semantic_target_rules[target].get(source.get("source_unit_id"), {})
+                meaning = source_rule.get("meaning")
+                if meaning is not None:
+                    selector_columns = {encoded(selector): column for selector, column in
+                                        zip(meaning["inputs"], source_rule["columns"], strict=True)}
+                    business_operands = []
+                    for selector in meaning["inputs"]:
+                        column = selector_columns[encoded(selector)]
+                        if column is None:
+                            business_operands.append({"selector": selector, "state": "absent"})
+                            continue
+                        raw_cell = cells.get(str(column), _date_cell(None))
+                        operand_value, operand_error, operand_blank = parse_sum_operand(raw_cell)
+                        if operand_error:
+                            business_operands.append({"selector": selector, "state": "invalid",
+                                "raw_value": canonical(raw_cell.get("value")), "kind": raw_cell.get("kind"),
+                                "formula": bool(raw_cell.get("formula")),
+                                "missing_cache": bool(raw_cell.get("missing_cache"))})
+                        else:
+                            business_operands.append({"selector": selector,
+                                "state": "blank" if operand_blank else "value",
+                                **({} if operand_blank else {"value": operand_value})})
+                    input_identity = {"provided": sorted((item["kind"], item["value"])
+                                                          for item in identifiers)}
+                    target_business_record = {
+                        "rule": meaning, **input_identity,
+                        "date": date_value.isoformat() if date_value else source_date_value,
+                        "operands": business_operands,
+                        "source_error": semantic_values.get(definition_columns[target][0].code, {}).get("error"),
+                        "source_value_invalid": bool(semantic_values.get(
+                            definition_columns[target][0].code, {}).get("invalid")),
+                        "category": (None if category_key is None else
+                                     {"type": category_key[0], "value": category_key[1]}),
+                        "category_decision": category_decision,
+                    }
+                    target_content_tokens[target].append(fingerprint("semantic-target-row", target_business_record))
+                accumulator = semantic_target_accumulators.get(target)
+                semantic_input = semantic_inputs.get(target)
+                if accumulator is None or semantic_input is None or not identity_resolved or date_value is None:
+                    if accumulator is not None:
+                        accumulator.mark_invalid()
+                    continue
+                supplied = {item["kind"]: item["value"] for item in identifiers}
+                semantic_row = {
+                    **semantic_input, "state": "included", "identity_status": identity["status"],
+                    "requires_confirmation": identity_requires_confirmation,
+                    "driver": {"driver_number": supplied.get("DriverNumber"),
+                               "employee_key": supplied.get("EmployeeKey"),
+                               "name": supplied.get("DriverName")},
+                    "work_date": date_value.isoformat(),
+                    "category": (None if category_key is None else
+                                 {"type": category_key[0], "value": category_key[1]}),
+                    "category_decision": category_decision,
+                }
+                try:
+                    accumulator.add(semantic_row, ({"kind": item["kind"], "value": item["value"],
+                                                   "driver_id": driver_id} for item in identifiers
+                                                  if item["kind"] in IDENTIFIERS))
+                except SemanticInputError:
+                    accumulator.mark_invalid()
             row_fp = fingerprint("row", source_semantics)
             output_rows.append({
                 "file_ordinal": source["file_ordinal"], "unit_name": source["unit_name"],
@@ -864,13 +1027,136 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
 
     _apply_row_handling(output_rows, definitions_by_target, context, issues,
                         max_work_digits=(policy or DEFAULT_IMPORT_RESOURCE_POLICY).max_numeric_work_digits)
+    semantic_receipts = []
+    for target, expected in semantic_target_expected.items():
+        if expected < 1:
+            continue
+        accumulator = semantic_target_accumulators.get(target)
+        if accumulator is None:
+            continue
+        blocked_codes = {"IMPORT_DUPLICATE_FACT",
+                         "IMPORT_QUANTITY_INVALID",
+                         "IMPORT_CATEGORY_VALUE_INVALID", "IMPORT_CATEGORY_UNRESOLVED",
+                         "IMPORT_WORK_DATE_INVALID", "IMPORT_DRIVER_UNRESOLVED",
+                         "IMPORT_DRIVER_DISAGREEMENT", "IMPORT_DRIVER_NAME_DISCREPANCY",
+                         "IMPORT_DRIVER_CONFIRMATION_REQUIRED"}
+        if any(issue_item["code"] in blocked_codes and
+               (issue_item.get("_target_id") in {None, str(
+                   definitions_by_target[target].payroll_period_definition_id)}) for issue_item in issues):
+            continue
+        try:
+            receipt = accumulator.build()
+        except SemanticInputError:
+            continue
+        if receipt["record_count"] != expected:
+            continue
+        semantic_receipts.append(receipt)
+    completed_matches = matching_completed_receipts(semantic_receipts, completed_imports or [])
+    receipt_target = {definition.pay_definition_id: {
+        "target": f"Definition:{definition.payroll_period_definition_id}",
+        "value_key": str(definition.payroll_period_definition_id)} for definition in definitions}
+    repeat_notice = {"state": "None", "matched_target_count": 0,
+                     "supplied_target_count": len(semantic_target_expected), "targets": []}
+    if completed_matches:
+        current_by_pay_definition = {item["pay_definition_id"]: item for item in semantic_receipts}
+        for pay_definition_id, completed in completed_matches.items():
+            target_info = receipt_target.get(pay_definition_id)
+            if target_info is None:
+                continue
+            target_id = target_info["target"]
+            value_key = target_info["value_key"]
+            for row in output_rows:
+                value = row["values"].get(value_key)
+                if value is None:
+                    continue
+                value["outcome"] = "AlreadyImported"
+                value["action"] = "NoOp"
+                value["repeat_input_sha256"] = current_by_pay_definition[pay_definition_id]["input_sha256"]
+                if value.get("is_blank"):
+                    value["is_candidate"] = False
+                removable = {"IMPORT_NEW_SOURCE_NOT_ELIGIBLE", "IMPORT_VALUE_CONFLICT",
+                             "IMPORT_STATUS_DECISION_REQUIRED", "IMPORT_DAY_OFF_DECISION_REQUIRED"}
+                removed = [item for item in row["issues"]
+                           if item.get("_target_id") == value_key and item["code"] in removable]
+                for item in removed:
+                    row["issues"].remove(item)
+                    if item in issues:
+                        issues.remove(item)
+            repeat_notice["targets"].append({
+                "target": target_id, "pay_definition_id": pay_definition_id,
+                "prior_import_id": completed["import_id"],
+                "completed_by_user_id": completed.get("completed_by_user_id"),
+                "completed_at": completed.get("completed_at"),
+            })
+            definition = next(item for item in definitions if item.pay_definition_id == pay_definition_id)
+            row_groups = defaultdict(list)
+            for row in output_rows:
+                value = row["values"].get(value_key)
+                if (value is not None and row["context"].get("identity_resolved")
+                        and row["driver_id"] is not None and row["work_date"] is not None
+                        and row["context"].get("row_handling", {}).get("mode") in {"SumRows", "FilterThenSum"}):
+                    row_groups[(row["driver_id"], row["work_date"])].append(row)
+            for members in row_groups.values():
+                if len(members) < 2:
+                    continue
+                members.sort(key=lambda item: (item["file_ordinal"], item["unit_name"], item["source_row"]))
+                contributions = []
+                for member in members:
+                    value = member["values"][value_key]
+                    if value.get("source_quantity_error"):
+                        contributions.append({"state": "invalid", "error": value["source_quantity_error"]})
+                    elif value.get("contribution_is_blank", value.get("is_blank")):
+                        contributions.append({"state": "blank"})
+                    else:
+                        contributions.append({"state": "present",
+                            "quantity": Decimal(str(value.get("contribution_quantity")))})
+                aggregate = aggregate_quantity_contributions(
+                    contributions, input_type=definition.input_type,
+                    max_work_digits=(policy or DEFAULT_IMPORT_RESOURCE_POLICY).max_numeric_work_digits)
+                for index, member in enumerate(members):
+                    value = member["values"][value_key]
+                    value["is_candidate"] = index == 0 and aggregate["status"] == "complete"
+                    value["aggregate_status"] = aggregate["status"]
+                    value["aggregate_reason"] = aggregate.get("reason")
+                    if index == 0 and aggregate["status"] == "complete":
+                        value["quantity"] = canonical(aggregate["quantity"])
+                        value["is_blank"] = False
+                    else:
+                        value["quantity"] = None
+                        value["is_blank"] = True
+        repeat_notice["matched_target_count"] = len(completed_matches)
+        repeat_notice["state"] = ("Complete" if len(completed_matches) == len(semantic_target_expected)
+                                   and bool(semantic_target_expected) else "Partial")
+        for row in output_rows:
+            target_ids = set(row["values"])
+            if target_ids and all(value.get("action") == "NoOp" for value in row["values"].values()):
+                assignment_errors = [item for item in row["issues"]
+                                     if item["code"] == "IMPORT_ASSIGNMENT_UNRESOLVED"]
+                for item in assignment_errors:
+                    row["issues"].remove(item)
+                    if item in issues:
+                        issues.remove(item)
+
     candidates = sum(value.get("is_candidate", False)
                      for row in output_rows for value in row["values"].values())
 
+
+    effective_rules = {}
+    for rules_by_unit in semantic_target_rules.values():
+        for rule in rules_by_unit.values():
+            meaning = rule.get("meaning")
+            if meaning is not None:
+                effective_rules[encoded(meaning)] = meaning
     mapping_fp = fingerprint("mapping", {"period": period_meaning(period),
-                                          "layouts": sorted(mapping_semantics, key=encoded)})
+                                          "rules": [effective_rules[key] for key in sorted(effective_rules)]})
+    target_content = []
+    for target, tokens in target_content_tokens.items():
+        if not tokens:
+            continue
+        meaning = semantic_target_accumulators[target].target_meaning
+        target_content.append({"target": meaning, "rows": sorted(tokens), "record_count": len(tokens)})
     content_fp = fingerprint("content", {"mapping": mapping_fp,
-                                          "rows": sorted(row["row_fingerprint"] for row in output_rows)})
+                                          "targets": sorted(target_content, key=encoded)})
     assignment_meanings = {item["driverassignmentid"]: assignment_meaning(
         item, context["drivers_by_id"][item["driverid"]], period["branch_code"])
         for item in context["roster"] if item["driverid"] in context["drivers_by_id"]}
@@ -896,7 +1182,10 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                           "date": row["work_date"].isoformat() if row["work_date"] else None,
                           "values": {context["definition_by_id"][int(key)].code: {
                               "quantity": value["quantity"], "blank": value["is_blank"],
-                              "outcome": value["outcome"], "current": value["current_quantity"]}
+                              "outcome": value["outcome"], "action": value.get("action"),
+                              "repeat_input_sha256": value.get("repeat_input_sha256"),
+                              "current": value["current_quantity"],
+                              "current_source_type": (value.get("current_provenance") or {}).get("source_type")}
                               for key, value in row["values"].items()},
                           "status": row["context"].get("status_code"),
                           "day_off": row["context"].get("day_off")})
@@ -911,7 +1200,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                     "decisions": None, "confirmations": None})
     counts = Counter(rows=len(output_rows), skipped=sum(row["skipped"] for row in output_rows),
                      prepared_excluded_rows=sum("proposed_exclusion" in row["context"] for row in output_rows),
-                     errors=0, warnings=0, conflicts=0, new=0, unchanged=0, blank=0, invalid=0,
+                     errors=0, warnings=0, conflicts=0, new=0, unchanged=0, already_imported=0, blank=0, invalid=0,
                      unresolved=0, conflict_cells=0, error_rows=0, warning_rows=0, conflict_rows=0)
     for item in issues:
         counts[{"Error": "errors", "Warning": "warnings", "Conflict": "conflicts"}[item["severity"]]] += 1
@@ -921,8 +1210,12 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         counts["warning_rows"] += "Warning" in severities
         counts["conflict_rows"] += "Conflict" in severities
         for value in row["values"].values():
+            if not value.get("is_candidate", True):
+                continue
             outcome = value["outcome"].lower()
-            counts["conflict_cells" if value["outcome"] == "Conflict" else outcome] += 1
+            count_key = ("conflict_cells" if value["outcome"] == "Conflict" else
+                         "already_imported" if value["outcome"] == "AlreadyImported" else outcome)
+            counts[count_key] += 1
     groups = {}
     for row in output_rows:
         group = groups.setdefault(row["group_fingerprint"], {
@@ -987,4 +1280,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                  "date_source": s.get("date_source")}
                                 for s in sources],
             "candidates": candidates, "date_review": date_review_summary,
-            "date_rule_profiles": date_rule_profiles}
+            "date_review_full": {"recognized_days": recognized_days,
+                                 "missing_coverage_days": missing_days,
+                                 "overlap_unit_days": overlap_days},
+            "date_rule_profiles": date_rule_profiles,
+            "semantic_receipts": semantic_receipts, "repeat_notice": repeat_notice}

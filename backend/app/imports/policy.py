@@ -50,6 +50,8 @@ class ImportResourcePolicy:
     identity_lookup_batch_rows: int = 512
     category_page_default: int = 50
     category_page_max: int = 200
+    max_completed_lookup_imports: int = 1_000
+    max_completed_lookup_bytes: int = 4_000_000
 
     def __post_init__(self) -> None:
         for field in fields(self):

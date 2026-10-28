@@ -29,6 +29,7 @@ from app.imports.batch_service import (
 from app.imports.errors import ImportFailure
 from app.imports.policy_metadata import ImportPolicyMetadataResponse, read_period_import_policy
 from app.imports.readmodels import (
+    read_date_review,
     read_issues,
     read_rows,
     read_sources,
@@ -176,6 +177,18 @@ async def rows(import_id: int, request: Request, expected_revision: int = Query(
     limit = policy.row_page_default if limit is None else limit
     return await read_rows(engine, int(user["cid"]), int(user["sub"]), import_id, expected_revision,
                            plan_fingerprint, offset, limit, severity, policy=policy)
+
+
+@router.get("/imports/{import_id}/date-review")
+async def date_review(import_id: int, request: Request, expected_revision: int = Query(ge=1),
+                      plan_fingerprint: str = Query(min_length=64, max_length=64),
+                      kind: str = Query(), offset: int = Query(default=0, ge=0),
+                      limit: int | None = Query(default=None, ge=1),
+                      user: dict = Depends(get_current_user), engine: AsyncEngine = Depends(get_engine)):
+    policy = request.app.state.settings.import_resource_policy
+    limit = policy.row_page_default if limit is None else limit
+    return await read_date_review(engine, int(user["cid"]), int(user["sub"]), import_id,
+                                  expected_revision, plan_fingerprint, kind, offset, limit, policy=policy)
 
 
 @router.get("/imports/{import_id}/issues")

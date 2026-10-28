@@ -144,6 +144,14 @@ async def persist_preview(db, *, company_id: int, import_id: int, branch_id: int
     review_summary = {**result["counts"]}
     if result.get("date_review") is not None:
         review_summary["date_review"] = result["date_review"]
+    if result.get("date_review_full") is not None:
+        review_summary["date_review_full"] = result["date_review_full"]
+    review_summary["semantic_input_receipt"] = {
+        "version": 1,
+        "targets": result.get("semantic_receipts", []),
+    }
+    review_summary["repeat_notice"] = result.get("repeat_notice", {
+        "state": "None", "matched_target_count": 0, "supplied_target_count": 0, "targets": []})
     await db.execute(text("""
         UPDATE import.payrollworkimports SET mappingfingerprint = :mapping,
             contentfingerprint = :content, planfingerprint = :plan,

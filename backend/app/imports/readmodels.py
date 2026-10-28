@@ -226,8 +226,11 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                     "source_column": value["source_column"], "source_columns": value.get("source_columns", []),
                     "transform": value.get("transform", "Direct"), "quantity": value["quantity"],
                     "is_blank": value["is_blank"], "outcome": value["outcome"],
+                    "action": value.get("action"),
+                    "repeat_input_sha256": value.get("repeat_input_sha256"),
                     "current_quantity": value["current_quantity"],
-                    "current_source_exists": value["current_source_exists"]})
+                    "current_source_exists": value["current_source_exists"],
+                    "current_provenance": value.get("current_provenance")})
         definitions = await list_period_definitions(identity["payrollperiodid"], cid, db, active_only=True)
         definitions_by_id = {str(d.payroll_period_definition_id): {
             "payroll_period_definition_id": d.payroll_period_definition_id, "code": d.code,
@@ -363,3 +366,26 @@ async def read_sources(engine, cid, uid, iid, revision, plan_fingerprint, offset
         base = {"revision": identity["revision"], "plan_fingerprint": plan_fingerprint,
                 "summary": identity["previewcounts"], "filter": None}
         return await anyio.to_thread.run_sync(partial(bounded_page, base, items, offset, limit, total, policy=policy))
+
+
+async def read_date_review(engine, cid, uid, iid, revision, plan_fingerprint, kind, offset, limit,
+                           *, policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY):
+    if kind not in {"recognized_days", "missing_coverage_days", "overlap_unit_days"}:
+        raise failure("IMPORT_DATE_REVIEW_KIND_INVALID", "Choose recognized, missing-coverage, or overlap dates.", 422)
+    if limit < 1 or limit > policy.row_page_max or offset < 0:
+        raise failure("IMPORT_PAGE_INVALID", f"Date review requires limit 1–{policy.row_page_max} and a non-negative offset.", 422)
+    async with engine.begin() as db:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        await _read_identity(db, cid, uid, iid, revision, plan_fingerprint)
+        summary = (await db.execute(text("""
+            SELECT ReviewSummary FROM import.PayrollWorkImports
+            WHERE CompanyID=:cid AND ImportID=:iid
+        """), {"cid": cid, "iid": iid})).scalar_one_or_none() or {}
+        full = summary.get("date_review_full") if isinstance(summary, dict) else None
+        if not isinstance(full, dict) or not isinstance(full.get(kind), list):
+            raise failure("IMPORT_DATE_REVIEW_UNAVAILABLE", "Complete date review is unavailable for this preview.", 409)
+        values = full[kind]
+        base = {"import_id": iid, "revision": revision, "plan_fingerprint": plan_fingerprint,
+                "kind": kind}
+        return bounded_page(base, [{"date": item} for item in values[offset:offset + limit]],
+                            offset, limit, len(values), policy=policy)

@@ -80,7 +80,7 @@ def details(tenant, iid):
     return rows(tenant, """SELECT i.status, i.revision, f.filecontent IS NULL, f.contentpurgedatutc,
         f.inspectionmetadata, u.inspectionmetadata, l.inspectionmetadata, b.sourcemanifest,
         w.defaultworkdate, w.detailpurgedatutc, w.mappingfingerprint, w.contentfingerprint,
-        w.planfingerprint, w.previewcounts, w.reviewsummary
+        w.planfingerprint, w.previewcounts, w.reviewsummary, w.reviewsummary->'semantic_input_receipt'
         FROM import.imports i
         JOIN import.filesources f ON f.importid=i.importid AND f.companyid=i.companyid
         JOIN import.filesourceunits u ON u.filesourceid=f.filesourceid AND u.importid=f.importid AND u.companyid=f.companyid
@@ -123,6 +123,8 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
                     completedbyuserid=:uid, completedatutc=NOW(), updatedbyuserid=:uid, updatedatutc=NOW()
                     WHERE importid=:iid AND companyid=:cid"""), {"uid": tenant.owner, "iid": iid, "cid": tenant.company_id})
         staged.append((iid, desired, details(tenant, iid)))
+    completed_receipt = next(before[15] for _iid, desired, before in staged if desired == "Completed")
+    assert completed_receipt["version"] == 1 and completed_receipt["targets"]
 
     headers, values = (line.split(",") for line in data.decode().strip().splitlines())
     code = headers[2]
@@ -174,6 +176,7 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
         assert state[10:12] == before[10:12]
         assert state[12:14] == (None, None)
         assert state[14] == before[14]  # Aggregate review counts remain durable.
+        assert state[15] == before[15]
         assert state[9] is not None
         assert await _detail_counts(tenant, iid) == (0, 0, 0, 0, 0, 0, 0)
         read = await p3c_client.get(f"/payroll/imports/{iid}", headers=tenant.admin)
@@ -182,7 +185,12 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
         assert read.json()["files"][0]["canonical_format_version"] == 1
         assert read.json()["files"][0]["canonical_data_bytes"] > 0
         assert read.json()["source_editable"] is False
-        assert read.json()["preview"]["summary"] == before[14]
+        expected_public_summary = {key: value for key, value in (before[14] or {}).items()
+                                   if key not in {"semantic_input_receipt", "date_review_full"}}
+        expected_public_summary.setdefault("repeat_notice", {
+            "state": "None", "matched_target_count": 0, "supplied_target_count": 0, "targets": []})
+        expected_public_summary["repeat_notice"].pop("targets", None)
+        assert read.json()["preview"]["summary"] == expected_public_summary
 
     persisted_signature = rows(tenant, """
         SELECT RuleVersionID, TargetMeaning, RulePayload, SourceSignature, RuleFingerprint

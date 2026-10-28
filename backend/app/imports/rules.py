@@ -12,6 +12,7 @@ from app.imports.date_interpretation import DATE_INTERPRETATION_VERSION
 from app.imports.errors import ImportFailure
 from app.imports.identity import IDENTITY_RESOLUTION_VERSION
 from app.imports.runtime import authorize, failure
+from app.imports.semantic_identity import SEMANTIC_INPUT_VERSION
 from app.imports.staging import clear_derived_state
 from app.payroll.mutation_lock import _lock_period_for_mutation
 
@@ -55,6 +56,7 @@ async def current_rule_context(db: AsyncConnection, company_id: int, import_id: 
         material.append({key: row[key] for key in row.keys()})
     return _fingerprint({"rule_context_version": 1,
                          "identity_resolution_version": IDENTITY_RESOLUTION_VERSION,
+                         "semantic_input_version": SEMANTIC_INPUT_VERSION,
                          "date_interpretation_version": DATE_INTERPRETATION_VERSION,
                          "row_handling_version": ROW_HANDLING_VERSION,
                          "pending_rules": material})

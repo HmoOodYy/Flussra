@@ -80,6 +80,7 @@ def _context(*, driver=None, definition=None, assignment=None, live=True,
             "membership_sha256": hashlib.sha256(driver["driverid"].to_bytes(8, "big")).hexdigest()}},
         "roster": [assignment], "assignments_by_driver": {driver["driverid"]: [assignment]},
         "live_days": live_days, "days": {WORK_DATE: False}, "current_lines": lines,
+        "current_line_provenance": {},
         "existing_source_dates": existing_dates, "entries": {},
     }
 
@@ -87,6 +88,9 @@ def _context(*, driver=None, definition=None, assignment=None, live=True,
 def _source(*, quantity_value="4.0000", driver_number="001", employee_key=None, driver_name=None):
     mapping = {"1": "DriverNumber", "2": "WorkDate"}
     quantity_rules = [{"target": "Definition:100", "transform": "Direct", "columns": ["3"],
+                       "inputs": [{"header": "REGULAR"}],
+                       "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                                          "WorkDate": {"header": "WORKDATE"}},
                        "source_signature": {"inputs": [{"header": "regular"}]}}]
     cells = {
         "1": {"value": driver_number, "kind": "text", "formula": False, "missing_cache": False},
@@ -100,7 +104,7 @@ def _source(*, quantity_value="4.0000", driver_number="001", employee_key=None, 
         column = str(max(map(int, cells)) + 1)
         mapping[column] = "DriverName"
         cells[column] = {"value": driver_name, "kind": "text", "formula": False, "missing_cache": False}
-    return {"file_ordinal": 1, "unit_name": "CSV", "unit_kind": "CSV",
+    return {"source_unit_id": 1, "file_ordinal": 1, "unit_name": "CSV", "unit_kind": "CSV",
             "structure_fingerprint": "a" * 64, "mapping": mapping, "quantity_rules": quantity_rules,
             "date_source": {"kind": "column"}, "date_order": None,
             "materialized": {"inspection": {"header_row_number": 1,
@@ -112,6 +116,9 @@ def _source(*, quantity_value="4.0000", driver_number="001", employee_key=None, 
 def _sum_source(*, first="0.5", second="0.5"):
     source = _source(quantity_value=first)
     source["quantity_rules"] = [{"target": "Definition:100", "transform": "Sum", "columns": ["3", "4"],
+                                 "inputs": [{"header": "REGULAR A"}, {"header": "REGULAR B"}],
+                                 "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                                                    "WorkDate": {"header": "WORKDATE"}},
                                  "source_signature": {"inputs": [{"header": "regular-a"},
                                                                     {"header": "regular-b"}]}}]
     source["materialized"]["inspection"]["header_cells"] = [
@@ -276,10 +283,17 @@ def test_invalid_target_contribution_does_not_block_other_target_aggregation():
     context["definition_by_id"][101] = second_definition
     source = _source(quantity_value="not-a-number")
     source["mapping"]["4"] = "Definition:101"
+    source["materialized"]["inspection"]["header_cells"].append("BONUS")
     source["quantity_rules"] = [
         {"target": "Definition:100", "transform": "Direct", "columns": ["3"],
+         "inputs": [{"header": "REGULAR"}],
+         "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                            "WorkDate": {"header": "WORKDATE"}},
          "row_handling": {"version": 1, "mode": "SumRows", "choices": []}},
         {"target": "Definition:101", "transform": "Direct", "columns": ["4"],
+         "inputs": [{"header": "BONUS"}],
+         "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                            "WorkDate": {"header": "WORKDATE"}},
          "row_handling": {"version": 1, "mode": "SumRows", "choices": []}},
     ]
     first = source["materialized"]["rows"][0]
@@ -437,6 +451,7 @@ def test_mapping_and_date_provider_changes_affect_mapping_and_downstream_fingerp
     employee_source["mapping"] = {"1": "DriverNumber", "2": "WorkDate", "3": "Definition:100",
                                   "4": "EmployeeKey"}
     employee_source["materialized"]["inspection"]["header_cells"].append("EmployeeKey")
+    employee_source["quantity_rules"][0]["shared_columns"]["EmployeeKey"] = {"header": "EMPLOYEEKEY"}
     employee_source["materialized"]["rows"][0]["cells"]["4"] = {
         "value": "EMP-1", "kind": "text", "formula": False, "missing_cache": False,
     }
@@ -446,7 +461,7 @@ def test_mapping_and_date_provider_changes_affect_mapping_and_downstream_fingerp
     filename_date_source["mapping"].pop("2")
     filename_date_source["date_source"] = {"kind": "filename"}
     filename_date_source["file_name"] = "weekly-2026-10-20.csv"
-    filename_date_source["materialized"]["inspection"]["header_cells"] = ["DriverNumber", "REGULAR"]
+    filename_date_source["materialized"]["inspection"]["header_cells"] = ["DriverNumber", "WorkDate", "REGULAR"]
     filename_date_source["materialized"]["rows"][0]["cells"].pop("2")
     filename_date_source["materialized"]["nonempty_columns"] = [1, 3]
     filename = build_batch_preview([filename_date_source], _context())
@@ -660,14 +675,22 @@ def test_rescued_existing_target_remains_conflict_when_new_target_is_ineligible_
     outcomes = []
     for quantity_rules, cells in (
         ([{"target": "Definition:101", "transform": "Direct", "columns": ["3"],
-          "source_signature": {"inputs": [{"header": "EXISTING"}]}},
+          "inputs": [{"header": "EXISTING"}],
+          "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                             "WorkDate": {"header": "WORKDATE"}}},
          {"target": "Definition:100", "transform": "Direct", "columns": ["4"],
-          "source_signature": {"inputs": [{"header": "NEW"}]}}],
+          "inputs": [{"header": "NEW"}],
+          "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                             "WorkDate": {"header": "WORKDATE"}}}],
          {"3": "1", "4": "4"}),
         ([{"target": "Definition:100", "transform": "Direct", "columns": ["3"],
-          "source_signature": {"inputs": [{"header": "EXISTING"}]}},
+          "inputs": [{"header": "EXISTING"}],
+          "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                             "WorkDate": {"header": "WORKDATE"}}},
          {"target": "Definition:101", "transform": "Direct", "columns": ["4"],
-          "source_signature": {"inputs": [{"header": "NEW"}]}}],
+          "inputs": [{"header": "NEW"}],
+          "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                             "WorkDate": {"header": "WORKDATE"}}}],
          {"3": "4", "4": "1"}),
     ):
         source = _source()
@@ -829,8 +852,14 @@ def test_conflicting_target_row_policies_are_not_resolved_by_target_order():
     source["mapping"]["4"] = "Definition:101"
     source["quantity_rules"] = [
         {"target": "Definition:100", "transform": "Direct", "columns": ["3"],
+         "inputs": [{"header": "REGULAR"}],
+         "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                            "WorkDate": {"header": "WORKDATE"}},
          "row_handling": {"version": 1, "mode": "SumRows", "choices": []}},
         {"target": "Definition:101", "transform": "Direct", "columns": ["4"],
+         "inputs": [{"header": "BONUS"}],
+         "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                            "WorkDate": {"header": "WORKDATE"}},
          "row_handling": {"version": 1, "mode": "RejectRepeated", "choices": []}},
     ]
     context = _context()
@@ -898,7 +927,9 @@ def test_repeated_driver_day_is_rejected_without_rule_even_for_complementary_tar
     source = _source(quantity_value="4")
     source["mapping"]["4"] = "Definition:101"
     source["quantity_rules"].append({"target": "Definition:101", "transform": "Direct",
-                                     "columns": ["4"], "source_signature": {"inputs": [{"header": "overtime"}]}})
+                                     "columns": ["4"], "inputs": [{"header": "OVERTIME"}],
+                                     "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                                                        "WorkDate": {"header": "WORKDATE"}}})
     second = deepcopy(source["materialized"]["rows"][0])
     second["source_row"] = 3
     source["materialized"]["rows"][0]["cells"]["4"] = {
@@ -917,3 +948,211 @@ def test_repeated_driver_day_is_rejected_without_rule_even_for_complementary_tar
     assert len([issue for issue in preview["issues"] if issue["code"] == "IMPORT_DUPLICATE_FACT"]) == 2
     assert all(value["outcome"] == "Invalid"
                for row in preview["rows"] for value in row["values"].values())
+
+
+def test_repeat_receipt_ignores_layout_display_and_manual_current_state_but_reports_noop():
+    source = _source()
+    baseline = build_batch_preview([source], _context())
+    (receipt,) = baseline["semantic_receipts"]
+
+    unrelated_layout = deepcopy(source)
+    unrelated_layout["structure_fingerprint"] = "c" * 64
+    unrelated_layout["materialized"]["inspection"]["header_cells"].append("Unused Notes")
+    unrelated_layout["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "presentation only", "kind": "text", "formula": False, "missing_cache": False}
+    renamed = _context()
+    renamed["drivers_by_id"][7]["drivername"] = "A later display name"
+    renamed["drivers_by_id"][7]["employeekey"] = "A later unmapped employee key"
+    equivalent = build_batch_preview([unrelated_layout], renamed)
+    assert equivalent["mapping_fingerprint"] == baseline["mapping_fingerprint"]
+    assert equivalent["content_fingerprint"] == baseline["content_fingerprint"]
+    assert equivalent["semantic_receipts"] == baseline["semantic_receipts"]
+
+    manually_edited = _context(current_lines={(71, WORK_DATE, 100): Decimal("99")})
+    manually_edited["current_line_provenance"][(71, WORK_DATE, 100)] = {
+        "source_type": "Manual", "draft_line_id": 881, "added_by_user_id": 33}
+    repeat = build_batch_preview([source], manually_edited, completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+    value = repeat["rows"][0]["values"]["100"]
+    assert repeat["repeat_notice"]["state"] == "Complete"
+    assert repeat["candidates"] == 1
+    assert value["outcome"] == "AlreadyImported"
+    assert value["action"] == "NoOp"
+    assert Decimal(str(value["quantity"])) == Decimal("4")
+    assert Decimal(str(value["current_quantity"])) == Decimal("99")
+    assert value["current_provenance"]["source_type"] == "Manual"
+    assert repeat["content_fingerprint"] == baseline["content_fingerprint"]
+    assert repeat["plan_fingerprint"] != baseline["plan_fingerprint"]
+
+
+def test_repeated_target_matches_independently_when_another_supplied_target_is_invalid():
+    source = _source()
+    baseline = build_batch_preview([source], _context())
+    (receipt,) = baseline["semantic_receipts"]
+
+    second_definition = _definition(101, "OVERTIME", "Overtime")
+    context = _context(definition=_definition())
+    context["definitions"].append(second_definition)
+    context["definition_by_id"][101] = second_definition
+    batch = deepcopy(source)
+    batch["quantity_rules"].append({"target": "Definition:101", "transform": "Direct", "columns": ["4"],
+        "inputs": [{"header": "OVERTIME"}],
+        "shared_columns": {"DriverNumber": {"header": "DRIVERNUMBER"},
+                            "WorkDate": {"header": "WORKDATE"}},
+        "source_signature": {"inputs": [{"header": "overtime"}]}})
+    batch["materialized"]["inspection"]["header_cells"].append("OVERTIME")
+    batch["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "not a quantity", "kind": "text", "formula": False, "missing_cache": False}
+
+    preview = build_batch_preview([batch], context, completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+
+    assert preview["repeat_notice"]["state"] == "Partial"
+    assert preview["repeat_notice"]["matched_target_count"] == 1
+    assert preview["repeat_notice"]["supplied_target_count"] == 2
+    row = preview["rows"][0]
+    assert row["values"]["100"]["outcome"] == "AlreadyImported"
+    assert row["values"]["100"]["action"] == "NoOp"
+    assert row["values"]["101"]["outcome"] == "Invalid"
+    assert any(issue["code"] == "IMPORT_QUANTITY_INVALID" for issue in row["issues"])
+
+
+def test_repeat_receipt_does_not_bypass_unresolved_source_identity():
+    source = _source()
+    baseline = build_batch_preview([source], _context())
+    (receipt,) = baseline["semantic_receipts"]
+    changed = _source(driver_number="UNKNOWN")
+
+    preview = build_batch_preview([changed], _context(), completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+
+    assert preview["repeat_notice"]["state"] == "None"
+    assert preview["rows"][0]["values"]["100"].get("action") != "NoOp"
+    assert any(issue["severity"] == "Error" and issue["code"] == "IMPORT_DRIVER_UNRESOLVED"
+               for issue in preview["issues"])
+
+
+def test_repeat_receipt_does_not_bypass_invalid_date_evidence():
+    source = _source()
+    baseline = build_batch_preview([source], _context())
+    (receipt,) = baseline["semantic_receipts"]
+    changed = deepcopy(source)
+    changed["materialized"]["rows"][0]["cells"]["2"]["value"] = "not a date"
+
+    preview = build_batch_preview([changed], _context(), completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+
+    assert preview["repeat_notice"]["state"] == "None"
+    assert any(issue["code"] == "IMPORT_WORK_DATE_INVALID" for issue in preview["issues"])
+    assert preview["rows"][0]["values"]["100"].get("action") != "NoOp"
+
+
+def test_repeat_receipt_preserves_incomplete_sum_without_partial_candidate_or_deletion():
+    source = _sum_source(first="2", second="")
+    baseline = build_batch_preview([source], _context())
+    (receipt,) = baseline["semantic_receipts"]
+    edited = _context(current_lines={(71, WORK_DATE, 100): Decimal("99")})
+    preview = build_batch_preview([source], edited, completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+
+    value = preview["rows"][0]["values"]["100"]
+    assert preview["repeat_notice"]["state"] == "Complete"
+    assert value["outcome"] == "AlreadyImported" and value["action"] == "NoOp"
+    assert value["quantity"] is None and value["is_blank"] is True
+    assert value["current_quantity"] == "99"
+    assert value["is_candidate"] is False
+    assert any(issue["code"] == "IMPORT_SUM_INPUT_MISSING" for issue in preview["issues"])
+
+
+def test_repeat_receipt_does_not_bypass_unknown_category_choice():
+    source = _source(quantity_value="4")
+    source["mapping"]["4"] = "Filter"
+    source["materialized"]["inspection"]["header_cells"].append("Category")
+    source["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "Include", "kind": "text", "formula": False, "missing_cache": False}
+    source["quantity_rules"][0]["row_handling"] = {"version": 1, "mode": "FilterThenSum", "choices": [
+        {"category": {"type": "text", "value": "Exclude"}, "decision": "Exclude"},
+        {"category": {"type": "text", "value": "Include"}, "decision": "Include"},
+    ]}
+    source["quantity_rules"][0]["shared_columns"]["Filter"] = {"header": "Category"}
+    baseline = build_batch_preview([source], _context())
+    (receipt,) = baseline["semantic_receipts"]
+    changed = deepcopy(source)
+    changed["materialized"]["rows"][0]["cells"]["4"]["value"] = "New category"
+
+    preview = build_batch_preview([changed], _context(), completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+
+    assert preview["repeat_notice"]["state"] == "None"
+    assert any(issue["code"] == "IMPORT_CATEGORY_UNRESOLVED" for issue in preview["issues"])
+    assert preview["rows"][0]["values"]["100"].get("action") != "NoOp"
+
+
+def test_live_name_discrepancy_changes_review_plan_but_not_mapped_source_content():
+    source = _source(driver_name="Driver One")
+    source["materialized"]["inspection"]["header_cells"].append("DriverName")
+    source["materialized"]["nonempty_columns"].append(4)
+    exact = build_batch_preview([source], _context())
+
+    renamed_context = _context()
+    renamed_driver = renamed_context["drivers_by_id"][7]
+    renamed_driver["drivername"] = "Driver One New"
+    renamed_context["identity_indexes"]["DriverName"] = {"driver one new": {7}}
+    renamed_context["name_match_summaries"] = {"driver one new": {
+        "count": 1, "driver_id": 7, "driver": renamed_driver, "samples": [renamed_driver],
+        "membership_sha256": hashlib.sha256((7).to_bytes(8, "big")).hexdigest(),
+    }}
+    discrepancy = build_batch_preview([source], renamed_context)
+
+    assert any(issue["code"] == "IMPORT_DRIVER_NAME_DISCREPANCY" for issue in discrepancy["issues"])
+    assert discrepancy["content_fingerprint"] == exact["content_fingerprint"]
+    assert discrepancy["plan_fingerprint"] != exact["plan_fingerprint"]
+
+
+def test_sum_rows_repeat_after_source_removal_keeps_one_combined_candidate():
+    source = _source(quantity_value="2")
+    source["quantity_rules"][0]["row_handling"] = {"version": 1, "mode": "SumRows", "choices": []}
+    second = deepcopy(source["materialized"]["rows"][0])
+    second["source_row"] = 3
+    second["cells"]["3"]["value"] = "3"
+    source["materialized"]["rows"].append(second)
+    original = build_batch_preview([source], _context())
+    (receipt,) = original["semantic_receipts"]
+
+    no_longer_eligible = _context(live=False)
+    no_longer_eligible["roster"][0]["iseligibleforperiod"] = False
+    no_longer_eligible["roster"][0]["eligibleworkdates"] = []
+    repeat = build_batch_preview([source], no_longer_eligible, completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+
+    assert repeat["repeat_notice"]["state"] == "Complete"
+    first, contributor = [row["values"]["100"] for row in repeat["rows"]]
+    assert first["outcome"] == contributor["outcome"] == "AlreadyImported"
+    assert first["action"] == contributor["action"] == "NoOp"
+    assert first["quantity"] == "5" and first["is_candidate"] is True
+    assert contributor["quantity"] is None and contributor["is_candidate"] is False
+    assert all(row["driver_assignment_id"] is None for row in repeat["rows"])
+
+    changed_operands = deepcopy(source)
+    changed_operands["materialized"]["rows"][0]["cells"]["3"]["value"] = "1"
+    changed_operands["materialized"]["rows"][1]["cells"]["3"]["value"] = "4"
+    different_multiset = build_batch_preview([changed_operands], _context(), completed_imports=[{
+        "import_id": 77, "completed_by_user_id": 12, "completed_at": datetime(2026, 10, 27, tzinfo=UTC),
+        "targets": [receipt],
+    }])
+    assert different_multiset["rows"][0]["values"]["100"]["quantity"] == "5"
+    assert different_multiset["repeat_notice"]["state"] == "None"
