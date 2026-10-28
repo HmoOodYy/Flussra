@@ -421,6 +421,26 @@ _IMPORT_TABLES = (
 
 def _check_import_foundation(cur) -> list[str]:
     errors: list[str] = []
+    cur.execute("""
+        SELECT am.amname, i.indisunique, i.indisvalid, i.indisready,
+            i.indpred IS NULL, i.indexprs IS NULL,
+            ARRAY(
+                SELECT a.attname FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+                WHERE key.ordinality <= i.indnkeyatts
+                ORDER BY key.ordinality
+            )
+        FROM pg_index i
+        JOIN pg_class x ON x.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = x.relam
+        WHERE i.indexrelid = to_regclass('core.ix_drivers_company_driverid')
+          AND i.indrelid = to_regclass('core.drivers')
+    """)
+    driver_scan_index = cur.fetchone()
+    if (driver_scan_index is None or driver_scan_index[0] != "btree" or driver_scan_index[1]
+            or not driver_scan_index[2] or not driver_scan_index[3] or not driver_scan_index[4]
+            or not driver_scan_index[5] or driver_scan_index[6] != ["companyid", "driverid"]):
+        errors.append("Missing or drifted Company/Driver ordered lookup index core.ix_drivers_company_driverid (0097).")
     for table in _IMPORT_TABLES:
         cur.execute("SELECT to_regclass(%s)", (f"import.{table}",))
         if cur.fetchone()[0] is None:

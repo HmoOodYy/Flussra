@@ -3,6 +3,7 @@ import asyncio
 import threading
 from uuid import uuid4
 
+import psycopg2
 import pytest
 from sqlalchemy import text
 
@@ -14,7 +15,7 @@ from tests.compensation_api_fixtures import (  # noqa: F401
     p3c_database_engine,
     p3c_http_client,
 )
-from tests.compensation_database_fixtures import p3b_database  # noqa: F401
+from tests.compensation_database_fixtures import make_driver, p3b_database  # noqa: F401
 from tests.payroll_runtime_fixtures import (
     build_payroll_tenant,
     map_import_columns,
@@ -171,6 +172,82 @@ async def test_preview_rechecks_canonical_quantity_and_preserves_prior_publicati
             WHERE companyid=:cid AND importid=:iid ORDER BY sourcerecordid
         """), {"cid": tenant.company_id, "iid": import_id})).all()
     assert after == before
+
+
+async def test_preview_rechecks_company_name_membership_and_preserves_prior_publication(
+    p3c_client, p3c_engine, tenant, monkeypatch,
+):
+    from app.payroll.period_definitions import list_period_definitions
+
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    async with p3c_engine.connect() as db:
+        driver = dict((await db.execute(text("""
+            SELECT d.driverid, d.drivernumber, e.employeeid, x.workdate
+            FROM payroll.payrollperioddrivereligibility p
+            JOIN core.driverassignments a ON a.driverassignmentid=p.driverassignmentid
+                AND a.companyid=p.companyid AND a.branchid=p.branchid
+            JOIN core.drivers d ON d.driverid=a.driverid AND d.companyid=a.companyid
+            JOIN core.employees e ON e.employeeid=a.employeeid AND e.companyid=a.companyid
+            CROSS JOIN LATERAL unnest(p.eligibleworkdates) AS x(workdate)
+            WHERE p.companyid=:cid AND p.payrollperiodid=:pid AND p.iseligibleforperiod
+            ORDER BY d.driverid,x.workdate LIMIT 1
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})).mappings().one())
+        definition = next(item for item in mapping_targets(await list_period_definitions(
+            period["payroll_period_id"], tenant.company_id, db, active_only=True))
+            if item["target"].startswith("Definition:"))
+    definition_id = int(definition["target"].split(":", 1)[1])
+    unique_name = "Import Name Snapshot Candidate"
+    async with p3c_engine.begin() as db:
+        await db.execute(text("UPDATE core.employees SET fullname=:name WHERE companyid=:cid AND employeeid=:eid"),
+                         {"name": unique_name, "cid": tenant.company_id, "eid": driver["employeeid"]})
+    data = (f"DriverNumber,DriverName,WorkDate,{definition['code']}\n"
+            f"{driver['drivernumber']},{unique_name},{driver['workdate'].isoformat()},4\n").encode()
+    uploaded = await upload(p3c_client, tenant, period, uuid4(), data)
+    assert uploaded.status_code == 200, uploaded.text
+    created = uploaded.json()
+    mapping = await map_import_columns(p3c_client, tenant, created, {
+        "1": "DriverNumber", "2": "DriverName", "3": "WorkDate",
+        "4": f"Definition:{definition_id}",
+    })
+    assert mapping.status_code == 200, mapping.text
+    initial = await p3c_client.post(f"/payroll/imports/{created['import_id']}/preview",
+        json={"expected_revision": mapping.json()["revision"]}, headers=tenant.admin)
+    assert initial.status_code == 200, initial.text
+    published = initial.json()
+    import_id = created["import_id"]
+
+    entered, release = threading.Event(), threading.Event()
+    build = batch_service.build_batch_preview
+
+    def held_build(*args, **kwargs):
+        result = build(*args, **kwargs)
+        entered.set()
+        if not release.wait(10):
+            raise TimeoutError("test did not release preview after the identity snapshot")
+        return result
+
+    monkeypatch.setattr(batch_service, "build_batch_preview", held_build)
+    pending = asyncio.create_task(p3c_client.post(
+        f"/payroll/imports/{import_id}/preview",
+        json={"expected_revision": published["revision"]}, headers=tenant.admin))
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        with psycopg2.connect(**tenant.dsn) as connection, connection.cursor() as cursor:
+            assignment = make_driver(cursor, tenant.company_id, tenant.branch_b)
+            cursor.execute("""
+                UPDATE core.employees e SET fullname=%s
+                FROM core.driverassignments a
+                WHERE a.companyid=%s AND a.driverassignmentid=%s AND a.employeeid=e.employeeid
+            """, (unique_name, tenant.company_id, assignment))
+    finally:
+        release.set()
+    stale = await pending
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["detail"]["code"] == "IMPORT_CONTEXT_STALE"
+    current = await p3c_client.get(f"/payroll/imports/{import_id}", headers=tenant.admin)
+    assert current.status_code == 200, current.text
+    assert current.json()["revision"] == published["revision"]
+    assert current.json()["preview"]["plan_fingerprint"] == published["preview"]["plan_fingerprint"]
 
 
 async def test_interpretation_revision_wins_against_held_preview_without_partial_publication(

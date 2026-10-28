@@ -52,6 +52,8 @@ class ImportResourcePolicyResponse(BaseModel):
     max_xlsx_xml_depth: int = Field(strict=True, ge=1)
     max_concurrent_requests: int = Field(strict=True, ge=1)
     max_numeric_work_digits: int = Field(strict=True, ge=1)
+    max_identity_lookup_rows: int = Field(strict=True, ge=1)
+    identity_lookup_batch_rows: int = Field(strict=True, ge=1)
     max_response_bytes: int = Field(strict=True, ge=1)
     row_page_default: int = Field(strict=True, ge=1)
     row_page_max: int = Field(strict=True, ge=1)

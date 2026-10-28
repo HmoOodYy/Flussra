@@ -39,6 +39,8 @@ from app.imports.headers import (
     normalize_header,
 )
 from app.imports.mapping import (
+    IDENTIFIERS,
+    blank,
     canonical,
     definition_meaning,
     encoded,
@@ -1691,13 +1693,25 @@ def _materialize_batch(files, units, layouts, policy, product_policy=None, pendi
 
 
 def _stable_identifiers(sources):
-    found = {"DriverNumber": set(), "EmployeeKey": set()}
+    found = {"DriverNumber": set(), "EmployeeKey": set(), "DriverName": set()}
     for source in sources:
         mapping = source["mapping"]
+        rules = source.get("quantity_rules", [])
+        has_sum = any(rule.get("transform") == "Sum" for rule in rules)
+
+        def has_quantity(row):
+            return any(column is not None and not blank(row["cells"].get(str(column),
+                {"value": None, "missing_cache": False}))
+                for rule in rules for column in rule.get("columns", []))
+
+        active_rows = [row for row in source["materialized"]["rows"] if has_quantity(row) or
+            has_sum and any(target in IDENTIFIERS | {"WorkDate"} and
+                not blank(row["cells"].get(str(column), {"value": None, "missing_cache": False}))
+                for column, target in mapping.items())]
         for column, target in mapping.items():
             if target not in found:
                 continue
-            for row in source["materialized"]["rows"]:
+            for row in active_rows:
                 cell = row["cells"].get(column)
                 if cell is not None and not cell.missing_cache and cell.value is not None:
                     value = normalized_identifier(target, cell.value)
@@ -1767,7 +1781,8 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
         async with engine.begin() as db:
             # This read is deliberately outside the publication transaction.
             period = await authorize(db, cid, uid, period.payroll_period_id, mutate=True)
-            context = await load_context(db, cid, period, dates=sorted(dates), identifiers=identifiers)
+            context = await load_context(db, cid, period, dates=sorted(dates), identifiers=identifiers,
+                                         resource_policy=policy)
         context_token = fingerprint("relational-context", context_identity(context))
         result = await anyio.to_thread.run_sync(partial(build_batch_preview, materialized, context, policy=policy))
         definitions = context["definitions"]
@@ -1789,7 +1804,8 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             if published_rule_context != started_rule_context:
                 raise failure("IMPORT_RULE_CONTEXT_STALE",
                               "Saved mapping rules changed while the preview was being prepared. Refresh and retry.")
-            current_context = await load_context(db, cid, period, dates=sorted(dates), identifiers=identifiers)
+            current_context = await load_context(db, cid, period, dates=sorted(dates), identifiers=identifiers,
+                                                resource_policy=policy)
             if fingerprint("relational-context", context_identity(current_context)) != context_token:
                 raise failure("IMPORT_CONTEXT_STALE", "Payroll context changed while the preview was being prepared. Refresh and retry.")
             _current_files, current_units, current_layouts = await load_sources(db, cid, iid)

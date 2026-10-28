@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from datetime import UTC, date, datetime
@@ -7,6 +8,7 @@ from decimal import Decimal
 
 from app.imports.batch_service import _enforce_metadata_response_bound
 from app.imports.errors import ImportFailure
+from app.imports.mapping import normalized_identifier
 from app.imports.payroll_context import context_identity
 from app.imports.preview_model import build_batch_preview
 from app.imports.preview_store import prepare_preview
@@ -55,6 +57,7 @@ def _context(*, driver=None, definition=None, assignment=None, live=True,
     live_days = {(aid, WORK_DATE)} if live else set()
     existing_dates = set(existing_dates or ())
     lines = dict(current_lines or {})
+    normalized_name = normalized_identifier("DriverName", driver["drivername"])
     return {
         "period": {"id": 3, "company_id": 4, "branch_id": 5,
                    "company_code": "ACME", "branch_code": "EAST",
@@ -67,6 +70,9 @@ def _context(*, driver=None, definition=None, assignment=None, live=True,
             "EmployeeKey": {driver["employeekey"]: {driver["driverid"]}},
             "DriverName": {"driver one": {driver["driverid"]}},
         },
+        "name_match_summaries": {normalized_name: {"count": 1, "driver_id": driver["driverid"],
+            "driver": driver, "samples": [driver],
+            "membership_sha256": hashlib.sha256(driver["driverid"].to_bytes(8, "big")).hexdigest()}},
         "roster": [assignment], "assignments_by_driver": {driver["driverid"]: [assignment]},
         "live_days": live_days, "days": {WORK_DATE: False}, "current_lines": lines,
         "existing_source_dates": existing_dates, "entries": {},
@@ -215,6 +221,46 @@ def test_matching_and_disagreeing_company_identifiers_and_name_proposals():
     proposal = build_batch_preview([_source(driver_number="", driver_name="Driver One")], _context())
     assert proposal["rows"][0]["driver_id"] == 7
     assert any(issue["code"] == "IMPORT_DRIVER_CONFIRMATION_REQUIRED" for issue in proposal["issues"])
+
+
+def test_canonical_name_basis_changes_plan_but_not_source_content_identity():
+    source = _source(driver_name="Imported Variation")
+    first = build_batch_preview([deepcopy(source)], _context(
+        driver=_driver(name="Current Canonical Name A")))
+    second = build_batch_preview([deepcopy(source)], _context(
+        driver=_driver(name="Current Canonical Name B")))
+
+    assert first["content_fingerprint"] == second["content_fingerprint"]
+    assert first["plan_fingerprint"] != second["plan_fingerprint"]
+    assert first["rows"][0]["context"]["driver_identity"]["status"] == "NameDiscrepancy"
+    assert second["rows"][0]["context"]["driver_identity"]["status"] == "NameDiscrepancy"
+
+
+def test_formula_without_cached_stable_identifier_blocks_other_key_fallback():
+    source = _source(driver_number="", employee_key="EMP-1")
+    source["materialized"]["rows"][0]["cells"]["1"] = {
+        "value": None, "kind": "text", "formula": True, "missing_cache": True,
+    }
+
+    preview = build_batch_preview([source], _context())
+
+    assert preview["rows"][0]["driver_id"] is None
+    assert any(issue["code"] == "IMPORT_DRIVER_UNRESOLVED" for issue in preview["issues"])
+
+
+def test_formula_without_cached_name_blocks_a_known_driver_code():
+    source = _source(driver_number="001", driver_name="")
+    name_column = next(column for column, target in source["mapping"].items()
+                       if target == "DriverName")
+    source["materialized"]["rows"][0]["cells"][name_column] = {
+        "value": None, "kind": "text", "formula": True, "missing_cache": True,
+    }
+
+    preview = build_batch_preview([source], _context())
+
+    assert preview["rows"][0]["driver_id"] is None
+    assert any(issue["code"] == "IMPORT_DRIVER_UNRESOLVED" and issue["severity"] == "Error"
+               for issue in preview["issues"])
 
 
 def test_import_metadata_response_uses_a_serialized_byte_bound():

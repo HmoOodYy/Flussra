@@ -16,6 +16,7 @@ from decimal import (
 from types import SimpleNamespace
 
 from app.imports.errors import ImportFailure
+from app.imports.identity import resolve_row_identity
 from app.imports.mapping import (
     IDENTIFIERS,
     NUMBER,
@@ -171,6 +172,9 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
     """Normalize selected source units together so duplicates span files/layouts."""
     definitions = context["definitions"]
     definitions_by_target = {target_key(item): item for item in definitions}
+    sampled_driver_by_id = {candidate["driverid"]: candidate
+                            for match in context.get("name_match_summaries", {}).values()
+                            for candidate in match.get("samples", [])}
     period = context["period"]
     output_rows: list[dict] = []
     issues: list[dict] = []
@@ -278,9 +282,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 row_issues.append(item)
                 issues.append(item)
 
-            identifiers = []
+            provided_identifiers = []
             row_error = False
-            agreed_drivers: set[int] = set()
             for column, kind in mapped.items():
                 if kind not in IDENTIFIERS:
                     continue
@@ -288,33 +291,60 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 if blank(cell):
                     continue
                 value = normalized_identifier(kind, cell["value"])
-                candidates_for_value = context["identity_indexes"].get(kind, {}).get(value, set())
-                driver_id = next(iter(candidates_for_value)) if len(candidates_for_value) == 1 else None
-                resolution = ("Proposed" if driver_id and kind == "DriverName" else "Exact" if driver_id else "Unresolved")
-                identifiers.append({"column": int(column), "kind": kind, "value": value,
-                                    "driver_id": driver_id, "resolution": resolution})
-                if driver_id is not None:
-                    agreed_drivers.add(driver_id)
+                provided_identifiers.append({"column": int(column), "kind": kind, "value": value,
+                    "source_value": canonical(cell.get("value")), "source_kind": cell.get("kind"),
+                    "missing_cache": bool(cell.get("missing_cache"))})
                 if not skipped and cell.get("kind") == "number":
                     issue(column, "Warning", "IMPORT_NUMERIC_IDENTIFIER",
                           "Numeric identifier may have lost leading zeroes; no padding is inferred.")
-                if driver_id is None and not skipped:
-                    row_error = True
-                    issue(column, "Error", "IMPORT_DRIVER_UNRESOLVED",
-                          "Formula without a calculated value." if cell.get("missing_cache") else
-                          "Driver identifier is missing, unknown or ambiguous within its Company identity or scoped name roster.")
-            if not identifiers and not skipped:
-                row_error = True
-                column = next((c for c, target in mapped.items() if target in IDENTIFIERS), None)
-                issue(column, "Error", "IMPORT_DRIVER_UNRESOLVED", "Supply at least one Driver identifier for this row.")
-            if len(agreed_drivers) > 1 and not skipped:
-                row_error = True
-                issue(None, "Error", "IMPORT_DRIVER_DISAGREEMENT", "Mapped Driver identifiers refer to different Drivers.")
-            driver_id = next(iter(agreed_drivers)) if len(agreed_drivers) == 1 else None
-            proposed = not skipped and bool(identifiers) and all(item["resolution"] == "Proposed" for item in identifiers)
-            if proposed:
-                issue(None, "Conflict", "IMPORT_DRIVER_CONFIRMATION_REQUIRED",
-                      "Exact name proposes a Driver; confirmation belongs to the review decision step.")
+            identity = resolve_row_identity(provided_identifiers, context["identity_indexes"],
+                                            context.get("name_match_summaries", {}),
+                                            context["drivers_by_id"])
+            identifiers = identity["identifiers"]
+            driver_id = identity["driver_id"]
+            proposed = identity["status"] == "Proposed"
+            identity_requires_confirmation = identity["requires_confirmation"]
+            if identity["issue_code"] and not skipped:
+                row_error = identity["issue_severity"] == "Error"
+                issue_column = (provided_identifiers[0]["column"] if provided_identifiers else
+                                next((c for c, target in mapped.items() if target in IDENTIFIERS), None))
+                issue_value = None
+                if identity_requires_confirmation or identity["status"] in {"NameDiscrepancy", "Disagreement"}:
+                    review_drivers = []
+                    for candidate_id in identity["review_candidate_ids"]:
+                        candidate = context["drivers_by_id"].get(candidate_id) or sampled_driver_by_id.get(candidate_id)
+                        if candidate is not None:
+                            review_drivers.append({"driver_number": candidate.get("drivernumber"),
+                                "employee_key": candidate.get("employeekey"),
+                                "driver_name": candidate.get("drivername", candidate.get("fullname"))})
+                    issue_value = {"provided": {kind: [item["source_value"] for item in provided_identifiers
+                                                         if item["kind"] == kind]
+                                                 for kind in ("DriverNumber", "EmployeeKey", "DriverName")
+                                                 if any(item["kind"] == kind for item in provided_identifiers)},
+                                   "canonical_candidates": review_drivers}
+                issue(issue_column, identity["issue_severity"], identity["issue_code"],
+                      identity["issue_message"], value_override=issue_value)
+            selected_driver = context["drivers_by_id"].get(driver_id) if driver_id is not None else None
+            review_driver_details = []
+            for candidate_id in identity["review_candidate_ids"]:
+                candidate = context["drivers_by_id"].get(candidate_id) or sampled_driver_by_id.get(candidate_id)
+                if candidate is not None:
+                    review_driver_details.append({"driver_id": candidate_id,
+                        "driver_number": candidate.get("drivernumber"),
+                        "employee_key": candidate.get("employeekey"),
+                        "driver_name": candidate.get("drivername", candidate.get("fullname"))})
+            driver_identity = {"status": identity["status"],
+                "requires_confirmation": identity_requires_confirmation,
+                "provided": {kind: [item["source_value"] for item in provided_identifiers
+                                    if item["kind"] == kind]
+                             for kind in ("DriverNumber", "EmployeeKey", "DriverName")
+                             if any(item["kind"] == kind for item in provided_identifiers)},
+                "canonical_driver": ({"driver_id": driver_id,
+                    "driver_number": selected_driver.get("drivernumber"),
+                    "employee_key": selected_driver.get("employeekey"),
+                    "driver_name": selected_driver.get("drivername")}
+                    if selected_driver else None),
+                "review_candidates": review_driver_details[:2]}
 
             date_value = None
             date_cell = cells.get(date_column, _date_cell(None)) if date_column else None
@@ -400,6 +430,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                     outcome = "Invalid"
                 elif is_blank:
                     outcome = "Blank"
+                elif identity_requires_confirmation:
+                    outcome = "Unresolved"
                 elif row_error:
                     outcome = "Invalid"
                 elif proposed:
@@ -472,13 +504,15 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 "values": values, "issues": row_issues, "identifiers": identifiers,
                 "context": {"status_code": (context["entries"].get((assignment_id, date_value)) or {}).get("statuscode"),
                             "day_off": bool(date_value and context["days"].get(date_value, False)),
-                            "source_date": source_date},
+                            "source_date": source_date, "driver_identity": driver_identity},
                 "group_fingerprint": fingerprint("group", {
                     "driver": driver_meaning(context["drivers_by_id"][driver_id]) if driver_id in context["drivers_by_id"] else None,
                     "date": date_value.isoformat() if date_value else None,
                     "unresolved_source": [source["file_ordinal"], source["unit_name"], source_row["source_row"]] if driver_id is None or date_value is None else None,
                 }),
-                "driver_display": {"driver_name": context["drivers_by_id"].get(driver_id, {}).get("drivername")},
+                "driver_display": {"driver_name": context["drivers_by_id"].get(driver_id, {}).get("drivername"),
+                                   "driver_number": context["drivers_by_id"].get(driver_id, {}).get("drivernumber"),
+                                   "employee_key": context["drivers_by_id"].get(driver_id, {}).get("employeekey")},
                 "semantic": source_semantics,
             })
 
@@ -520,6 +554,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         for item in context["roster"] if item["driverid"] in context["drivers_by_id"]}
     row_plans = []
     for row in output_rows:
+        driver_identity = row["context"].get("driver_identity", {})
+        canonical_driver = driver_identity.get("canonical_driver") or {}
         row_plans.append({"row": row["row_fingerprint"],
                           "source": {"file_ordinal": row["file_ordinal"], "unit_name": row["unit_name"],
                                      "source_row": row["source_row"]},
@@ -528,6 +564,12 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                            "driver": driver_meaning(context["drivers_by_id"][item["driver_id"]])
                                            if item["driver_id"] in context["drivers_by_id"] else None}
                                           for item in row["identifiers"]],
+                          "driver_identity": {
+                              "status": driver_identity.get("status"),
+                              "requires_confirmation": driver_identity.get("requires_confirmation", False),
+                              "canonical_name": normalized_identifier(
+                                  "DriverName", canonical_driver.get("driver_name")) or None,
+                          },
                           "assignment": assignment_meanings.get(row["driver_assignment_id"]),
                           "date": row["work_date"].isoformat() if row["work_date"] else None,
                           "values": {context["definition_by_id"][int(key)].code: {

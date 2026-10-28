@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.imports.contracts import require_supported_import_contract
 from app.imports.errors import ImportFailure
+from app.imports.identity import IDENTITY_RESOLUTION_VERSION
 from app.imports.runtime import authorize, failure
 from app.imports.staging import clear_derived_state
 from app.payroll.mutation_lock import _lock_period_for_mutation
@@ -51,7 +52,9 @@ async def current_rule_context(db: AsyncConnection, company_id: int, import_id: 
             raise failure("IMPORT_RULE_CONTEXT_STALE",
                           "A saved rule's expected current head changed. Reconfirm the rule before refreshing.")
         material.append({key: row[key] for key in row.keys()})
-    return _fingerprint({"rule_context_version": 1, "pending_rules": material})
+    return _fingerprint({"rule_context_version": 1,
+                         "identity_resolution_version": IDENTITY_RESOLUTION_VERSION,
+                         "pending_rules": material})
 
 
 async def require_preview_rule_context(db: AsyncConnection, company_id: int, import_id: int) -> str:

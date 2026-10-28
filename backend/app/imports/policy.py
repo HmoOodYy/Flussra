@@ -45,6 +45,8 @@ class ImportResourcePolicy:
     max_header_label_chars: int = 80
     max_numeric_work_digits: int = 16_000
     max_mapping_request_bytes: int = 2_000_000
+    max_identity_lookup_rows: int = 100_000
+    identity_lookup_batch_rows: int = 512
 
     def __post_init__(self) -> None:
         for field in fields(self):

@@ -479,6 +479,60 @@ async def test_cancelled_import_keeps_historical_page_reads_available(p3c_client
     assert all(response.status_code == 200 for response in responses), [response.text for response in responses]
 
 
+async def test_old_identity_resolution_context_requires_live_refresh_but_not_terminal_reads(
+    p3c_client, p3c_engine, tenant,
+):
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    created, period_definition_id, definition_id = await _upload(p3c_client, p3c_engine, tenant, period)
+    preview = await _preview(p3c_client, tenant, created, period_definition_id)
+    import_id = created["import_id"]
+    context_trigger = TriggerIdentity(
+        "import", "payrollworkpreviewrulecontexts", "trg_payrollworkpreviewrulecontexts_writable")
+    async with p3c_engine.begin() as db:
+        pending_before = (await db.execute(text("""
+            SELECT PayDefinitionID, RuleVersionID, Revision
+            FROM import.PayrollWorkPendingRules WHERE ImportID=:iid AND CompanyID=:cid
+        """), {"iid": import_id, "cid": tenant.company_id})).all()
+        async with suspended_test_triggers(db, [context_trigger]):
+            await db.execute(text("""
+                UPDATE import.PayrollWorkPreviewRuleContexts SET Fingerprint=:old
+                WHERE ImportID=:iid AND CompanyID=:cid
+            """), {"old": "0" * 64, "iid": import_id, "cid": tenant.company_id})
+
+    query = (f"expected_revision={preview['revision']}&"
+             f"plan_fingerprint={preview['preview']['plan_fingerprint']}")
+    stale = await p3c_client.get(f"/payroll/imports/{import_id}/rows?{query}", headers=tenant.admin)
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "IMPORT_RULE_CONTEXT_STALE"
+
+    refreshed = await p3c_client.post(f"/payroll/imports/{import_id}/preview",
+        json={"expected_revision": preview["revision"]}, headers=tenant.admin)
+    assert refreshed.status_code == 200, refreshed.text
+    async with p3c_engine.begin() as db:
+        pending_after = (await db.execute(text("""
+            SELECT PayDefinitionID, RuleVersionID, Revision
+            FROM import.PayrollWorkPendingRules WHERE ImportID=:iid AND CompanyID=:cid
+        """), {"iid": import_id, "cid": tenant.company_id})).all()
+        async with suspended_test_triggers(db, [context_trigger]):
+            await db.execute(text("""
+                UPDATE import.PayrollWorkPreviewRuleContexts SET Fingerprint=:old
+                WHERE ImportID=:iid AND CompanyID=:cid
+            """), {"old": "0" * 64, "iid": import_id, "cid": tenant.company_id})
+    assert pending_after == pending_before
+
+    cancelled = await p3c_client.post(f"/payroll/imports/{import_id}/cancel",
+        json={"expected_revision": refreshed.json()["revision"]}, headers=tenant.admin)
+    assert cancelled.status_code == 200, cancelled.text
+    history_query = (f"expected_revision={cancelled.json()['revision']}&"
+                     f"plan_fingerprint={refreshed.json()['preview']['plan_fingerprint']}")
+    pages = [
+        await p3c_client.get(f"/payroll/imports/{import_id}/rows?{history_query}", headers=tenant.admin),
+        await p3c_client.get(f"/payroll/imports/{import_id}/issues?{history_query}", headers=tenant.admin),
+        await p3c_client.get(f"/payroll/imports/{import_id}/source-records?{history_query}", headers=tenant.admin),
+    ]
+    assert all(page.status_code == 200 for page in pages), [page.text for page in pages]
+
+
 async def test_preview_publication_rejects_rule_head_change_during_preparation(
     p3c_client, p3c_engine, tenant, monkeypatch,
 ):

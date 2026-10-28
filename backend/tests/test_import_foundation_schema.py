@@ -125,6 +125,21 @@ def test_schema_guard_detects_incomplete_child_lookup_index(foundation):
         conn.rollback()
 
 
+def test_schema_guard_detects_missing_company_driver_lookup_index(foundation):
+    with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
+        cur.execute("DROP INDEX core.ix_drivers_company_driverid")
+        assert any("ix_drivers_company_driverid" in error for error in _check_import_foundation(cur))
+        conn.rollback()
+
+
+def test_schema_guard_rejects_non_btree_company_driver_lookup_index(foundation):
+    with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
+        cur.execute("DROP INDEX core.ix_drivers_company_driverid")
+        cur.execute("CREATE INDEX ix_drivers_company_driverid ON core.drivers USING hash(companyid)")
+        assert any("ix_drivers_company_driverid" in error for error in _check_import_foundation(cur))
+        conn.rollback()
+
+
 def test_schema_guard_rejects_broad_btree_that_masks_ownership_lookup(foundation):
     with psycopg2.connect(**foundation) as conn, conn.cursor() as cur:
         cur.execute("DROP INDEX import.ix_payrollworkrecords_import")
