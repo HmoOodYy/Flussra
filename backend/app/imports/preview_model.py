@@ -5,7 +5,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 from app.imports.aggregation import (
     CategoryEvidenceError,
@@ -43,6 +43,7 @@ from app.imports.semantic_identity import (
     TargetReceiptAccumulator,
     canonical_rule_meaning,
     matching_completed_receipts,
+    prepare_rule_meaning,
 )
 from app.payroll.definition_calculation import quantity_error
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
@@ -93,7 +94,7 @@ def _effective_row_policy(rule):
 
 
 def _sum_quantity(cells: dict, columns: list[int | None], definition, max_work_digits: int, *,
-                  validate_result: bool = True):
+                  validate_result: bool = True, parsed_operands: dict | None = None):
     values = []
     raw_operands = []
     missing = not columns or any(column is None for column in columns)
@@ -108,7 +109,12 @@ def _sum_quantity(cells: dict, columns: list[int | None], definition, max_work_d
         raw_operands.append({"column": int(column), "value": canonical(cell.get("value")),
                              "kind": cell.get("kind"), "formula": bool(cell.get("formula")),
                              "missing_cache": bool(cell.get("missing_cache"))})
-        value, error, is_blank = parse_sum_operand(cell)
+        if parsed_operands is not None and int(column) in parsed_operands:
+            value, error, is_blank = parsed_operands[int(column)]
+        else:
+            value, error, is_blank = parse_sum_operand(cell)
+            if parsed_operands is not None:
+                parsed_operands[int(column)] = (value, error, is_blank)
         if error:
             if first_error is None:
                 first_error = error
@@ -351,6 +357,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
     issues: list[dict] = []
     semantic_target_rules = defaultdict(dict)
     semantic_target_accumulators = {}
+    prepared_rule_cache = {}
     semantic_target_expected = Counter()
     target_content_tokens = defaultdict(list)
     data_rows = candidates = selected_cells = 0
@@ -449,14 +456,26 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                     date_authority=date_authority)
             except SemanticInputError:
                 meaning = None
-            semantic_target_rules[target][source.get("source_unit_id")] = {
-                "meaning": meaning, "columns": effective_columns}
+            prepared_rule = None
             if meaning is not None:
-                semantic_target_accumulators.setdefault(target, TargetReceiptAccumulator(
+                meaning_key = encoded(meaning)
+                prepared_rule = prepared_rule_cache.get(meaning_key)
+                if prepared_rule is None:
+                    prepared_rule = prepare_rule_meaning(meaning)
+                    prepared_rule_cache[meaning_key] = prepared_rule
+            selector_columns = (MappingProxyType(dict(zip(prepared_rule.selector_keys, effective_columns, strict=True)))
+                                if prepared_rule is not None else MappingProxyType({}))
+            semantic_target_rules[target][source.get("source_unit_id")] = {
+                "meaning": prepared_rule.meaning if prepared_rule is not None else None,
+                "prepared": prepared_rule, "columns": tuple(effective_columns),
+                "columns_by_selector": selector_columns}
+            if prepared_rule is not None and target not in semantic_target_accumulators:
+                semantic_target_accumulators[target] = TargetReceiptAccumulator(
                     scope={"company_id": period["company_id"], "branch_id": period["branch_id"],
                            "period_id": period["id"]},
                     pay_definition_id=definition.pay_definition_id,
-                    target_meaning=definition_meaning(definition), rule_meaning=meaning))
+                    target_meaning=definition_meaning(definition), rule_meaning=meaning,
+                    prepared_rule=prepared_rule)
         date_column = next((column for column, target in mapped.items() if target == "WorkDate"), None)
         raw_rows = materialized["rows"]
         def has_operand(item, rule):
@@ -566,6 +585,17 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                                                   if item.get("resolved_date")})
         for source_row in raw_rows:
             cells = source_row["cells"]
+            parsed_operands = {}
+
+            def parsed_operand(column):
+                if column is None:
+                    return None, None, True
+                column = int(column)
+                if column not in parsed_operands:
+                    parsed_operands[column] = parse_sum_operand(
+                        cells.get(str(column), _date_cell(None)))
+                return parsed_operands[column]
+
             category_cell = cells.get(str(filter_column)) if filter_column is not None else None
             category_key = None
             category_decision = None
@@ -765,7 +795,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                     value, error, raw_operands, missing_sum, error_column = _sum_quantity(
                         cells, columns, definition,
                         policy.max_numeric_work_digits if policy else DEFAULT_IMPORT_RESOURCE_POLICY.max_numeric_work_digits,
-                        validate_result=row_rule_mode == "RejectRepeated")
+                        validate_result=row_rule_mode == "RejectRepeated", parsed_operands=parsed_operands)
                     if error_column is not None:
                         issue_column = error_column
                     cell = {"value": canonical(value), "kind": "number", "formula": False,
@@ -778,7 +808,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                     if skipped:
                         value, error = None, None
                     elif row_rule_mode != "RejectRepeated":
-                        value, error, is_blank = parse_sum_operand(cell)
+                        value, error, is_blank = parsed_operand(column)
                     else:
                         value, error = quantity(cell, SimpleNamespace(input_type=definition.input_type))
                 source_columns = [int(item) for item in columns if item is not None]
@@ -871,18 +901,17 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                 if meaning := source_rule.get("meaning"):
                     if not source_columns:
                         continue
-                    input_selectors = meaning["inputs"]
-                    columns_by_selector = {encoded(selector): column for selector, column in
-                                           zip(input_selectors, source_rule["columns"], strict=True)}
+                    prepared_rule = source_rule["prepared"]
+                    input_selectors = prepared_rule.selectors
                     operands = []
                     if is_sum:
-                        for selector in input_selectors:
-                            column = columns_by_selector[encoded(selector)]
+                        for selector, selector_key in zip(
+                                input_selectors, prepared_rule.selector_keys, strict=True):
+                            column = source_rule["columns_by_selector"][selector_key]
                             if column is None:
                                 operands.append({"selector": selector, "state": "absent"})
                                 continue
-                            operand_value, operand_error, operand_blank = parse_sum_operand(
-                                cells.get(str(column), _date_cell(None)))
+                            operand_value, operand_error, operand_blank = parsed_operand(column)
                             if operand_error:
                                 operands = []
                                 break
@@ -890,12 +919,11 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                                 "state": "blank" if operand_blank else "value",
                                 **({} if operand_blank else {"value": operand_value})})
                     else:
-                        column = columns_by_selector[encoded(input_selectors[0])]
+                        column = source_rule["columns_by_selector"][prepared_rule.selector_keys[0]]
                         if column is None:
                             operands = []
                         else:
-                            operand_value, operand_error, operand_blank = parse_sum_operand(
-                                cells.get(str(column), _date_cell(None)))
+                            operand_value, operand_error, operand_blank = parsed_operand(column)
                             if operand_error:
                                 operands = []
                             else:
@@ -926,16 +954,16 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                 source_rule = semantic_target_rules[target].get(source.get("source_unit_id"), {})
                 meaning = source_rule.get("meaning")
                 if meaning is not None:
-                    selector_columns = {encoded(selector): column for selector, column in
-                                        zip(meaning["inputs"], source_rule["columns"], strict=True)}
+                    prepared_rule = source_rule["prepared"]
                     business_operands = []
-                    for selector in meaning["inputs"]:
-                        column = selector_columns[encoded(selector)]
+                    for selector, selector_key in zip(
+                            prepared_rule.selectors, prepared_rule.selector_keys, strict=True):
+                        column = source_rule["columns_by_selector"][selector_key]
                         if column is None:
                             business_operands.append({"selector": selector, "state": "absent"})
                             continue
                         raw_cell = cells.get(str(column), _date_cell(None))
-                        operand_value, operand_error, operand_blank = parse_sum_operand(raw_cell)
+                        operand_value, operand_error, operand_blank = parsed_operand(column)
                         if operand_error:
                             business_operands.append({"selector": selector, "state": "invalid",
                                 "raw_value": canonical(raw_cell.get("value")), "kind": raw_cell.get("kind"),
@@ -967,7 +995,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                     continue
                 supplied = {item["kind"]: item["value"] for item in identifiers}
                 semantic_row = {
-                    **semantic_input, "state": "included", "identity_status": identity["status"],
+                    **{key: value for key, value in semantic_input.items() if key != "rule_meaning"},
+                    "state": "included", "identity_status": identity["status"],
                     "requires_confirmation": identity_requires_confirmation,
                     "driver": {"driver_number": supplied.get("DriverNumber"),
                                "employee_key": supplied.get("EmployeeKey"),
@@ -978,9 +1007,10 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None, comp
                     "category_decision": category_decision,
                 }
                 try:
-                    accumulator.add(semantic_row, ({"kind": item["kind"], "value": item["value"],
-                                                   "driver_id": driver_id} for item in identifiers
-                                                  if item["kind"] in IDENTIFIERS))
+                    accumulator.add_prepared(
+                        semantic_row, ({"kind": item["kind"], "value": item["value"],
+                                        "driver_id": driver_id} for item in identifiers
+                                       if item["kind"] in IDENTIFIERS), source_rule["prepared"])
                 except SemanticInputError:
                     accumulator.mark_invalid()
             row_fp = fingerprint("row", source_semantics)

@@ -7,10 +7,12 @@ import pytest
 from app.imports.semantic_identity import (
     SEMANTIC_INPUT_VERSION,
     SemanticInputError,
+    TargetReceiptAccumulator,
     build_target_receipt,
     canonical_rule_meaning,
     is_complete_repeat,
     matching_target_ids,
+    prepare_rule_meaning,
     validate_target_receipt,
 )
 
@@ -208,3 +210,74 @@ def test_receipt_validation_rejects_malformed_frozen_definition_scalar_types():
         malformed["target_meaning"][field] = bad_value
         with pytest.raises(SemanticInputError):
             validate_target_receipt(malformed)
+
+
+def test_prepared_rule_is_deeply_immutable_and_keeps_generic_add_validation():
+    source_rule = rule_meaning(transform="Direct", inputs=[{"header": "Hours"}], mode="RejectRepeated")
+    prepared = prepare_rule_meaning(source_rule)
+    accumulator = TargetReceiptAccumulator(
+        scope=SCOPE, pay_definition_id=11, target_meaning=TARGET_A,
+        rule_meaning=source_rule, prepared_rule=prepared)
+
+    source_rule["inputs"][0]["header"] = "Changed"
+    with pytest.raises(TypeError):
+        prepared.meaning["transform"] = "Sum"
+    with pytest.raises(TypeError):
+        prepared.selectors[0]["header"] = "Changed"
+
+    # The public add path still validates arbitrary row mappings, including a
+    # copied selector equivalent to (but not identical with) the prepared one.
+    generic = included_row(Decimal("1"), category="unused")
+    generic["operands"][0]["selector"] = deepcopy(HOURS)
+    generic.pop("category")
+    generic.pop("category_decision")
+    accumulator.add(generic, BINDINGS)
+
+    invalid = included_row(Decimal("2"), category="unused")
+    invalid["operands"][0]["selector"] = deepcopy(HOURS)
+    invalid["rule_meaning"] = {**source_rule, "inputs": [{"header": "Unsupported"}]}
+    invalid.pop("category")
+    invalid.pop("category_decision")
+    with pytest.raises(SemanticInputError):
+        accumulator.add(invalid, BINDINGS)
+
+
+def test_prepared_equivalent_rules_keep_their_own_frozen_selectors_and_target_guard():
+    source_rule = rule_meaning(transform="Direct", inputs=[{"header": "Hours"}], mode="RejectRepeated")
+    first = prepare_rule_meaning(source_rule)
+    second = prepare_rule_meaning(deepcopy(source_rule))
+    accumulator = TargetReceiptAccumulator(
+        scope=SCOPE, pay_definition_id=11, target_meaning=TARGET_A,
+        rule_meaning=source_rule, prepared_rule=first)
+    row = included_row(Decimal("1"), category="unused")
+    row.pop("category")
+    row.pop("category_decision")
+    row["operands"][0]["selector"] = second.selectors[0]
+
+    accumulator.add_prepared(row, BINDINGS, second)
+    assert accumulator.build()["record_count"] == 1
+
+    mismatched = prepare_rule_meaning(rule_meaning(
+        target=TARGET_B, transform="Direct", inputs=[{"header": "Hours"}], mode="RejectRepeated"))
+    with pytest.raises(SemanticInputError):
+        accumulator.add_prepared(row, BINDINGS, mismatched)
+
+    with pytest.raises(SemanticInputError):
+        TargetReceiptAccumulator(scope=SCOPE, pay_definition_id=11, target_meaning=TARGET_A,
+            rule_meaning=rule_meaning(target=TARGET_B, transform="Direct", inputs=[HOURS], mode="RejectRepeated"),
+            prepared_rule=first)
+
+
+def test_generic_accumulator_can_register_a_prepared_rule_after_construction():
+    meaning = rule_meaning(transform="Direct", inputs=[HOURS], mode="RejectRepeated")
+    prepared = prepare_rule_meaning(meaning)
+    accumulator = TargetReceiptAccumulator(
+        scope=SCOPE, pay_definition_id=11, target_meaning=TARGET_A, rule_meaning=meaning)
+    row = included_row(Decimal("3"))
+    row.pop("category")
+    row.pop("category_decision")
+    row["operands"][0]["selector"] = prepared.selectors[0]
+
+    accumulator.add_prepared(row, BINDINGS, prepared)
+
+    assert accumulator.build()["record_count"] == 1

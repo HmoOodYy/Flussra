@@ -1156,3 +1156,236 @@ def test_sum_rows_repeat_after_source_removal_keeps_one_combined_candidate():
     }])
     assert different_multiset["rows"][0]["values"]["100"]["quantity"] == "5"
     assert different_multiset["repeat_notice"]["state"] == "None"
+
+
+def test_preview_semantic_identity_matches_version_one_golden_fixtures():
+    """Protect existing public and receipt hashes while optimizing preview preparation."""
+    direct = _source()
+    partial_sum = _sum_source(first="2", second="")
+    invalid_sum = _sum_source(first="", second="bad")
+
+    filtered = _source(quantity_value="4")
+    filtered["mapping"]["4"] = "Filter"
+    filtered["materialized"]["inspection"]["header_cells"].append("Category")
+    filtered["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "Include", "kind": "text", "formula": False, "missing_cache": False,
+    }
+    filtered["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "FilterThenSum", "choices": [
+            {"category": {"type": "text", "value": "Include"}, "decision": "Include"},
+            {"category": {"type": "text", "value": "Ignore"}, "decision": "Exclude"},
+        ],
+    }
+    filtered["quantity_rules"][0]["shared_columns"]["Filter"] = {"header": "Category"}
+
+    repeated = _source(quantity_value="2")
+    repeated["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": [],
+    }
+    second = deepcopy(repeated["materialized"]["rows"][0])
+    second["source_row"] = 3
+    second["cells"]["3"]["value"] = "3"
+    repeated["materialized"]["rows"].append(second)
+
+    duplicate_first = _sum_source(first="2", second="3")
+    duplicate_first["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": [],
+    }
+    duplicate_first["quantity_rules"][0]["inputs"] = [
+        {"header": "Hours", "occurrences": [{"occurrence_ordinal": 1}]},
+        {"header": "Hours", "occurrences": [{"occurrence_ordinal": 2}]},
+    ]
+    duplicate_first["source_unit_id"] = 1
+    duplicate_first["unit_name"] = "First"
+    duplicate_first["materialized"]["inspection"]["header_cells"] = [
+        "DriverNumber", "WorkDate", "Hours", "Hours",
+    ]
+    duplicate_first["materialized"]["inspection"]["header_occurrences"] = [
+        {"source_column": 3, "occurrence_count": 2, "occurrence_ordinal": 1},
+        {"source_column": 4, "occurrence_count": 2, "occurrence_ordinal": 2},
+    ]
+    duplicate_second = deepcopy(duplicate_first)
+    duplicate_second["source_unit_id"] = 2
+    duplicate_second["file_ordinal"] = 2
+    duplicate_second["unit_name"] = "Second"
+    duplicate_second["mapping"] = {"3": "WorkDate", "4": "DriverNumber"}
+    duplicate_second["quantity_rules"][0]["columns"] = ["1", "2"]
+    duplicate_second["materialized"]["inspection"]["header_cells"] = [
+        "Hours", "Hours", "WorkDate", "DriverNumber",
+    ]
+    duplicate_second["materialized"]["inspection"]["header_occurrences"] = [
+        {"source_column": 1, "occurrence_count": 2, "occurrence_ordinal": 1},
+        {"source_column": 2, "occurrence_count": 2, "occurrence_ordinal": 2},
+    ]
+    duplicate_second["materialized"]["rows"][0]["cells"] = {
+        "1": {"value": "5", "kind": "number", "formula": False, "missing_cache": False},
+        "2": {"value": "6", "kind": "number", "formula": False, "missing_cache": False},
+        "3": {"value": WORK_DATE.isoformat(), "kind": "text", "formula": False, "missing_cache": False},
+        "4": {"value": "001", "kind": "text", "formula": False, "missing_cache": False},
+    }
+    duplicate_second["materialized"]["nonempty_columns"] = [1, 2, 3, 4]
+    duplicate_second["date_source"] = {"kind": "filename"}
+    duplicate_second["file_name"] = "2026-10-20.csv"
+
+    cases = {
+        "direct": ([direct], "1206cacbfbf544d787ff0b7b7c221c3302d0e990f2f4e8ca582e857c5371f14a",
+                   "98cc698a8d2056d6221be373bd3704292daaa22908911e1c7b7861dd7dfd9bf0",
+                   "e3ebada9eebdc672be94eee240faeff024d8e4739e03bd2d0da386abfc0b4f8c",
+                   ["de93616d440dd9a3e0d3482da69b131f6a855efb5ff12d7211f44c8b34a7a8cb"],
+                   "a71c9441080dfb2d749242e7d8e52650381cee813ad4e54aad33a4152e5176de",
+                   "c80bb11b66bcbe35bee45c01718b773886f727d34a33f82e91870eb0874f7878",
+                   "cf124c6b37e54af62cc974c79163d4939de6641c22f619bea9f5bf7c97f84dea", 1, 1),
+        "partial_sum": ([partial_sum], "33fd6978330c8f41e91f6ad9376b04643847a1b7f1c65eaec0f70a35ebcfffdf",
+                        "4d989d3d134307ce4f020dceaf16653c338d8308949908c7af6e9f6f0a52c308",
+                        "558224cc7cd145ed2f7ef2fed9933d41a0cce1138803ffb7db9230ef151dde7a",
+                        ["26551513bdb6b8e8d8cc026f8197a71e998b94dfdbe6b48f4517d8e3d81b270d"],
+                        "acf914e07ac93b71fac5a6746c94fa7dcbad9c029c43562fce392414eed39c05",
+                        "ae2889f6fb62ea38969a250a72de62f516d2f59cf4db9981969352b43d54ff4d",
+                        "cf124c6b37e54af62cc974c79163d4939de6641c22f619bea9f5bf7c97f84dea", 1, 1),
+        "invalid_sum": ([invalid_sum], "33fd6978330c8f41e91f6ad9376b04643847a1b7f1c65eaec0f70a35ebcfffdf",
+                        "87825e2e9337f01335aa0d9e2a007c59e63cda1ee9e5c2e9ef763453e766690d",
+                        "e8d6db201e4be37741c6f9a631c43a0acfe8eb14641750c418aa9eba604058d7",
+                        ["3c5d35bf8b3fc901dddbe5c652c1fc2e670fc2a885ea7b802f961b4da88a4338"],
+                        None, None, None, 0, None),
+        "filtered": ([filtered], "f357b4f97ae7f19ba74882693d32620ee8df80d9134debfbbcfa0d2764a14e5c",
+                      "2303395dcb9e155a7e1ba30d05a660985724f218658326b46619168c5df8df02",
+                      "19e0035e40aa6d193f9ca33f8064914639e56e115bb742236c2421aac865db76",
+                      ["a81e217db076b08ae58c59cb9140f902d5d81a66af8084dff9d1d6c667f056e9"],
+                      "5e49ba0487afb259f53aee8384776865e63cee9778cb9f2462211c82028c08f9",
+                      "2c84f4725f7860a8cfa95f7ecc6d5e112317b4a83247ba8c6a67e5ef9848c129",
+                      "cf124c6b37e54af62cc974c79163d4939de6641c22f619bea9f5bf7c97f84dea", 1, 1),
+        "repeated": ([repeated], "a1fe930a2f9c106cfba9783eeec250aab5cd6f0539a670c1b97398f8ab0be37c",
+                      "4f4b21c749d84d9f000fcfd4f6f36bfedd4fab5e36472ba7ff5a62034fd470c6",
+                      "434289ee178853a598e65f0670a3fb5fda8025739a6524c5fdbf21c942421467",
+                      ["0fe49b5eb8421181ed000a827b02b11bfe57b9bd7aeef4e521ccfdbfad2f1e16",
+                       "a9052639899403b3c61cd9b6ed08a4e87ab52d50a7186240f96d2ed8e724e1ab"],
+                      "2561b34563573c4cd1e5197fac5ce409d51b9d179cf02d55eec7fcfc63c4dcc2",
+                      "25e2fb516721922665e2f9651da25c1ab0dfbfeb35d77e01426ac6061bb508dc",
+                      "cf124c6b37e54af62cc974c79163d4939de6641c22f619bea9f5bf7c97f84dea",
+                      1, 2),
+        "duplicate_mixed": ([duplicate_first, duplicate_second],
+                             "073d603d1acfd6a5979fda40ffd954a8c9e5dbca1f4cc2dafe00bf6c6503d17a",
+                             "40c4f55ad16bf07b29fcb42b4d2c07fc147c56208acbf1babcad2fd64bb9e76f",
+                             "8c5a107aee254cffee24132eadf742dffe235dd0e0d2b9053fc40401f86cc6da",
+                             ["e79f2662cb7f0a9eb3578def47b0673e1290e9d1f84bbfb4953e5a6ffa591938",
+                              "4cf96cfc36de07c09c2a660387e7ad5d1d093092348f51234e5efad3412b4904"],
+                             "9430ffa2488a77b7dbd20451fe7499fcf66cf72505d5ad3d15feb0f614970c19",
+                             "6f73f3079cded05d9b428975bbb54bb4bf6d7a5de72842b6348137df0bab1bdd",
+                             "cf124c6b37e54af62cc974c79163d4939de6641c22f619bea9f5bf7c97f84dea", 1, 2),
+    }
+
+    for case, (sources, mapping_fp, content_fp, plan_fp, row_fps, receipt_fp,
+               rule_fp, binding_fp, receipt_count, record_count) in cases.items():
+        preview = build_batch_preview(sources, _context())
+        assert preview["mapping_fingerprint"] == mapping_fp, case
+        assert preview["content_fingerprint"] == content_fp, case
+        assert preview["plan_fingerprint"] == plan_fp, case
+        assert [row["row_fingerprint"] for row in preview["rows"]] == row_fps, case
+        assert preview["candidates"] == 1, case
+        assert len(preview["semantic_receipts"]) == receipt_count, case
+        if receipt_fp is not None:
+            receipt = preview["semantic_receipts"][0]
+            assert receipt["input_sha256"] == receipt_fp, case
+            assert receipt["rule_meaning_sha256"] == rule_fp, case
+            assert receipt["binding_sha256"] == binding_fp, case
+            assert receipt["version"] == 1, case
+            assert receipt["record_count"] == record_count, case
+        if case == "duplicate_mixed":
+            assert preview["rows"][0]["values"]["100"]["quantity"] == "16"
+            assert preview["rows"][0]["values"]["100"]["source_columns"] == [3, 4]
+            assert preview["rows"][1]["values"]["100"]["source_columns"] == [1, 2]
+
+
+def test_preview_reuses_each_physical_operand_parse_and_prepares_rules_once(monkeypatch):
+    from collections import Counter
+
+    from app.imports import preview_model, semantic_identity
+
+    parsed = []
+    original_parse = preview_model.parse_sum_operand
+
+    def count_parse(cell):
+        parsed.append(cell.get("value"))
+        return original_parse(cell)
+
+    validated = []
+    original_validate = semantic_identity._validated_rule_meaning
+
+    def count_validate(value):
+        validated.append(value)
+        return original_validate(value)
+
+    monkeypatch.setattr(preview_model, "parse_sum_operand", count_parse)
+    monkeypatch.setattr(semantic_identity, "_validated_rule_meaning", count_validate)
+
+    direct = build_batch_preview([_source()], _context())
+    assert direct["rows"][0]["values"]["100"]["quantity"] == "4"
+    assert parsed == ["4.0000"]
+
+    parsed.clear()
+    validated.clear()
+    summed = _sum_source(first="0.5", second="0.5")
+    summed["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": [],
+    }
+    for index, (first, second) in enumerate((("1", "2"), ("3", "4")), start=1):
+        row = deepcopy(summed["materialized"]["rows"][0])
+        row["source_row"] = index + 2
+        row["cells"]["3"]["value"] = first
+        row["cells"]["4"]["value"] = second
+        summed["materialized"]["rows"].append(row)
+    second_unit = _sum_source(first="5", second="6")
+    second_unit["source_unit_id"] = 2
+    second_unit["file_ordinal"] = 2
+    second_unit["unit_name"] = "Second CSV"
+    second_unit["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": [],
+    }
+
+    result = build_batch_preview([summed, second_unit], _context())
+
+    assert result["rows"][0]["values"]["100"]["quantity"] == "22"
+    assert Counter(parsed) == Counter({"0.5": 2, "1": 1, "2": 1, "3": 1, "4": 1, "5": 1, "6": 1})
+    assert len(validated) == 1
+
+
+def test_absent_direct_target_in_aggregate_modes_does_not_block_other_target():
+    for mode in ("SumRows", "FilterThenSum"):
+        source = _source(quantity_value="unused")
+        source["quantity_rules"][0]["columns"] = [None]
+        row_rule = {"version": 1, "mode": mode, "choices": []}
+        source["materialized"]["inspection"]["header_cells"].append("Overtime")
+        source["materialized"]["rows"][0]["cells"]["4"] = {
+            "value": "2", "kind": "text", "formula": False, "missing_cache": False,
+        }
+        source["materialized"]["nonempty_columns"].append(4)
+        if mode == "FilterThenSum":
+            source["mapping"]["5"] = "Filter"
+            source["materialized"]["inspection"]["header_cells"].append("Category")
+            source["materialized"]["rows"][0]["cells"]["5"] = {
+                "value": "Work", "kind": "text", "formula": False, "missing_cache": False,
+            }
+            row_rule["choices"] = [{"category": {"type": "text", "value": "Work"},
+                                    "decision": "Include"}]
+            source["quantity_rules"][0]["shared_columns"]["Filter"] = {"header": "Category"}
+        source["quantity_rules"][0]["row_handling"] = deepcopy(row_rule)
+        second_rule = {
+            "target": "Definition:101", "transform": "Direct", "columns": ["4"],
+            "inputs": [{"header": "Overtime"}],
+            "shared_columns": {"DriverNumber": {"header": "DriverNumber"},
+                               "WorkDate": {"header": "WorkDate"}},
+            "row_handling": deepcopy(row_rule),
+        }
+        if mode == "FilterThenSum":
+            second_rule["shared_columns"]["Filter"] = {"header": "Category"}
+        source["quantity_rules"].append(second_rule)
+        context = _context()
+        overtime = _definition(101, "OVERTIME", "Overtime")
+        context["definitions"].append(overtime)
+        context["definition_by_id"][101] = overtime
+
+        preview = build_batch_preview([source], context)
+
+        assert set(preview["rows"][0]["values"]) == {"101"}
+        assert preview["rows"][0]["values"]["101"]["quantity"] == "2"
+        assert preview["candidates"] == 1

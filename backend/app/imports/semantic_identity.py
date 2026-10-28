@@ -4,13 +4,15 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from types import MappingProxyType
 
+from app.compensation.schemas import CALCULATION_METHODS, INPUT_TYPES
 from app.imports.aggregation import category_key_from_json, category_key_to_json
 from app.imports.headers import normalize_header
 from app.imports.mapping import canonical, encoded, normalized_identifier
-from app.compensation.schemas import CALCULATION_METHODS, INPUT_TYPES
 
 SEMANTIC_INPUT_VERSION = 1
 _SHA256 = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
@@ -149,6 +151,36 @@ def _validated_rule_meaning(value: Mapping) -> dict:
     return normalized
 
 
+_PREPARED_RULE_TOKEN = object()
+
+
+def _freeze_json(value):
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRuleMeaning:
+    """Preview-local immutable rule snapshot with canonical selector keys."""
+
+    meaning: Mapping
+    encoded_meaning: str
+    selectors: tuple[Mapping, ...]
+    selector_keys: tuple[str, ...]
+    _token: object
+
+
+def prepare_rule_meaning(value: Mapping) -> PreparedRuleMeaning:
+    meaning = _validated_rule_meaning(value)
+    selectors = tuple(_freeze_json(item) for item in meaning["inputs"])
+    selector_keys = tuple(encoded(item) for item in selectors)
+    return PreparedRuleMeaning(_freeze_json(meaning), encoded(meaning), selectors, selector_keys,
+                               _PREPARED_RULE_TOKEN)
+
+
 def _day(value) -> str:
     if isinstance(value, datetime):
         raise SemanticInputError("WorkDate must be a calendar date, not a datetime.")
@@ -181,10 +213,15 @@ def _driver_meaning(value: Mapping) -> dict:
     return result
 
 
-def _operand(value: Mapping) -> dict:
+def _operand(value: Mapping, *, prepared_selector: Mapping | None = None) -> dict:
     if not isinstance(value, Mapping) or set(value) - {"selector", "state", "value"}:
         raise SemanticInputError("Quantity operand meaning is malformed.")
-    selector = _selector(value.get("selector"))
+    if prepared_selector is None:
+        selector = _selector(value.get("selector"))
+    else:
+        if value.get("selector") is not prepared_selector:
+            raise SemanticInputError("Prepared quantity operand does not match its immutable selector.")
+        selector = prepared_selector
     state = value.get("state")
     if state in {"absent", "blank"}:
         if "value" in value:
@@ -225,7 +262,7 @@ class TargetReceiptAccumulator:
     """Incrementally fold one target's normalized rows into bounded hash tokens."""
 
     def __init__(self, *, scope: Mapping, pay_definition_id: int, target_meaning: Mapping,
-                 rule_meaning: Mapping):
+                 rule_meaning: Mapping, prepared_rule: PreparedRuleMeaning | None = None):
         if not isinstance(scope, Mapping) or set(scope) != {"company_id", "branch_id", "period_id"}:
             raise SemanticInputError("Receipt scope is malformed.")
         if any(type(scope[key]) is not int or scope[key] < 1 for key in scope):
@@ -236,18 +273,40 @@ class TargetReceiptAccumulator:
         self.scope = dict(scope)
         self.pay_definition_id = pay_definition_id
         self.target_meaning = canonical(dict(target_meaning))
-        self.rule_meaning = _validated_rule_meaning(rule_meaning)
+        if prepared_rule is None:
+            self.rule_meaning = _validated_rule_meaning(rule_meaning)
+        elif not isinstance(prepared_rule, PreparedRuleMeaning):
+            raise SemanticInputError("Prepared source-rule meaning is malformed.")
+        elif prepared_rule._token is not _PREPARED_RULE_TOKEN:
+            raise SemanticInputError("Prepared source-rule meaning is not validated.")
+        elif encoded(rule_meaning) != prepared_rule.encoded_meaning:
+            raise SemanticInputError("Prepared and supplied source-rule meanings disagree.")
+        else:
+            self.rule_meaning = prepared_rule.meaning
         if encoded(self.rule_meaning["target"]) != encoded(self.target_meaning):
             raise SemanticInputError("Receipt target and source-rule target meaning disagree.")
         self.row_tokens = []
         self.effective_rule_meanings = {}
         self.binding_entries = {}
+        self._prepared_rules = ({prepared_rule.encoded_meaning}
+                                if prepared_rule is not None else set())
         self.invalid = False
 
     def mark_invalid(self):
         self.invalid = True
 
     def add(self, row: Mapping, bindings: Iterable = ()):
+        self._add(row, bindings, prepared=None)
+
+    def add_prepared(self, row: Mapping, bindings: Iterable, prepared: PreparedRuleMeaning):
+        """Trusted preview path for a rule already validated and frozen in this call."""
+        if not isinstance(prepared, PreparedRuleMeaning) or prepared._token is not _PREPARED_RULE_TOKEN:
+            raise SemanticInputError("Prepared source-rule meaning is malformed.")
+        if isinstance(row, Mapping) and "rule_meaning" in row:
+            raise SemanticInputError("Prepared source rows cannot replace their immutable rule.")
+        self._add(row, bindings, prepared=prepared)
+
+    def _add(self, row: Mapping, bindings: Iterable, *, prepared: PreparedRuleMeaning | None):
         if not isinstance(row, Mapping):
             raise SemanticInputError("Receipt row is malformed.")
         state = row.get("state")
@@ -265,20 +324,33 @@ class TargetReceiptAccumulator:
         operands = row.get("operands")
         if not isinstance(operands, list) or not operands:
             raise SemanticInputError("Included quantity evidence needs its physical operands.")
-        canonical_operands = [_operand(item) for item in operands]
-        selectors = [encoded(item["selector"]) for item in canonical_operands]
-        if len(selectors) != len(set(selectors)):
-            raise SemanticInputError("A physical quantity occurrence cannot be repeated in one contribution.")
-        row_rule = self.rule_meaning
-        if "rule_meaning" in row:
-            row_rule = _validated_rule_meaning(row["rule_meaning"])
-            if encoded(row_rule["target"]) != encoded(self.rule_meaning["target"]):
-                raise SemanticInputError("A source-unit rule cannot change the target meaning.")
-        self.effective_rule_meanings[encoded(row_rule)] = row_rule
-        expected_selectors = [encoded(item) for item in row_rule["inputs"]]
-        if sorted(selectors) != sorted(expected_selectors):
-            raise SemanticInputError("Contribution operands do not match the saved target inputs.")
-        canonical_operands.sort(key=encoded)
+        if prepared is None:
+            row_rule = self.rule_meaning
+            if "rule_meaning" in row:
+                row_rule = _validated_rule_meaning(row["rule_meaning"])
+                if encoded(row_rule["target"]) != encoded(self.rule_meaning["target"]):
+                    raise SemanticInputError("A source-unit rule cannot change the target meaning.")
+            canonical_operands = [_operand(item) for item in operands]
+            selectors = [encoded(item["selector"]) for item in canonical_operands]
+            if len(selectors) != len(set(selectors)):
+                raise SemanticInputError("A physical quantity occurrence cannot be repeated in one contribution.")
+            rule_key = encoded(row_rule)
+            expected_selectors = [encoded(item) for item in row_rule["inputs"]]
+            if sorted(selectors) != sorted(expected_selectors):
+                raise SemanticInputError("Contribution operands do not match the saved target inputs.")
+            canonical_operands.sort(key=encoded)
+        else:
+            if prepared.encoded_meaning not in self._prepared_rules:
+                if encoded(prepared.meaning["target"]) != encoded(self.target_meaning):
+                    raise SemanticInputError("A source-unit rule cannot change the target meaning.")
+                self._prepared_rules.add(prepared.encoded_meaning)
+            row_rule = prepared.meaning
+            if len(operands) != len(prepared.selectors):
+                raise SemanticInputError("Contribution operands do not match the saved target inputs.")
+            canonical_operands = [_operand(item, prepared_selector=selector)
+                                  for item, selector in zip(operands, prepared.selectors, strict=True)]
+            rule_key = prepared.encoded_meaning
+        self.effective_rule_meanings[rule_key] = row_rule
         category = row.get("category")
         decision = row.get("category_decision")
         if row_rule.get("row_handling", {}).get("mode") == "FilterThenSum":
