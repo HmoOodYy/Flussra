@@ -141,6 +141,9 @@ async def persist_preview(db, *, company_id: int, import_id: int, branch_id: int
             ((row["source_record_id"], import_id, company_id, identifier["column"],
               match_id_by_key[(identifier["kind"], identifier["value"])])
              for row in rows for identifier in row["identifiers"]))
+    review_summary = {**result["counts"]}
+    if result.get("date_review") is not None:
+        review_summary["date_review"] = result["date_review"]
     await db.execute(text("""
         UPDATE import.payrollworkimports SET mappingfingerprint = :mapping,
             contentfingerprint = :content, planfingerprint = :plan,
@@ -148,7 +151,7 @@ async def persist_preview(db, *, company_id: int, import_id: int, branch_id: int
         WHERE importid = :iid AND companyid = :cid
     """), {"iid": import_id, "cid": company_id, "mapping": result["mapping_fingerprint"],
            "content": result["content_fingerprint"], "plan": result["plan_fingerprint"],
-           "counts": _json(result["counts"]), "summary": _json(result["counts"])})
+           "counts": _json(result["counts"]), "summary": _json(review_summary)})
     await db.execute(text("""
         INSERT INTO import.payrollworkpreviewrulecontexts
             (importid, companyid, branchid, payrollperiodid, fingerprint)

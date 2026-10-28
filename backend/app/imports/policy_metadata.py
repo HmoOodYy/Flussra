@@ -69,6 +69,7 @@ class ImportResourcePolicyResponse(BaseModel):
     header_page_max: int = Field(strict=True, ge=1)
     row_detail_sample: int = Field(strict=True, ge=1)
     layout_header_sample: int = Field(strict=True, ge=1)
+    date_review_day_sample: int = Field(strict=True, ge=1)
     max_header_label_chars: int = Field(strict=True, ge=1)
     max_request_body_bytes: int = Field(strict=True, ge=1)
     max_mapping_request_bytes: int = Field(strict=True, ge=1)

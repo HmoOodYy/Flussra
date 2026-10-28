@@ -31,6 +31,7 @@ def test_product_and_resource_policy_defaults_are_immutable_and_validated():
     assert resources == DEFAULT_IMPORT_RESOURCE_POLICY
     assert resources.max_identity_lookup_rows == 100_000
     assert resources.identity_lookup_batch_rows == 512
+    assert resources.date_review_day_sample == 512
     settings = _settings()
     assert asdict(settings.product_policy) == asdict(DEFAULT_PRODUCT_POLICY)
     assert asdict(settings.import_resource_policy) == asdict(DEFAULT_IMPORT_RESOURCE_POLICY)
@@ -47,7 +48,8 @@ def test_product_policy_rejects_invalid_capacities(value):
 
 
 @pytest.mark.parametrize("field", ["IMPORT_MAX_RESPONSE_BYTES", "PRODUCT_MAX_COMPANY_PAY_ITEMS",
-                                   "IMPORT_MAX_IDENTITY_LOOKUP_ROWS", "IMPORT_IDENTITY_LOOKUP_BATCH_ROWS"])
+                                   "IMPORT_MAX_IDENTITY_LOOKUP_ROWS", "IMPORT_IDENTITY_LOOKUP_BATCH_ROWS",
+                                   "IMPORT_DATE_REVIEW_DAY_SAMPLE"])
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, Decimal("1.5")])
 def test_settings_reject_invalid_import_policy_values(field, value):
     with pytest.raises(ValidationError):
@@ -85,6 +87,7 @@ def test_settings_load_policy_overrides_from_environment(monkeypatch):
     monkeypatch.setenv("IMPORT_ROW_PAGE_MAX", "9")
     monkeypatch.setenv("IMPORT_MAX_IDENTITY_LOOKUP_ROWS", "23000")
     monkeypatch.setenv("IMPORT_IDENTITY_LOOKUP_BATCH_ROWS", "256")
+    monkeypatch.setenv("IMPORT_DATE_REVIEW_DAY_SAMPLE", "96")
 
     settings = _settings()
 
@@ -95,6 +98,7 @@ def test_settings_load_policy_overrides_from_environment(monkeypatch):
     assert settings.import_resource_policy.row_page_max == 9
     assert settings.import_resource_policy.max_identity_lookup_rows == 23_000
     assert settings.import_resource_policy.identity_lookup_batch_rows == 256
+    assert settings.import_resource_policy.date_review_day_sample == 96
     assert settings.import_resource_policy.max_file_bytes == DEFAULT_IMPORT_RESOURCE_POLICY.max_file_bytes
 
 

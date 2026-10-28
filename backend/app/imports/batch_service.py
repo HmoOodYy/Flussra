@@ -31,6 +31,11 @@ from app.imports.contracts import (
     TARGET_CONTRACT_VERSION,
     require_supported_import_contract,
 )
+from app.imports.date_interpretation import (
+    DATE_GRAMMAR_IDS,
+    DATE_INTERPRETATION_VERSION,
+    interpret_date,
+)
 from app.imports.errors import ImportFailure
 from app.imports.headers import (
     analyze_header_sets,
@@ -94,7 +99,8 @@ class UnitInterpretation(BaseModel):
 
 class InterpretationRequest(RevisionRequest):
     units: list[UnitInterpretation] = Field(default_factory=list)
-    default_work_date: date | None = None
+    default_work_date: date | None = Field(default=None, deprecated=True,
+        description="Rejected. Choose a Date Column, filename, or worksheet name instead.")
 
 
 class RegroupRequest(RevisionRequest):
@@ -172,36 +178,44 @@ def _product_policy(request: Request):
     return request.app.state.settings.product_policy
 
 
-def _normalize_date_source(source, inspection: dict, default_date: date | None, *, expand_import_fixed: bool) -> dict:
+def _normalize_date_source(source, *, label: str, period_days: list[date],
+                           date_order: str | None) -> dict:
     if not isinstance(source, dict):
         raise failure("IMPORT_DATE_SOURCE_INVALID", "WorkDate provider must be an object.", 422)
     kind = source.get("kind")
-    if kind in ("column", "import_fixed"):
+    if kind == "column":
         if set(source) != {"kind"}:
-            raise failure("IMPORT_DATE_SOURCE_INVALID", "This WorkDate provider accepts only its kind.", 422)
-        if kind == "column":
-            return {"kind": "column"}
-        if default_date is None:
-            raise failure("IMPORT_DATE_SOURCE_REQUIRED", "Set an Import default WorkDate before using this provider.", 422)
-        return ({"kind": "import_fixed", "value": default_date.isoformat()} if expand_import_fixed
-                else {"kind": "import_fixed"})
-    if kind not in ("filename", "sheet", "fixed_unit") or set(source) != {"kind", "value"}:
-        raise failure("IMPORT_DATE_SOURCE_INVALID", "WorkDate provider must contain only its supported kind and value.", 422)
+            raise failure("IMPORT_DATE_SOURCE_INVALID", "Date Column accepts only its selected authority.", 422)
+        return {"kind": kind}
+    if not isinstance(kind, str) or kind not in {"filename", "sheet"} or \
+            set(source) not in ({"kind"}, {"kind", "value"}):
+        raise failure("IMPORT_DATE_SOURCE_INVALID",
+                      "Choose a Date Column, filename, or worksheet name; fixed dates are not supported.", 422)
+    if kind == "sheet" and not label:
+        raise failure("IMPORT_DATE_SOURCE_INVALID", "This source unit has no worksheet name date authority.", 422)
+    if "value" not in source:
+        return {"kind": kind}
     value = source["value"]
     if not isinstance(value, str):
-        raise failure("IMPORT_DATE_SOURCE_INVALID", "Accepted WorkDate must be a string.", 422)
-    if kind == "fixed_unit":
-        try:
-            parsed = date.fromisoformat(value)
-        except ValueError as exc:
-            raise failure("IMPORT_DATE_SOURCE_INVALID", "Accepted fixed WorkDate must be an ISO date.", 422) from exc
-        if parsed.isoformat() != value:
-            raise failure("IMPORT_DATE_SOURCE_INVALID", "Accepted fixed WorkDate must be YYYY-MM-DD.", 422)
-    else:
-        field = "filename_date_candidates" if kind == "filename" else "unit_date_candidates"
-        if value not in (inspection.get(field) or []):
-            raise failure("IMPORT_DATE_SOURCE_INVALID", "Accept one of this filename or worksheet's detected date candidates.", 422)
+        raise failure("IMPORT_DATE_SOURCE_INVALID", "A manually selected date must use YYYY-MM-DD.", 422)
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as exc:
+        raise failure("IMPORT_DATE_SOURCE_INVALID", "A manually selected date must use YYYY-MM-DD.", 422) from exc
+    if parsed.isoformat() != value:
+        raise failure("IMPORT_DATE_SOURCE_INVALID", "A manually selected date must use YYYY-MM-DD.", 422)
+    result = interpret_date(label, period_days=period_days, selected_order=date_order,
+                            source_kind=kind, selected_candidate=value)
+    if result["status"] != "resolved":
+        raise failure("IMPORT_DATE_SOURCE_INVALID", result["explanation"], 422)
     return {"kind": kind, "value": value}
+
+
+async def _frozen_period_days(db: AsyncConnection, company_id: int, period_id: int) -> list[date]:
+    return list((await db.execute(text("""
+        SELECT WorkDate FROM payroll.PayrollPeriodDays
+        WHERE CompanyID=:cid AND PayrollPeriodID=:pid ORDER BY WorkDate
+    """), {"cid": company_id, "pid": period_id})).scalars())
 
 
 async def header_labels(db: AsyncConnection, cid: int, pid: int) -> list[str]:
@@ -746,6 +760,7 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
         async with engine.begin() as db:
             row = await load_import(db, cid, iid)
             period = await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
+            period_days = await _frozen_period_days(db, cid, period.payroll_period_id)
             if row["revision"] != body.expected_revision:
                 raise failure("IMPORT_REVISION_CONFLICT", "Import changed. Read its current revision and retry.")
             if period.status not in SOURCE_ENTRY_STATUSES:
@@ -761,9 +776,12 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
             if any(item.source_unit_id not in unit_ids for item in body.units):
                 raise failure("IMPORT_SOURCE_UNIT_NOT_FOUND", "A selected source unit does not belong to this Import.", 404)
             default_date_supplied = "default_work_date" in body.model_fields_set
-            default_date = body.default_work_date if default_date_supplied else row["defaultworkdate"]
-            if not body.units and not default_date_supplied:
+            if default_date_supplied:
+                raise failure("IMPORT_DATE_SOURCE_INVALID",
+                              "Fixed Import dates are unsupported; choose a Date Column, filename, or worksheet name.", 422)
+            if not body.units:
                 raise failure("IMPORT_INTERPRETATION_EMPTY", "Provide at least one source-unit interpretation change.", 422)
+            files_by_id = {item["filesourceid"]: item for item in files}
             for item in body.units:
                 unit = next(u for u in units if u["sourceunitid"] == item.source_unit_id)
                 inspection = unit["inspectionmetadata"] or {}
@@ -777,7 +795,13 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
                     pass
                 date_source_supplied = "date_source" in item.model_fields_set
                 if date_source_supplied and item.date_source is not None:
-                    _normalize_date_source(item.date_source, inspection, default_date, expand_import_fixed=False)
+                    if item.date_source.get("kind") == "sheet" and unit["unitkind"] != "Worksheet":
+                        raise failure("IMPORT_DATE_SOURCE_INVALID", "Worksheet-name dates require an Excel worksheet source.", 422)
+                    date_order = item.date_order if "date_order" in item.model_fields_set else unit["dateorder"]
+                    file = files_by_id[unit["filesourceid"]]
+                    label = file["originalfilename"] if item.date_source.get("kind") == "filename" else unit["unitname"]
+                    _normalize_date_source(item.date_source, label=label,
+                                           period_days=period_days, date_order=date_order)
             updated = {item.source_unit_id: item for item in body.units}
             selected_count = sum((updated[u["sourceunitid"]].selected if u["sourceunitid"] in updated else u["isselected"])
                                  for u in units)
@@ -810,14 +834,17 @@ async def update_interpretation(request, engine, cid: int, uid: int, iid: int, b
                     inspection["header_row_number"] = 1
                     inspection["header_state"] = "selected"
                 inspection["date_order"] = current_order
+                if "date_order" in item.model_fields_set:
+                    if current_order is None:
+                        inspection.pop("accepted_date_order", None)
+                        inspection.pop("date_order_state", None)
+                    else:
+                        inspection["accepted_date_order"] = current_order
+                        inspection["date_order_state"] = "selected"
                 await db.execute(text("""
                     UPDATE import.filesourceunits SET inspectionmetadata = CAST(:inspection AS jsonb)
                     WHERE sourceunitid = :unit AND importid = :iid AND companyid = :cid
                 """), {"inspection": _json(inspection), "unit": item.source_unit_id, "iid": iid, "cid": cid})
-            await db.execute(text("""
-                UPDATE import.payrollworkimports SET defaultworkdate = :work_date
-                WHERE importid = :iid AND companyid = :cid
-            """), {"work_date": default_date, "iid": iid, "cid": cid})
             await db.execute(text("""
                 UPDATE import.imports SET revision = revision + 1, status = 'NeedsMapping',
                     updatedbyuserid = :uid, updatedatutc = NOW() WHERE importid = :iid AND companyid = :cid
@@ -850,8 +877,9 @@ def _selector_payload(selector: ColumnSelector) -> dict:
 
 
 def _stored_rule_payload(value) -> dict | None:
-    if (not isinstance(value, dict) or set(value) != {
-            "payload_version", "transform", "inputs", "shared_columns"}
+    if (not isinstance(value, dict) or set(value) not in ({
+            "payload_version", "transform", "inputs", "shared_columns"}, {
+            "payload_version", "transform", "inputs", "shared_columns", "date_interpretation"})
             or type(value.get("payload_version")) is not int or value["payload_version"] != 1):
         return None
     if value.get("transform") not in {"Direct", "Sum"}:
@@ -860,6 +888,33 @@ def _stored_rule_payload(value) -> dict | None:
     shared = value.get("shared_columns")
     if not isinstance(inputs, list) or not inputs or not isinstance(shared, dict):
         return None
+    if "date_interpretation" in value:
+        date_config = value["date_interpretation"]
+        if not isinstance(date_config, dict) or set(date_config) != {"version", "profiles"} or \
+                type(date_config.get("version")) is not int or date_config["version"] != DATE_INTERPRETATION_VERSION:
+            return None
+        profiles = date_config.get("profiles")
+        if not isinstance(profiles, list) or not profiles:
+            return None
+        canonical_profiles = []
+        for profile in profiles:
+            if not isinstance(profile, dict) or set(profile) != {"authority", "numeric_order", "grammars"}:
+                return None
+            authority = profile.get("authority")
+            if not isinstance(authority, str) or authority not in {"column", "filename", "sheet"}:
+                return None
+            order = profile.get("numeric_order")
+            if order is not None and (not isinstance(order, str) or order not in {"DMY", "MDY", "YMD"}):
+                return None
+            grammars = profile.get("grammars")
+            if (not isinstance(grammars, list) or any(not isinstance(item, str) or item not in DATE_GRAMMAR_IDS
+                                                       for item in grammars)
+                    or grammars != sorted(set(grammars))):
+                return None
+            canonical_profiles.append(profile)
+        if canonical_profiles != sorted(canonical_profiles, key=encoded) or len(
+                {_json(item) for item in canonical_profiles}) != len(canonical_profiles):
+            return None
     def selector_ok(selector):
         if not isinstance(selector, dict) or set(selector) - {"header", "occurrences"}:
             return False
@@ -924,16 +979,26 @@ def _rule_reuse_reason(head, definition, headers):
     signature = _stored_source_signature(head["sourcesignature"], payload)
     if signature is None:
         return "The saved source relationship needs remapping", False
+    date_profiles = payload.get("date_interpretation", {}).get("profiles", [])
+    work_date_is_dependency = any(item["authority"] == "column" for item in date_profiles)
+    missing_date_column = False
     try:
         inputs = [resolve_selector(selector, headers, required=False,
                                    allow_unobserved_arrangements=True)
                   for selector in payload["inputs"]]
-        for selector in payload["shared_columns"].values():
-            resolve_selector(selector, headers, allow_unobserved_arrangements=True)
+        for role, selector in payload["shared_columns"].items():
+            if role == "WorkDate" and not work_date_is_dependency:
+                continue
+            resolved = resolve_selector(selector, headers, required=role != "WorkDate",
+                                        allow_unobserved_arrangements=True)
+            if role == "WorkDate" and not any(column is not None for column in resolved.values()):
+                missing_date_column = work_date_is_dependency
     except ImportFailure:
         return "A relevant header or duplicate arrangement changed", False
     if any(column is None for result in inputs for column in result.values()):
         return "Known source columns are absent", True
+    if missing_date_column:
+        return "The saved date column is absent; choose another date authority or map a date column", True
     return "Matched the current successful relationship", True
 
 
@@ -1007,8 +1072,9 @@ async def _prepare_current_rules(request, db, cid, uid, iid):
             resolutions = [resolve_selector(item, headers, required=False,
                                             allow_unobserved_arrangements=True)
                            for item in payload["inputs"]]
-            for selector in payload["shared_columns"].values():
-                resolve_selector(selector, headers, allow_unobserved_arrangements=True)
+            for role, selector in payload["shared_columns"].items():
+                resolve_selector(selector, headers, required=role != "WorkDate",
+                                 allow_unobserved_arrangements=True)
         except ImportFailure:
             continue
         if not any(column is not None for result in resolutions for column in result.values()):
@@ -1290,8 +1356,35 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
                             replace_existing, payload_shared=None, reuse_version_id=None):
         pay_definition_id = definition.pay_definition_id
         meaning = _target_meaning(definition)
+        head = heads_by_definition.get(pay_definition_id)
+        actual_head = head["revision"] if head else 0
+        existing = pending_by_definition.get(pay_definition_id)
         payload = {"payload_version": 1, "transform": transform, "inputs": input_payload,
                    "shared_columns": payload_shared if payload_shared is not None else shared_json}
+        def carry_date_configuration(candidate):
+            if candidate is None or candidate.get("targetmeaning") != meaning:
+                return False
+            candidate_payload = _stored_rule_payload(candidate.get("rulepayload"))
+            if (candidate_payload is None
+                    or candidate_payload["transform"] != payload["transform"]
+                    or candidate_payload["inputs"] != payload["inputs"]
+                    or candidate_payload["shared_columns"] != payload["shared_columns"]
+                    or "date_interpretation" not in candidate_payload):
+                return False
+            payload["date_interpretation"] = candidate_payload["date_interpretation"]
+            return True
+
+        pending_is_owned_or_current = bool(existing and (
+            existing["originimportid"] == iid or
+            head and existing["ruleversionid"] == head["ruleversionid"]
+            and head.get("originstatus") == "Completed"))
+        if pending_is_owned_or_current:
+            carry_date_configuration(existing)
+        if "date_interpretation" not in payload and head is not None:
+            can_use_head = (head.get("originstatus") == "Completed"
+                            and (reuse_version_id is None or head["ruleversionid"] == reuse_version_id))
+            if can_use_head:
+                carry_date_configuration(head)
         # Ancillary Ignore choices help repeat setup, but are not dependencies
         # of another target's quantity meaning.
         source_signature = {"inputs": input_payload, "ignored_columns": ignored_json}
@@ -1300,8 +1393,6 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
         if len(_json({"source": source_signature, "target": meaning, "payload": payload}).encode("utf-8")) > _policy(request).max_mapping_request_bytes:
             raise failure("IMPORT_MAPPING_CONFIGURATION_TOO_LARGE",
                           "Saved mapping metadata exceeds the current configuration resource limit.", 422)
-        head = heads_by_definition.get(pay_definition_id)
-        actual_head = head["revision"] if head else 0
         if head_revision is not None and head_revision != actual_head:
             raise failure("IMPORT_RULE_HEAD_STALE", "The current saved rule changed. Read it again and retry.")
         same_head = bool(head and head["targetmeaning"] == meaning
@@ -1310,7 +1401,6 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
         if head and not same_head and not replace_existing:
             raise failure("IMPORT_RULE_REPLACEMENT_REQUIRED",
                           "This target already has a saved rule. Confirm replacement to change it.", 409)
-        existing = pending_by_definition.get(pay_definition_id)
         existing_is_current_completed_head = bool(
             head and head["ruleversionid"] == existing["ruleversionid"]
             and head["originstatus"] == "Completed") if existing else False
@@ -1683,6 +1773,7 @@ def _materialize_batch(files, units, layouts, policy, product_policy=None, pendi
         for unit in file_units:
             layout = layouts_by_id[unit["sourcelayoutid"]]
             source_rows.append({"source_unit_id": unit["sourceunitid"], "file_ordinal": unit["fileordinal"],
+                "file_name": file["originalfilename"],
                 "unit_name": unit["unitname"], "unit_kind": unit["unitkind"],
                 "structure_fingerprint": layout["structurefingerprint"],
                 "mapping": rule_mappings.get(unit["sourcelayoutid"], {}),
@@ -1704,8 +1795,10 @@ def _stable_identifiers(sources):
                 {"value": None, "missing_cache": False}))
                 for rule in rules for column in rule.get("columns", []))
 
+        date_source = source.get("date_source") or {}
+        date_column_authority = date_source.get("kind") in (None, "column")
         active_rows = [row for row in source["materialized"]["rows"] if has_quantity(row) or
-            has_sum and any(target in IDENTIFIERS | {"WorkDate"} and
+            has_sum and any((target in IDENTIFIERS or target == "WorkDate" and date_column_authority) and
                 not blank(row["cells"].get(str(column), {"value": None, "missing_cache": False}))
                 for column, target in mapping.items())]
         for column, target in mapping.items():
@@ -1718,6 +1811,200 @@ def _stable_identifiers(sources):
                     if value:
                         found[target].add(value)
     return {key: sorted(value) for key, value in found.items()}
+
+
+def _orders_agree_on_source_evidence(source, authority: str, orders: set, period_days) -> bool:
+    """Allow conflicting remembered orders only when this evidence yields <=1 date."""
+    if authority == "column":
+        column = next((column for column, target in source["mapping"].items()
+                       if target == "WorkDate"), None)
+        if column is None:
+            return True
+        rules = source.get("quantity_rules", [])
+        has_sum = any(rule.get("transform") == "Sum" for rule in rules)
+        date_column_authority = (source.get("date_source") or {}).get("kind") in (None, "column")
+
+        def has_quantity(row):
+            return any(input_column is not None and not blank(row["cells"].get(
+                str(input_column), {"value": None, "missing_cache": False}))
+                       for rule in rules for input_column in rule.get("columns", []))
+
+        active_rows = [row for row in source["materialized"]["rows"] if has_quantity(row) or
+                       has_sum and any((target in IDENTIFIERS or
+                                        target == "WorkDate" and date_column_authority) and
+                                       not blank(row["cells"].get(
+                                           str(input_column), {"value": None, "missing_cache": False}))
+                                       for input_column, target in source["mapping"].items())]
+        evidence = [row["cells"].get(column) for row in active_rows]
+    else:
+        label = source["file_name"] if authority == "filename" else source["unit_name"]
+        evidence = [label]
+    for value in evidence:
+        possible = set()
+        for order in orders:
+            result = interpret_date(value, period_days=period_days, selected_order=order,
+                                    source_kind=authority)
+            possible.update(result.get("candidate_dates", []))
+            if result.get("resolved_date"):
+                possible.add(result["resolved_date"])
+        if len(possible) > 1:
+            return False
+    return True
+
+
+def _prepare_preview_dates(sources, pending_rules, period_days, period):
+    """Resolve source date authority and build bounded relational date/identity inputs."""
+    for source in sources:
+        date_source = source["date_source"]
+        mapping_has_column = any(target == "WorkDate" for target in source["mapping"].values())
+        pending_by_target = {
+            f"Definition:{item['payrollperioddefinitionid']}": _stored_rule_payload(item["rulepayload"])
+            for item in pending_rules if item["originstatus"] == "Completed"
+        }
+        reusable_profiles = []
+        for rule in source.get("quantity_rules", []):
+            if not any(column is not None for column in rule.get("columns", [])):
+                continue
+            payload = pending_by_target.get(rule["target"])
+            config = payload.get("date_interpretation") if payload else None
+            if config:
+                reusable_profiles.extend(config["profiles"])
+        if not date_source:
+            if reusable_profiles:
+                authorities = {profile["authority"] for profile in reusable_profiles}
+                orders = {profile["numeric_order"] for profile in reusable_profiles}
+                if len(authorities) != 1:
+                    raise failure("IMPORT_DATE_SOURCE_REQUIRED",
+                                  "Saved target rules use different date interpretations. Choose the date authority and order for this source unit.", 422)
+                authority = next(iter(authorities))
+                if len(orders) > 1 and not _orders_agree_on_source_evidence(
+                        source, authority, orders, period_days):
+                    raise failure("IMPORT_DATE_ORDER_REQUIRED",
+                                  "Saved target rules use different numeric date orders. Choose the order for this source unit.", 422)
+                date_source = {"kind": authority}
+                source["date_order"] = next(iter(orders)) if len(orders) == 1 else None
+                if len(orders) == 1:
+                    source["date_order_state_override"] = "matched_previous_pattern"
+            elif mapping_has_column:
+                date_source = {"kind": "column"}
+            else:
+                raise failure("IMPORT_DATE_SOURCE_REQUIRED", "Choose a Date Column, filename, or worksheet name for each selected source unit.", 422)
+        elif not date_source.get("value") and source["date_order"] is None:
+            compatible_profiles = [profile for profile in reusable_profiles
+                                   if profile["authority"] == date_source.get("kind")]
+            orders = {profile["numeric_order"] for profile in compatible_profiles}
+            if len(orders) == 1:
+                source["date_order"] = next(iter(orders))
+                source["date_order_state_override"] = "matched_previous_pattern"
+            elif len(orders) > 1 and not _orders_agree_on_source_evidence(
+                    source, date_source["kind"], orders, period_days):
+                raise failure("IMPORT_DATE_ORDER_REQUIRED",
+                              "Saved target rules use different numeric date orders. Choose the order for this source unit.", 422)
+        date_label = (source["file_name"] if date_source.get("kind") == "filename"
+                      else source["unit_name"])
+        if date_source.get("kind") == "sheet" and source["unit_kind"] != "Worksheet":
+            raise failure("IMPORT_DATE_SOURCE_INVALID", "Worksheet-name dates require an Excel worksheet source.", 422)
+        date_source = _normalize_date_source(date_source, label=date_label,
+                                             period_days=period_days,
+                                             date_order=source["date_order"])
+        if date_source.get("kind") == "column" and not mapping_has_column:
+            raise failure("IMPORT_DATE_SOURCE_CONFLICT", "A column date provider requires a mapped WorkDate column.", 422)
+        source["date_source"] = date_source
+
+    identifiers = _stable_identifiers(sources)
+    dates = set()
+    for source in sources:
+        date_column = next((column for column, target in source["mapping"].items()
+                            if target == "WorkDate"), None) if source["date_source"]["kind"] == "column" else None
+        if date_column:
+            from app.imports.mapping import infer_date_order
+            rows = source["materialized"]["rows"]
+            cells = [item["cells"].get(date_column) for item in rows]
+            order, _ = infer_date_order(cells, period.start_date, period.end_date, source["date_order"])
+            for item in rows:
+                resolved_date = interpret_date(item["cells"].get(date_column), period_days=period_days,
+                                               selected_order=order or source["date_order"],
+                                               source_kind="column")["resolved_date"]
+                if resolved_date:
+                    dates.add(date.fromisoformat(resolved_date))
+        elif source["date_source"].get("value"):
+            dates.add(date.fromisoformat(source["date_source"]["value"]))
+        else:
+            label = source["file_name"] if source["date_source"]["kind"] == "filename" else source["unit_name"]
+            interpreted = interpret_date(label, period_days=period_days, selected_order=source["date_order"],
+                                         source_kind=source["date_source"]["kind"])
+            if interpreted["resolved_date"]:
+                dates.add(date.fromisoformat(interpreted["resolved_date"]))
+    return identifiers, sorted(dates)
+
+
+def _require_mapping_configuration_size(source_signature, meaning, payload, maximum_bytes):
+    if len(_json({"source": source_signature, "target": meaning, "payload": payload}).encode("utf-8")) > maximum_bytes:
+        raise failure("IMPORT_MAPPING_CONFIGURATION_TOO_LARGE",
+                      "Saved mapping metadata exceeds the current configuration resource limit.", 422)
+
+
+async def _apply_date_rule_profiles(db, *, company_id: int, import_id: int, period_id: int, user_id: int,
+                                   profiles_by_target: dict[str, list[dict]], policy) -> None:
+    if not profiles_by_target:
+        return
+    rows = (await db.execute(text("""
+        SELECT p.PayDefinitionID, p.PayrollPeriodDefinitionID, p.RuleVersionID,
+               p.Revision, r.OriginImportID, r.OriginPayrollPeriodID,
+               r.RuleContractVersion, r.SourceContractVersion, r.TargetContractVersion,
+               r.CanonicalizationVersion, r.RuleFingerprint, r.SourceSignature,
+               r.TargetMeaning, r.RulePayload
+        FROM import.PayrollWorkPendingRules p
+        JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+            AND r.CompanyID=p.CompanyID AND r.PayDefinitionID=p.PayDefinitionID
+        WHERE p.CompanyID=:cid AND p.ImportID=:iid ORDER BY p.PayDefinitionID FOR UPDATE OF p
+    """), {"cid": company_id, "iid": import_id})).mappings().all()
+    by_target = {f"Definition:{row['payrollperioddefinitionid']}": row for row in rows}
+    for target, profile_items in sorted(profiles_by_target.items()):
+        row = by_target.get(target)
+        if row is None:
+            continue
+        payload = _stored_rule_payload(row["rulepayload"])
+        if payload is None:
+            raise failure("IMPORT_RULE_PAYLOAD_UNSUPPORTED", "A saved target rule uses an unsupported format.", 409)
+        profiles = sorted({encoded(item): item for item in profile_items}.values(), key=encoded)
+        if not profiles:
+            continue
+        updated_payload = {**payload, "date_interpretation": {
+            "version": DATE_INTERPRETATION_VERSION, "profiles": profiles}}
+        if updated_payload == payload:
+            continue
+        meaning = row["targetmeaning"]
+        _require_mapping_configuration_size(row["sourcesignature"], meaning, updated_payload,
+                                            policy.max_mapping_request_bytes)
+        fingerprint_value = fingerprint("payroll-work-rule-v1", {
+            "target": meaning, "source": {"inputs": updated_payload["inputs"]},
+            "payload": updated_payload})
+        version_id = (await db.execute(text("""
+            INSERT INTO import.PayrollWorkRuleVersions
+                (CompanyID, BranchID, PayDefinitionID, OriginImportID, OriginPayrollPeriodID,
+                 RuleContractVersion, SourceContractVersion, TargetContractVersion,
+                 CanonicalizationVersion, RuleFingerprint, SourceSignature, TargetMeaning,
+                 RulePayload, CreatedByUserID)
+            SELECT CompanyID, BranchID, PayDefinitionID, :iid, :pid,
+                   RuleContractVersion, SourceContractVersion, TargetContractVersion,
+                   CanonicalizationVersion, :fingerprint, SourceSignature, TargetMeaning,
+                   CAST(:payload AS jsonb), :uid
+            FROM import.PayrollWorkRuleVersions
+            WHERE RuleVersionID=:rid AND CompanyID=:cid AND PayDefinitionID=:definition
+            RETURNING RuleVersionID
+        """), {"iid": import_id, "pid": period_id,
+               "fingerprint": fingerprint_value, "payload": _json(updated_payload),
+               "uid": user_id, "rid": row["ruleversionid"], "cid": company_id,
+               "definition": row["paydefinitionid"]})).scalar_one()
+        await db.execute(text("""
+            UPDATE import.PayrollWorkPendingRules SET RuleVersionID=:version_id,
+                Revision=Revision+1, UpdatedByUserID=:uid, UpdatedAtUtc=NOW()
+            WHERE CompanyID=:cid AND ImportID=:iid AND PayDefinitionID=:definition
+                AND RuleVersionID=:old_version AND Revision=:revision
+        """), {"version_id": version_id, "uid": user_id, "cid": company_id,
+               "iid": import_id, "definition": row["paydefinitionid"],
+               "old_version": row["ruleversionid"], "revision": row["revision"]})
 
 
 async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
@@ -1735,54 +2022,33 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             files, units, layouts = await load_sources(db, cid, iid)
             _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
             files, units, layouts = await load_sources(db, cid, iid, include_canonical=True)
+            period_days = await _frozen_period_days(db, cid, period.payroll_period_id)
             started_rule_context = await current_rule_context(db, cid, iid)
             pending_rules = [dict(item) for item in (await db.execute(text("""
-                SELECT p.PayDefinitionID, p.PayrollPeriodDefinitionID, r.RulePayload
+                SELECT p.PayDefinitionID, p.PayrollPeriodDefinitionID, r.RulePayload, origin.Status AS OriginStatus
                 FROM import.PayrollWorkPendingRules p
                 JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
                   AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID
                   AND r.PayDefinitionID=p.PayDefinitionID
+                JOIN import.Imports origin ON origin.ImportID=r.OriginImportID
+                  AND origin.CompanyID=r.CompanyID
                 WHERE p.ImportID=:iid AND p.CompanyID=:cid
                 ORDER BY p.PayDefinitionID
             """), {"iid": iid, "cid": cid})).mappings()]
             if any(file["contentpurgedatutc"] is not None for file in files):
                 raise failure("IMPORT_CONTENT_PURGED", "Source file content has been purged and cannot be previewed.")
-            default_date = row["defaultworkdate"]
         materialized = await anyio.to_thread.run_sync(partial(
             _materialize_batch, files, units, layouts, policy, _product_policy(request), pending_rules))
         files = units = layouts = None
-        for source in materialized:
-            date_source = source["date_source"]
-            mapping_has_column = any(target == "WorkDate" for target in source["mapping"].values())
-            if not date_source:
-                if mapping_has_column:
-                    date_source = {"kind": "column"}
-                elif default_date is not None:
-                    date_source = {"kind": "import_fixed"}
-                else:
-                    raise failure("IMPORT_DATE_SOURCE_REQUIRED", "Accept a WorkDate column or date context for each selected source unit.", 422)
-            date_source = _normalize_date_source(date_source, source["materialized"]["inspection"], default_date,
-                                                expand_import_fixed=True)
-            if date_source.get("kind") == "column" and not mapping_has_column:
-                raise failure("IMPORT_DATE_SOURCE_CONFLICT", "A column date provider requires a mapped WorkDate column.", 422)
-            source["date_source"] = date_source
-        identifiers = _stable_identifiers(materialized)
-        dates = set()
-        for source in materialized:
-            date_column = next((column for column, target in source["mapping"].items() if target == "WorkDate"), None)
-            if date_column:
-                from app.imports.mapping import infer_date_order, parse_date
-                rows = source["materialized"]["rows"]
-                cells = [item["cells"].get(date_column) for item in rows]
-                order, _ = infer_date_order(cells, period.start_date, period.end_date, source["date_order"])
-                dates.update(day for cell in cells if (day := parse_date(cell, order)) is not None)
-            elif source["date_source"].get("value"):
-                dates.add(date.fromisoformat(source["date_source"]["value"]))
+        identifiers, dates = await anyio.to_thread.run_sync(partial(
+            _prepare_preview_dates, materialized, pending_rules, period_days, period))
         async with engine.begin() as db:
             # This read is deliberately outside the publication transaction.
             period = await authorize(db, cid, uid, period.payroll_period_id, mutate=True)
-            context = await load_context(db, cid, period, dates=sorted(dates), identifiers=identifiers,
+            context = await load_context(db, cid, period, dates=dates, identifiers=identifiers,
                                          resource_policy=policy)
+        if set(context["days"]) != set(period_days):
+            raise failure("IMPORT_CONTEXT_STALE", "The frozen period-day snapshot changed while dates were being interpreted. Refresh and retry.")
         context_token = fingerprint("relational-context", context_identity(context))
         result = await anyio.to_thread.run_sync(partial(build_batch_preview, materialized, context, policy=policy))
         definitions = context["definitions"]
@@ -1792,6 +2058,7 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             inspection["accepted_date_order"] = source.get("accepted_date_order")
             inspection["date_order_state"] = source.get("date_order_state")
             inspection_updates.append((source["source_unit_id"], source.get("accepted_date_order"),
+                                       _json(source.get("date_source") or {}),
                                        inspection.get("encoding"),
                                        inspection.get("delimiter"), _json(inspection)))
         del context
@@ -1804,17 +2071,24 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
             if published_rule_context != started_rule_context:
                 raise failure("IMPORT_RULE_CONTEXT_STALE",
                               "Saved mapping rules changed while the preview was being prepared. Refresh and retry.")
-            current_context = await load_context(db, cid, period, dates=sorted(dates), identifiers=identifiers,
+            current_context = await load_context(db, cid, period, dates=dates, identifiers=identifiers,
                                                 resource_policy=policy)
             if fingerprint("relational-context", context_identity(current_context)) != context_token:
                 raise failure("IMPORT_CONTEXT_STALE", "Payroll context changed while the preview was being prepared. Refresh and retry.")
+            if set(current_context["days"]) != set(period_days):
+                raise failure("IMPORT_CONTEXT_STALE", "The frozen period-day snapshot changed while the preview was being prepared. Refresh and retry.")
             _current_files, current_units, current_layouts = await load_sources(db, cid, iid)
+            await _apply_date_rule_profiles(db, company_id=cid, import_id=iid,
+                                            period_id=period.payroll_period_id, user_id=uid,
+                                            profiles_by_target=result.get("date_rule_profiles", {}),
+                                            policy=policy)
+            published_rule_context = await current_rule_context(db, cid, iid)
             await clear_derived_state(db, cid, iid, reset_mapping=False)
             await persist_preview(db, company_id=cid, import_id=iid, branch_id=period.branch_id,
                                   period_id=period.payroll_period_id, result=result,
                                   rule_context_fingerprint=published_rule_context)
             current_units_by_id = {unit["sourceunitid"]: unit for unit in current_units}
-            for source_unit_id, date_order, encoding, delimiter, inspection_json in inspection_updates:
+            for source_unit_id, date_order, date_source_json, encoding, delimiter, inspection_json in inspection_updates:
                 if source_unit_id not in current_units_by_id:
                     raise failure("IMPORT_REVISION_CONFLICT", "Source units changed while the preview was being prepared.")
                 stored_inspection = current_units_by_id[source_unit_id]["inspectionmetadata"] or {}
@@ -1828,10 +2102,12 @@ async def build_preview(request, engine, cid, uid, iid, body: RevisionRequest):
                         prepared_inspection[key] = stored_inspection[key]
                 await db.execute(text("""
                     UPDATE import.filesourceunits SET dateorder = :date_order,
+                        datesource = CAST(:date_source AS jsonb),
                         encoding = :encoding, delimiter = :delimiter,
                         inspectionmetadata = CAST(:inspection AS jsonb)
                     WHERE sourceunitid = :unit AND importid = :iid AND companyid = :cid
-                """), {"date_order": date_order, "encoding": encoding, "delimiter": delimiter,
+                """), {"date_order": date_order, "date_source": date_source_json,
+                       "encoding": encoding, "delimiter": delimiter,
                        "inspection": _json(prepared_inspection), "unit": source_unit_id, "iid": iid, "cid": cid})
             # Store per-layout mapping identities without exposing generated IDs in their hashes.
             def_by_target = {target_key(d): d for d in definitions}

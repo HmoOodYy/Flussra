@@ -154,7 +154,7 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
             for record in (await db.execute(text("""
                 WITH ranked AS (
                 SELECT r.previewgroupid, r.sourcerecordid, r.driverassignmentid, r.workdate,
-                    r.isskipped, r.valuesjson, r.issuesjson, f.fileordinal, u.unitname,
+                    r.isskipped, r.valuesjson, r.issuesjson, r.contextjson, f.fileordinal, u.unitname,
                     f.originalfilename, fr.sourcerownumber,
                     count(*) OVER (PARTITION BY r.previewgroupid) AS total_records,
                     row_number() OVER (PARTITION BY r.previewgroupid
@@ -226,6 +226,7 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                 sources.append({"source_record_id": record["sourcerecordid"], "file_ordinal": record["fileordinal"],
                     "file_name": record["originalfilename"], "unit_name": record["unitname"],
                     "source_row": record["sourcerownumber"], "skipped": record["isskipped"],
+                    "date_interpretation": (record["contextjson"] or {}).get("date_interpretation"),
                     "issue_count": len(record_issues),
                     "issue_codes": [item["code"] for item in record_issues[:policy.row_detail_sample]]})
             for def_id, candidates in candidates_by_group[group["previewgroupid"]].items():

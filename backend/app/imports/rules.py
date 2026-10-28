@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.imports.contracts import require_supported_import_contract
+from app.imports.date_interpretation import DATE_INTERPRETATION_VERSION
 from app.imports.errors import ImportFailure
 from app.imports.identity import IDENTITY_RESOLUTION_VERSION
 from app.imports.runtime import authorize, failure
@@ -54,6 +55,7 @@ async def current_rule_context(db: AsyncConnection, company_id: int, import_id: 
         material.append({key: row[key] for key in row.keys()})
     return _fingerprint({"rule_context_version": 1,
                          "identity_resolution_version": IDENTITY_RESOLUTION_VERSION,
+                         "date_interpretation_version": DATE_INTERPRETATION_VERSION,
                          "pending_rules": material})
 
 

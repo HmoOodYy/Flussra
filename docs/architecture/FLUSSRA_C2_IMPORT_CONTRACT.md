@@ -1,6 +1,6 @@
 # Flussra C2 Import Product Contract
 
-**Status:** Agreed product decisions, 2026-10-27. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A07 have been implemented and focused-verified on the foundation continuation. A06 covers per-target pending mappings, Direct/Sum and duplicate outcomes, compatible current-head reuse and affected-target remapping. A07 covers Company-authoritative Driver identity discovery and discrepancy reporting without identity acceptance; A08-A12, semantic repeat recognition, the connected Import experience and Slice B payroll application remain incomplete.
+**Status:** Agreed product decisions, 2026-10-28. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A08 have been implemented and focused-verified on the foundation continuation. A06 covers per-target pending mappings, Direct/Sum and duplicate outcomes, compatible current-head reuse and affected-target remapping. A07 covers Company-authoritative Driver identity discovery and discrepancy reporting without identity acceptance. A08 covers chosen date authority, deterministic supported date interpretation, persisted draft date profiles and bounded date review; A09-A12, semantic repeat recognition, the connected Import experience and Slice B payroll application remain incomplete.
 
 **Continuation baseline:** `codex/c2-import-foundation`, implementation at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e` and documentation through `f15bf96`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
 
@@ -194,7 +194,9 @@ Retain the single-sheet-per-file restriction in both modes. A manual resolution 
 - Show the organized dates and a short explanation, such as **Matched previously confirmed pattern** or **Year inferred from payroll period**. No numeric confidence score is required.
 - Ambiguity, an invalid date or an out-of-period date requires correction/resolution; no payroll write is allowed on guessed unresolved meaning.
 
-Exact accepted text grammars, locale/normalization rules and pattern persistence need implementation design. This contract does not require a probabilistic model or unrestricted language interpretation.
+The implemented supported grammar uses English full and abbreviated month names, strict existing explicit-year/numeric parsing and only unambiguous period-based omitted-year inference. Filename/sheet candidate selection is explicit when several dates are recognized; a sole recognized invalid or outside-period date cannot be manually rewritten. These rules do not require a probabilistic model or unrestricted language interpretation.
+
+A08 is implemented and focused-verified. Date authority/order profiles are retained as optional versioned metadata on affected pending target rules; current heads and payroll facts remain untouched. Date review shows bounded recognized, missing-coverage and overlapping-unit samples with totals/truncation information and paged row explanations. Missing coverage remains a warning and never supplies an inferred date.
 
 ### 7.3 Normal repeat case
 

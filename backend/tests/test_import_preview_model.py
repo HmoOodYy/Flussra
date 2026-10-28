@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from app.imports.batch_service import _enforce_metadata_response_bound
 from app.imports.errors import ImportFailure
 from app.imports.mapping import normalized_identifier
 from app.imports.payroll_context import context_identity
+from app.imports.policy import ImportResourcePolicy
 from app.imports.preview_model import build_batch_preview
 from app.imports.preview_store import prepare_preview
 from app.payroll.definition_calculation import PeriodDefinition
@@ -380,29 +381,28 @@ def test_mapping_and_date_provider_changes_affect_mapping_and_downstream_fingerp
     }
     employee_source["materialized"]["nonempty_columns"].append(4)
     employee = build_batch_preview([employee_source], _context())
-    fixed_date_source = _source()
-    fixed_date_source["mapping"].pop("2")
-    fixed_date_source["date_source"] = {"kind": "import_fixed", "value": WORK_DATE.isoformat()}
-    fixed_date_source["materialized"]["inspection"]["header_cells"] = ["DriverNumber", "REGULAR"]
-    fixed_date_source["materialized"]["rows"][0]["cells"].pop("2")
-    fixed_date_source["materialized"]["rows"][0]["cells"]["2"] = {
-        "value": "", "kind": "text", "formula": False, "missing_cache": False,
-    }
-    fixed_date_source["materialized"]["nonempty_columns"] = [1, 3]
-    fixed = build_batch_preview([fixed_date_source], _context())
+    filename_date_source = _source()
+    filename_date_source["mapping"].pop("2")
+    filename_date_source["date_source"] = {"kind": "filename"}
+    filename_date_source["file_name"] = "weekly-2026-10-20.csv"
+    filename_date_source["materialized"]["inspection"]["header_cells"] = ["DriverNumber", "REGULAR"]
+    filename_date_source["materialized"]["rows"][0]["cells"].pop("2")
+    filename_date_source["materialized"]["nonempty_columns"] = [1, 3]
+    filename = build_batch_preview([filename_date_source], _context())
 
-    for changed in (employee, fixed):
+    for changed in (employee, filename):
         assert number["mapping_fingerprint"] != changed["mapping_fingerprint"]
         assert number["content_fingerprint"] != changed["content_fingerprint"]
         assert number["plan_fingerprint"] != changed["plan_fingerprint"]
 
-    fixed_with_extra = deepcopy(fixed_date_source)
-    fixed_with_extra["date_source"]["accepted_at"] = "ignored transport metadata"
-    normalized_fixed = build_batch_preview([fixed_date_source], _context())
-    normalized_with_extra = build_batch_preview([fixed_with_extra], _context())
-    assert normalized_fixed["mapping_fingerprint"] == normalized_with_extra["mapping_fingerprint"]
-    assert normalized_fixed["content_fingerprint"] == normalized_with_extra["content_fingerprint"]
-    assert normalized_fixed["plan_fingerprint"] == normalized_with_extra["plan_fingerprint"]
+    filename_with_extra = deepcopy(filename_date_source)
+    filename_with_extra["date_source"]["accepted_at"] = "ignored transport metadata"
+    try:
+        build_batch_preview([filename_with_extra], _context())
+    except ImportFailure as exc:
+        assert exc.code == "IMPORT_DATE_SOURCE_REQUIRED"
+    else:
+        raise AssertionError("unsupported date source fields must fail closed")
 
 
 def test_changing_invalid_mapped_work_date_changes_source_identity():
@@ -418,6 +418,147 @@ def test_changing_invalid_mapped_work_date_changes_source_identity():
     assert first["rows"][0]["row_fingerprint"] != second["rows"][0]["row_fingerprint"]
     assert first["content_fingerprint"] != second["content_fingerprint"]
     assert first["plan_fingerprint"] != second["plan_fingerprint"]
+
+
+def test_filename_date_authority_ignores_row_date_values_and_explains_resolution():
+    first_source = _source()
+    first_source["file_name"] = "weekly-2026-10-20.csv"
+    first_source["date_source"] = {"kind": "filename"}
+    first_source["materialized"]["rows"][0]["cells"]["2"]["value"] = "2026-10-21"
+    second_source = deepcopy(first_source)
+    second_source["materialized"]["rows"][0]["cells"]["2"]["value"] = "not a date"
+
+    first = build_batch_preview([first_source], _context())
+    second = build_batch_preview([second_source], _context())
+
+    assert first["rows"][0]["work_date"] == WORK_DATE
+    assert second["rows"][0]["work_date"] == WORK_DATE
+    assert first["rows"][0]["row_fingerprint"] == second["rows"][0]["row_fingerprint"]
+    assert first["content_fingerprint"] == second["content_fingerprint"]
+    assert first["plan_fingerprint"] == second["plan_fingerprint"]
+    assert first["rows"][0]["context"]["date_interpretation"]["reason"] == "explicit_date"
+    assert first["date_rule_profiles"]["Definition:100"][0]["authority"] == "filename"
+    assert first["date_review"]["recognized_days"] == [WORK_DATE.isoformat()]
+
+
+def test_column_date_authority_ignores_date_looking_filename_text():
+    first_source = _source()
+    first_source["file_name"] = "work-2026-10-20.csv"
+    second_source = deepcopy(first_source)
+    second_source["file_name"] = "work-2025-02-30.csv"
+
+    first = build_batch_preview([first_source], _context())
+    second = build_batch_preview([second_source], _context())
+
+    assert first["rows"][0]["work_date"] == second["rows"][0]["work_date"] == WORK_DATE
+    assert first["rows"][0]["row_fingerprint"] == second["rows"][0]["row_fingerprint"]
+    assert first["content_fingerprint"] == second["content_fingerprint"]
+    assert first["plan_fingerprint"] == second["plan_fingerprint"]
+
+
+def test_date_review_samples_expose_counts_and_truncation_flags():
+    days = [date(2026, 10, 20) + timedelta(days=offset) for offset in range(4)]
+    context = _context()
+    assignment = context["roster"][0]
+    assignment["eligibleworkdates"] = days
+    context["days"] = {day: False for day in days}
+    context["live_days"] = {(assignment["driverassignmentid"], day) for day in days}
+    sources = []
+    for ordinal, day in enumerate(days[:2], start=1):
+        source = _source()
+        source["file_ordinal"] = ordinal
+        source["file_name"] = f"payroll-{day.isoformat()}.csv"
+        source["date_source"] = {"kind": "filename"}
+        source["mapping"].pop("2")
+        sources.append(source)
+
+    result = build_batch_preview(sources, context, policy=ImportResourcePolicy(date_review_day_sample=1))
+    review = result["date_review"]
+
+    assert review["recognized_days"] == [days[0].isoformat()]
+    assert review["recognized_day_count"] == 2
+    assert review["recognized_days_truncated"] is True
+    assert review["missing_coverage_days"] == [days[2].isoformat()]
+    assert review["missing_coverage_count"] == 2
+    assert review["missing_coverage_days_truncated"] is True
+
+
+def test_date_order_state_uses_resolved_numeric_written_month_and_name_evidence():
+    cases = [
+        ("column", "03/04", date(2026, 3, 4), "MDY", "detected"),
+        ("column", "O.c_t (Samsara) 16", date(2026, 10, 16), None, "not_required"),
+        ("filename", "2026-10-16", date(2026, 10, 16), None, "not_required"),
+    ]
+    for authority, value, day, expected_order, expected_state in cases:
+        context = _context()
+        assignment = context["roster"][0]
+        assignment["eligibleworkdates"] = [day]
+        context["period"]["start"] = day
+        context["period"]["end"] = day
+        context["days"] = {day: False}
+        context["live_days"] = {(assignment["driverassignmentid"], day)}
+        source = _source()
+        source["date_order"] = None
+        if authority == "column":
+            source["materialized"]["rows"][0]["cells"]["2"]["value"] = value
+        else:
+            source["mapping"].pop("2")
+            source["date_source"] = {"kind": authority}
+            source["file_name"] = f"payroll-{value}.csv"
+
+        result = build_batch_preview([source], context)
+        interpreted = result["interpretations"][0]
+
+        assert result["rows"][0]["work_date"] == day
+        assert interpreted["date_order"] == expected_order
+        assert interpreted["date_order_state"] == expected_state
+        assert result["date_rule_profiles"]["Definition:100"][0]["numeric_order"] == expected_order
+
+
+def test_filename_date_does_not_activate_an_otherwise_blank_row_from_workdate():
+    source = _source(quantity_value="", driver_number="")
+    source["mapping"].pop("2")
+    source["date_source"] = {"kind": "filename"}
+    source["file_name"] = "weekly-2026-10-20.csv"
+    source["materialized"]["rows"][0]["cells"]["2"]["value"] = "garbage"
+
+    result = build_batch_preview([source], _context())
+
+    assert result["rows"][0]["skipped"] is True
+    assert result["rows"][0]["issues"] == []
+    assert result["date_review"]["recognized_days"] == [WORK_DATE.isoformat()]
+
+
+def test_equal_filename_date_meaning_has_same_content_identity_across_supported_spellings():
+    variants = ["weekly-2026-10-20.csv", "weekly-Oct-20-2026.csv", "weekly-Oct-20.csv"]
+    results = []
+    for label in variants:
+        source = _source()
+        source["mapping"].pop("2")
+        source["date_source"] = {"kind": "filename"}
+        source["file_name"] = label
+        results.append(build_batch_preview([source], _context()))
+
+    assert {item["rows"][0]["work_date"] for item in results} == {WORK_DATE}
+    assert len({item["mapping_fingerprint"] for item in results}) == 1
+    assert len({item["content_fingerprint"] for item in results}) == 1
+    assert len({item["plan_fingerprint"] for item in results}) == 1
+
+
+def test_invalid_filename_date_evidence_changes_content_identity():
+    sources = []
+    for label in ("weekly-2026-02-30.csv", "weekly-2026-02-31.csv"):
+        source = _source()
+        source["mapping"].pop("2")
+        source["date_source"] = {"kind": "filename"}
+        source["file_name"] = label
+        sources.append(source)
+
+    first, second = (build_batch_preview([source], _context()) for source in sources)
+
+    assert first["rows"][0]["work_date"] is None
+    assert first["rows"][0]["row_fingerprint"] != second["rows"][0]["row_fingerprint"]
+    assert first["content_fingerprint"] != second["content_fingerprint"]
 
 
 def test_distinct_layouts_merge_into_one_driver_date_group():

@@ -173,7 +173,7 @@ async def test_interpretation_revision_conflicts_are_atomic_and_cancel_is_revisi
     assert repeated_cancel.json()["revision"] == 3
 
 
-async def test_interpretation_can_clear_explicit_date_order_and_date_context(
+async def test_interpretation_can_clear_explicit_date_order_and_filename_date_context(
     p3c_client, p3c_engine, tenant,
 ):
     period = await _period(p3c_client, p3c_engine, tenant)
@@ -190,18 +190,18 @@ async def test_interpretation_can_clear_explicit_date_order_and_date_context(
     assert malformed.status_code == 422, malformed.text
     assert malformed.json()["detail"]["code"] == "IMPORT_DATE_SOURCE_INVALID"
     accepted = await p3c_client.put(f"/payroll/imports/{iid}/interpretation", json={
-        "expected_revision": 1, "default_work_date": fixed_date,
+        "expected_revision": 1,
         "units": [{"source_unit_id": unit_id, "selected": True, "date_order": "DMY",
-                   "date_source": {"kind": "fixed_unit", "value": fixed_date}}],
+                   "date_source": {"kind": "filename", "value": fixed_date}}],
     }, headers=tenant.admin)
     assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["default_work_date"] == fixed_date
+    assert accepted.json()["default_work_date"] is None
     assert accepted.json()["files"][0]["units"][0]["date_order"] == "DMY"
     assert accepted.json()["files"][0]["units"][0]["date_source"] == {
-        "kind": "fixed_unit", "value": fixed_date}
+        "kind": "filename", "value": fixed_date}
 
     cleared = await p3c_client.put(f"/payroll/imports/{iid}/interpretation", json={
-        "expected_revision": accepted.json()["revision"], "default_work_date": None,
+        "expected_revision": accepted.json()["revision"],
         "units": [{"source_unit_id": unit_id, "selected": True, "date_order": None,
                    "date_source": None}],
     }, headers=tenant.admin)

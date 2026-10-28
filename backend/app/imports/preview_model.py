@@ -1,6 +1,7 @@
 """Pure, batch-wide PayrollWork normalization and comparison."""
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from datetime import date
 from decimal import (
@@ -15,6 +16,7 @@ from decimal import (
 )
 from types import SimpleNamespace
 
+from app.imports.date_interpretation import interpret_date, make_date_profile
 from app.imports.errors import ImportFailure
 from app.imports.identity import resolve_row_identity
 from app.imports.mapping import (
@@ -29,7 +31,6 @@ from app.imports.mapping import (
     fingerprint,
     infer_date_order,
     normalized_identifier,
-    parse_date,
     period_meaning,
     quantity,
     target_key,
@@ -56,12 +57,17 @@ def _date_cell(value):
 def _date_source_semantics(source):
     kind = source.get("kind") if isinstance(source, dict) else None
     if kind == "column":
+        if set(source) != {"kind"}:
+            raise ImportFailure("IMPORT_DATE_SOURCE_INVALID", "Date Column accepts only its selected authority.")
         return {"kind": "column"}
-    if kind not in {"filename", "sheet", "fixed_unit", "import_fixed"}:
+    if not isinstance(kind, str) or kind not in {"filename", "sheet"} or \
+            set(source) not in ({"kind"}, {"kind", "value"}):
         raise ImportFailure("IMPORT_DATE_SOURCE_REQUIRED", "Accept one WorkDate provider for each selected source unit.")
     value = source.get("value")
+    if value is None:
+        return {"kind": kind}
     if not isinstance(value, str):
-        raise ImportFailure("IMPORT_DATE_SOURCE_INVALID", "Accepted WorkDate provider must have a date value.")
+        raise ImportFailure("IMPORT_DATE_SOURCE_INVALID", "Accepted date candidate must be an ISO date.")
     try:
         parsed = date.fromisoformat(value)
     except ValueError as exc:
@@ -184,8 +190,6 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
     for source in sources:
         source_date = _date_source_semantics(source.get("date_source") or {})
         date_column = next((column for column, target in source["mapping"].items() if target == "WorkDate"), None)
-        if (source_date.get("kind") == "column") != (date_column is not None):
-            raise ImportFailure("IMPORT_DATE_SOURCE_CONFLICT", "Use either a mapped WorkDate column or one accepted context provider.")
         mapping = {str(column): target for column, target in source["mapping"].items()}
         allowed_targets = {item["target"] for item in mapping_targets(definitions)}
         if any(not str(column).isdigit() or int(column) < 1 or target not in allowed_targets
@@ -194,7 +198,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         assignments = [value for value in mapping.values() if value != "Ignore"]
         if not IDENTIFIERS.intersection(assignments):
             raise ImportFailure("IMPORT_MAPPING_REQUIRED_TARGET", "Map a Driver identifier before preview.", 422)
-        if source_date.get("kind") == "column" and "WorkDate" not in assignments:
+        if source_date.get("kind") == "column" and date_column is None:
             raise ImportFailure("IMPORT_DATE_SOURCE_CONFLICT", "Map a WorkDate column or choose a context date.", 422)
         materialized = source["materialized"]
         inspection = materialized["inspection"]
@@ -224,18 +228,65 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             has_operand(item, rule) for _definition, rule in definition_columns.values())
             or has_sum_rule and any(not blank(item["cells"].get(str(column), _date_cell(None)))
                                     for column, target in mapped.items()
-                                    if target in IDENTIFIERS or target == "WorkDate")]
-        date_cells = [item["cells"].get(date_column) for item in active_rows] if date_column else []
+                                    if target in IDENTIFIERS or
+                                    target == "WorkDate" and source_date.get("kind") == "column")]
+        effective_date_column = date_column if source_date.get("kind") == "column" else None
+        date_cells = [item["cells"].get(str(effective_date_column)) for item in active_rows] if effective_date_column else []
         date_order, order_state = infer_date_order(date_cells, period["start"], period["end"],
                                                    source.get("date_order"))
-        if source_date.get("kind") == "column" and date_order is None and date_cells:
-            # ISO/native dates parse without an order; retain unresolved only
-            # when at least one nonblank slash date cannot be interpreted.
-            unresolved = any(not blank(cell) and parse_date(cell, None) is None and cell.get("kind") == "text"
-                             and any(separator in str(cell.get("value", "")) for separator in "/." )
-                             for cell in date_cells)
-            if not unresolved:
+        date_results = []
+        name_date_result = None
+        if effective_date_column is not None:
+            date_results = [interpret_date(item["cells"].get(str(effective_date_column), _date_cell(None)),
+                                           period_days=context["days"].keys(), selected_order=date_order,
+                                           source_kind="column") for item in active_rows]
+        elif source_date["kind"] in {"filename", "sheet"}:
+            label = source.get("file_name") if source_date["kind"] == "filename" else source.get("unit_name")
+            name_date_result = interpret_date(label, period_days=context["days"].keys(),
+                                              selected_order=source.get("date_order"),
+                                              source_kind=source_date["kind"],
+                                              selected_candidate=source_date.get("value"))
+        date_evidence = date_results or ([name_date_result] if name_date_result is not None else [])
+        if date_order is None:
+            numeric_orders = set()
+            for result in date_evidence:
+                pattern = result.get("pattern")
+                match = re.match(r"numeric_(DMY|MDY|YMD)(?:_|$)", pattern or "")
+                if match and result.get("status") == "resolved":
+                    numeric_orders.add(match.group(1))
+            if len(numeric_orders) == 1:
+                date_order = next(iter(numeric_orders))
+                order_state = "detected"
+                if effective_date_column is not None:
+                    date_results = [interpret_date(item["cells"].get(str(effective_date_column), _date_cell(None)),
+                                                   period_days=context["days"].keys(),
+                                                   selected_order=date_order, source_kind="column")
+                                    for item in active_rows]
+                    date_evidence = date_results
+            elif len(numeric_orders) > 1:
                 order_state = "not_required"
+            else:
+                has_ambiguous_numeric = any(
+                    result.get("status") == "ambiguous"
+                    or result.get("status") == "unrecognized"
+                    and result.get("reason") in {"unsupported_numeric_cell_text", "unsupported_or_incomplete_text"}
+                    and re.search(r"\d\s*[/.-]\s*\d", str(value.get("value", ""))) is not None
+                    for result, value in zip(date_evidence, date_cells if effective_date_column is not None
+                                             else [source.get("file_name") if source_date["kind"] == "filename"
+                                                   else source.get("unit_name")], strict=False))
+                has_nonblank_date = any(not blank(cell) for cell in date_cells) if effective_date_column else bool(
+                    name_date_result and name_date_result.get("status") not in {"unrecognized"})
+                order_state = "unresolved" if has_ambiguous_numeric and has_nonblank_date else "not_required"
+        if effective_date_column is None and name_date_result is not None:
+            date_results = [name_date_result]
+        saved_order = inspection.get("accepted_date_order")
+        saved_state = inspection.get("date_order_state")
+        if source.get("date_order_state_override") in {
+                "selected", "detected", "matched_previous_pattern", "not_required"}:
+            order_state = source["date_order_state_override"]
+        elif (saved_order is not None and saved_order == date_order
+              and saved_state in {"selected", "detected", "matched_previous_pattern", "not_required"}):
+            order_state = saved_state
         source["accepted_date_order"] = date_order
         source["date_order_state"] = order_state
         source["date_column"] = date_column
@@ -243,7 +294,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             "structure": source["structure_fingerprint"],
             "unit_kind": source.get("unit_kind"),
             "mapping": [{"column": int(column), "target": target}
-                        for column, target in _numbered(mapping) if target != "Ignore"],
+                        for column, target in _numbered(mapping) if target != "Ignore" and
+                        (target != "WorkDate" or source_date.get("kind") == "column")],
             "quantity_rules": [{"target": definition_meaning(definition),
                                 "transform": rule["transform"],
                                 "source_signature": rule.get("source_signature")}
@@ -255,6 +307,10 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             "encoding": inspection.get("encoding"), "delimiter": inspection.get("delimiter"),
         }
         source["row_contract_fingerprint"] = fingerprint("row-source-contract", source_contract)
+        source["date_column"] = effective_date_column
+        source["date_profile"] = make_date_profile(source_date["kind"], date_order, date_results)
+        source["date_resolved_values"] = sorted({item["resolved_date"] for item in date_results
+                                                  if item.get("resolved_date")})
         mapping_semantics.append({**source_contract, "file_ordinal": source["file_ordinal"],
                                   "unit_name": source["unit_name"]})
         for source_row in raw_rows:
@@ -262,7 +318,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             has_quantity = any(has_operand(source_row, rule)
                                for _definition, rule in definition_columns.values())
             has_identity_or_date = any(not blank(cells.get(str(column), _date_cell(None)))
-                                       for column, kind in mapped.items() if kind in IDENTIFIERS | {"WorkDate"})
+                                       for column, kind in mapped.items()
+                                       if kind in IDENTIFIERS or kind == "WorkDate" and effective_date_column is not None)
             has_sum = any(rule["transform"] == "Sum" for _definition, rule in definition_columns.values())
             skipped = not has_quantity and not (has_sum and has_identity_or_date)
             data_rows += 0 if skipped else 1
@@ -347,27 +404,40 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 "review_candidates": review_driver_details[:2]}
 
             date_value = None
-            date_cell = cells.get(date_column, _date_cell(None)) if date_column else None
-            if source_date.get("kind") == "column":
-                date_value = parse_date(date_cell, date_order)
-                if blank(date_cell):
-                    source_date_value = {"blank": True}
-                elif date_value is not None:
+            date_cell = cells.get(str(effective_date_column), _date_cell(None)) if effective_date_column is not None else None
+            date_result = (interpret_date(date_cell, period_days=context["days"].keys(),
+                                          selected_order=date_order, source_kind="column")
+                           if effective_date_column is not None else name_date_result)
+            if date_result is not None:
+                date_value = (date.fromisoformat(date_result["resolved_date"])
+                              if date_result.get("resolved_date") else None)
+                if date_value is not None:
                     source_date_value = {"date": date_value.isoformat()}
                 else:
-                    source_date_value = {"invalid": True, "raw_value": canonical(date_cell.get("value")),
-                                         "kind": date_cell.get("kind"),
-                                         "formula": bool(date_cell.get("formula")),
-                                         "missing_cache": bool(date_cell.get("missing_cache"))}
-            elif source_date.get("kind") in {"filename", "sheet", "fixed_unit", "import_fixed"}:
-                date_value = date.fromisoformat(source_date["value"])
-                source_date_value = {"date": date_value.isoformat()}
+                    source_date_value = {"status": date_result["status"], "reason": date_result["reason"],
+                                         "explicit_year": date_result.get("explicit_year"),
+                                         "pattern": date_result.get("pattern")}
+                if date_value is None and effective_date_column is not None:
+                    source_date_value.update({"raw_value": canonical(date_cell.get("value")),
+                                              "kind": date_cell.get("kind"),
+                                              "formula": bool(date_cell.get("formula")),
+                                              "missing_cache": bool(date_cell.get("missing_cache"))})
+                elif date_value is None and source_date.get("kind") in {"filename", "sheet"}:
+                    source_date_value["raw_value"] = (source.get("file_name") if source_date["kind"] == "filename"
+                                                       else source.get("unit_name"))
+                date_review = {key: date_result[key] for key in
+                               ("status", "reason", "pattern", "explicit_year", "explanation")}
+                date_review["resolved_date"] = date_result.get("resolved_date")
+                date_review["candidate_count"] = len(date_result["candidate_dates"])
+                date_review["candidate_dates"] = date_result["candidate_dates"][:(
+                    policy or DEFAULT_IMPORT_RESOURCE_POLICY).row_detail_sample]
             else:
-                source_date_value = {"invalid": True}
+                source_date_value = {"status": "error", "reason": "missing_provider", "date": None}
+                date_review = {"status": "error", "reason": "missing_provider", "candidate_count": 0,
+                               "candidate_dates": [], "explanation": "Choose a date authority for this source unit."}
             if not skipped and (date_value is None or date_value not in context["days"]):
                 row_error = True
-                issue(date_column, "Error", "IMPORT_WORK_DATE_INVALID",
-                      "Use a valid date in this period's day snapshot. Select the date order if ambiguous; numeric or timezone-offset dates are unsupported.")
+                issue(effective_date_column, "Error", "IMPORT_WORK_DATE_INVALID", date_review["explanation"])
                 date_value = None
 
             assignment_id = None
@@ -504,7 +574,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 "values": values, "issues": row_issues, "identifiers": identifiers,
                 "context": {"status_code": (context["entries"].get((assignment_id, date_value)) or {}).get("statuscode"),
                             "day_off": bool(date_value and context["days"].get(date_value, False)),
-                            "source_date": source_date, "driver_identity": driver_identity},
+                            "source_date": source_date, "date_interpretation": date_review,
+                            "driver_identity": driver_identity},
                 "group_fingerprint": fingerprint("group", {
                     "driver": driver_meaning(context["drivers_by_id"][driver_id]) if driver_id in context["drivers_by_id"] else None,
                     "date": date_value.isoformat() if date_value else None,
@@ -611,6 +682,50 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         group["error_count"] += severities["Error"]
         group["warning_count"] += severities["Warning"]
         group["conflict_count"] += severities["Conflict"]
+    covered_days = {row["work_date"].isoformat() for row in output_rows if row["work_date"] is not None}
+    unit_days = defaultdict(set)
+    unit_unresolved = Counter()
+    day_units = defaultdict(set)
+    for row in output_rows:
+        unit = (row["file_ordinal"], row["unit_name"])
+        if row["work_date"] is not None:
+            value = row["work_date"].isoformat()
+            unit_days[unit].add(value)
+            day_units[value].add(unit)
+        elif not row["skipped"]:
+            unit_unresolved[unit] += 1
+    for source in sources:
+        unit = (source["file_ordinal"], source["unit_name"])
+        for value in source.get("date_resolved_values", []):
+            unit_days[unit].add(value)
+            day_units[value].add(unit)
+    recognized_days = sorted(covered_days | {day for values in unit_days.values() for day in values})
+    sample_limit = (policy or DEFAULT_IMPORT_RESOURCE_POLICY).date_review_day_sample
+    recognized_day_set = set(recognized_days)
+    missing_days = sorted(day.isoformat() for day in context["days"]
+                          if day.isoformat() not in recognized_day_set)
+    overlap_days = sorted(day for day, owners in day_units.items() if len(owners) > 1)
+    date_review_summary = {
+        "recognized_days": recognized_days[:sample_limit],
+        "recognized_day_count": len(recognized_days),
+        "recognized_days_truncated": len(recognized_days) > sample_limit,
+        "missing_coverage_days": missing_days[:sample_limit],
+        "missing_coverage_count": len(missing_days),
+        "missing_coverage_days_truncated": len(missing_days) > sample_limit,
+        "unresolved_row_count": sum(unit_unresolved.values()),
+        "overlap_unit_day_count": len(overlap_days),
+        "overlap_unit_days": overlap_days[:sample_limit],
+        "overlap_unit_days_truncated": len(overlap_days) > sample_limit,
+        "units": [{"file_ordinal": ordinal, "unit_name": name,
+                   "recognized_day_count": len(unit_days[(ordinal, name)]),
+                   "unresolved_row_count": unit_unresolved[(ordinal, name)]}
+                  for ordinal, name in sorted(set(unit_days) | set(unit_unresolved))],
+    }
+    date_rule_profiles = {}
+    for source in sources:
+        for rule in source.get("quantity_rules", []):
+            if any(column is not None for column in rule.get("columns", [])):
+                date_rule_profiles.setdefault(rule["target"], []).extend(source["date_profile"])
     return {"rows": output_rows, "issues": issues, "groups": list(groups.values()),
             "mapping_fingerprint": mapping_fp, "content_fingerprint": content_fp,
             "plan_fingerprint": plan_fp, "counts": dict(counts),
@@ -619,4 +734,5 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                  "date_order_state": s.get("date_order_state"),
                                  "date_source": s.get("date_source")}
                                 for s in sources],
-            "candidates": candidates}
+            "candidates": candidates, "date_review": date_review_summary,
+            "date_rule_profiles": date_rule_profiles}
