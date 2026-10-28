@@ -595,18 +595,15 @@ async def canonical_workload_snapshot(engine, tenant, period_id):
 
     async with engine.connect() as db:
         lines = [dict(row) for row in (await db.execute(text("""
-            SELECT DraftLineID, DriverAssignmentID, DriverID, WorkDate, PayrollPeriodDefinitionID,
-                   Quantity, SourceType, SourceID, Status, AddedByUserID
-            FROM payroll.PayrollDraftLines
-            WHERE CompanyID=:cid AND PayrollPeriodID=:pid ORDER BY DraftLineID
+            SELECT d.*
+            FROM payroll.PayrollDraftLines AS d
+            WHERE d.CompanyID=:cid AND d.PayrollPeriodID=:pid ORDER BY d.DraftLineID
         """), {"cid": tenant.company_id, "pid": period_id})).mappings()]
         evidence = [dict(row) for row in (await db.execute(text("""
-            SELECT PayrollPeriodAuditEvidenceEventID, EvidenceDomain, ActionCode, SourceEntityType,
-                   SourceEntityID, DriverID, WorkDate, PayItemID, BeforeStateJson, AfterStateJson,
-                   ActorUserID, CorrelationID, SourceRevision
-            FROM payroll.PayrollPeriodAuditEvidenceEvents
-            WHERE CompanyID=:cid AND PayrollPeriodID=:pid AND EvidenceDomain='SOURCE'
-            ORDER BY PayrollPeriodAuditEvidenceEventID
+            SELECT e.*
+            FROM payroll.PayrollPeriodAuditEvidenceEvents AS e
+            WHERE e.CompanyID=:cid AND e.PayrollPeriodID=:pid AND e.EvidenceDomain='SOURCE'
+            ORDER BY e.PayrollPeriodAuditEvidenceEventID
         """), {"cid": tenant.company_id, "pid": period_id})).mappings()]
         heads = [dict(row) for row in (await db.execute(text("""
             SELECT BranchID, PayDefinitionID, RuleVersionID, Revision

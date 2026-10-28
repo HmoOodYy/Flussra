@@ -209,7 +209,21 @@ Benchmark realistic compatible daily CSV/single-sheet XLSX, partial-column varia
 
 Synchronous HTTP suitability remains unestablished without an authoritative request/proxy deadline and per-process memory/concurrency budget. A11 cannot pass the deployment gate, and A12 cannot bypass it, on an invented threshold. If measured evidence justifies durable execution, return a separately approved minimal design; do not implement jobs/polling speculatively.
 
-The current revised harness adds separately isolated completed-input repeat after a canonical Manual edit, partial-column overlap across daily files and exact/one-byte-over canonical admission scenarios. Its focused shape tests cover workload construction and orchestration only; no workload measurements are recorded here. The full-backend run at `6ca4691` completed with 3,368 passed in 577.80 seconds (artifact `.artifacts/validation/manual-full-20261028-132025`); this is correctness evidence, not A11 performance or deployment acceptance. Latency, memory and deployment-budget acceptance remain open.
+The revised harness adds separately isolated completed-input repeat after a canonical Manual edit, partial-column overlap across daily files and exact/one-byte-over canonical admission scenarios. A manual run at `c587c60077153a639a33fd609d364116d4900035` completed the first nine current scenarios and failed while setting up scenario 10 (`current_completed_repeat_csv`); scenarios 11 and 12 did not run. The failure was in the preservation snapshot query, which selected columns removed from the current schema, before the repeat upload was submitted. Thus these are nine scenario measurements, not a complete revised run. Raw JSON and the failed-run log are retained under `.artifacts/validation/manual-benchmark-20261028-142425`; the harness snapshot correction is separately covered by a focused PostgreSQL regression.
+
+| Current scenario | Preview (s) | Refresh (s) | Refresh period lock to commit dispatch (s) | Full-scenario peak working set (MiB) |
+|---|---:|---:|---:|---:|
+| `current_daily_csv` | 23.222 | 24.007 | 3.335 | 316.7 |
+| `current_daily_issue_csv` | 12.504 | 12.993 | 3.278 | 372.4 |
+| `current_daily_xlsx` | 22.307 | 22.700 | 3.086 | 317.0 |
+| `current_date_column_csv` | 11.814 | 12.291 | 2.611 | 233.1 |
+| `current_filename_dates_csv` | 11.085 | 11.699 | 2.763 | 231.2 |
+| `current_identity_csv` | 9.666 | 10.230 | 3.082 | 221.3 |
+| `current_repeated_rows_csv` | 19.200 | 20.259 | 6.040 | 363.0 |
+| `current_sheet_dates_xlsx` | 10.975 | 11.712 | 2.734 | 231.5 |
+| `current_target_mapping_csv` | 19.581 | 19.876 | 3.095 | 293.3 |
+
+Peak working set is `final_memory.peak_working_set_bytes` from each scenario JSON, converted to MiB; it covers the full isolated scenario process, including fixture and cleanup phases. The lock column is period-lock to COMMIT dispatch, not lock-to-response. For `current_daily_csv`, `build_batch_preview` took 18.753 seconds; the 640 SQLAlchemy calls include ordinary authenticated GET probes. These are observed workload measurements only, with no latency or memory pass threshold established. Full revised-workload measurements and the authoritative deployment-budget decision remain open. The full-backend run at `6ca4691` completed with 3,368 passed in 577.80 seconds (artifact `.artifacts/validation/manual-full-20261028-132025`); this is correctness evidence, not A11 performance or deployment acceptance.
 
 Slice B acceptance additionally proves user decisions, existing day-off/held-Status behavior, stale refusal/no writes, exact reviewed changes/evidence/receipt, active-rule atomicity, idempotent completion/manual-edit preservation, rollback and completed-import retention. Dedicated Status import and a new ordinal tier cap remain separately deferred. Follow AGENTS.md focused verification; a final full-suite confidence run is manual, not an automatic implementation runner.
 

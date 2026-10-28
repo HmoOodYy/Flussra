@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import text
 
+from scripts.benchmark_import_files import canonical_workload_snapshot, import_staging_snapshot
 from tests.compensation_api_fixtures import (  # noqa: F401 - register fixtures
     create_definition,
     grant_applicability,
@@ -75,6 +76,43 @@ async def test_a_line_is_identified_by_its_period_definition_and_stores_no_money
         """))).scalars().all()
     assert tuple(stored) == (ppd, Decimal("5.0000"), False)
     assert retired == []
+
+
+async def test_benchmark_snapshots_use_current_draft_and_evidence_ownership_columns(
+    p3c_client, p3c_engine, tenant,
+):
+    period, definition_id, work_date = await _setup(p3c_client, p3c_engine, tenant)
+    period_id = period["payroll_period_id"]
+    before = await canonical_workload_snapshot(p3c_engine, tenant, period_id)
+    staging_before = await import_staging_snapshot(p3c_engine, tenant)
+    assert before == {"draft_lines": [], "evidence": [], "rule_heads": []}
+
+    created = await p3c_client.post(
+        _lines_url(period), json=_body(tenant, definition_id, work_date, "99", source_type="Manual"),
+        headers=tenant.admin,
+    )
+    assert created.status_code == 201, created.text
+
+    after = await canonical_workload_snapshot(p3c_engine, tenant, period_id)
+    staging_after = await import_staging_snapshot(p3c_engine, tenant)
+    assert staging_after == staging_before
+    assert len(after["draft_lines"]) == 1
+    line = after["draft_lines"][0]
+    assert line["driverassignmentid"] == tenant.driver_a
+    assert "driverid" not in line
+    assert isinstance(line["quantity"], Decimal)
+    assert line["quantity"] == Decimal("99.0000")
+    assert line["sourcetype"] == "Manual" and line["addedbyuserid"] == tenant.owner
+
+    assert len(after["evidence"]) == 1
+    evidence = after["evidence"][0]
+    assert evidence["evidencedomain"] == "SOURCE" and evidence["actioncode"] == "SOURCE_CREATED"
+    assert evidence["sourceentityid"] == str(created.json()["draft_line_id"])
+    assert evidence["driverassignmentid"] == tenant.driver_a
+    assert evidence["driverid"] == tenant.driver_a_id
+    assert "payitemid" not in evidence
+    assert after["rule_heads"] == before["rule_heads"]
+    assert await canonical_workload_snapshot(p3c_engine, tenant, period_id) == after
 
 
 async def test_money_and_review_flags_are_not_accepted_as_input(p3c_client, p3c_engine, tenant):
