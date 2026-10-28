@@ -1,6 +1,6 @@
 # Flussra C2 Import Product Contract
 
-**Status:** Agreed product decisions, 2026-10-28. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A08 have been implemented and focused-verified on the foundation continuation. A06 covers per-target pending mappings, Direct/Sum and duplicate outcomes, compatible current-head reuse and affected-target remapping. A07 covers Company-authoritative Driver identity discovery and discrepancy reporting without identity acceptance. A08 covers chosen date authority, deterministic supported date interpretation, persisted draft date profiles and bounded date review; A09-A12, semantic repeat recognition, the connected Import experience and Slice B payroll application remain incomplete.
+**Status:** Agreed product decisions, 2026-10-28. This is the canonical contract for the revised Import behavior, reconciled with the complete twelve-stage Slice A and Slice B delivery documents. A01-A09 have been implemented and focused-verified on the foundation continuation. A06 covers per-target pending mappings, Direct/Sum and duplicate outcomes, compatible current-head reuse and affected-target remapping. A07 covers Company-authoritative Driver identity discovery and discrepancy reporting without identity acceptance. A08 covers chosen date authority, deterministic supported date interpretation, persisted draft date profiles and bounded date review. A09 covers explicit repeated-row aggregation and typed categorical filtering as pending preparation; A10-A12, semantic repeat recognition, the connected Import experience and Slice B payroll application remain incomplete.
 
 **Continuation baseline:** `codex/c2-import-foundation`, implementation at `9e03a660b2fa06c4e2aa498715e4cacee2773f6e` and documentation through `f15bf96`. Preserve its implementation and history. The divergent `codex/c2-import-preview` at `6498453` is reference evidence only; it is not to be merged or cherry-picked as part of recording this contract.
 
@@ -161,7 +161,7 @@ Preserve identifier text and existing Company isolation. No automatic driver cre
 
 A driver code appearing on different dates is not a duplicate. Resolve date context internally before determining true repeated driver/day records; the user need not understand the detection mechanism.
 
-At a real repeated-row case, block continuation until the user defines the handling:
+At a real repeated-row case, the default `RejectRepeated` behavior blocks preparation until the user defines the handling:
 
 1. Sum rows by Driver Code within the resolved day; or
 2. Use Driver Code plus a selected categorical column to choose the rows eligible for summing within that day.
@@ -170,7 +170,9 @@ For the categorical option, inspect the chosen column's values, verify suitabili
 
 Flussra does not need a built-in understanding of HOS statuses for this rule. An external categorical filter is not the separate Flussra Status import.
 
-Aggregate eligible repeated rows into **one quantity per Driver / WorkDate / Pay Item**. Preserve source traceability and deliberate exclusions. Neither repeated rows nor duplicate headers authorize automatic summation before the rule is confirmed. Categorical suitability criteria and saved rule identity need detailed design; do not invent a domain classifier or a fixed distinct-value threshold.
+Aggregate eligible repeated rows into **one quantity per Driver / WorkDate / Pay Item**. Preserve source traceability and deliberate exclusions. Neither repeated rows nor duplicate headers authorize automatic summation before the rule is confirmed. Category suitability requires exact typed repeated-value evidence, with no fixed distinct-value threshold or HOS/status classifier. Every observed category has an explicit Include or Exclude choice; a new value is unresolved until reviewed. Excluded source rows remain auditable proposed exclusions, not accepted payroll exclusions. Incomplete or unknown contributions withhold the whole target group; invalid included values remain errors. Validate the final aggregate once using the existing target quantity rules. These rules are prepared in pending source configuration; they do not create payroll facts or promote current rule heads.
+
+Category inspection is a bounded read-only paged view. Row handling is an explicit source setup choice: `RejectRepeated`, `SumRows`, or `FilterThenSum` with a selected category column and typed decisions. When no rule is saved, repeated rows remain blocked. Compatible saved choices may be reused only under the existing current Completed-head or owned-pending rules; unseen values always require explicit resolution.
 
 ## 7. Dates and repeat-import presentation
 

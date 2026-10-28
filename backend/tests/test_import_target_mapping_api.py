@@ -13,6 +13,7 @@ from tests.compensation_api_fixtures import (  # noqa: F401 - register isolated 
 from tests.compensation_database_fixtures import p3b_database  # noqa: F401
 from tests.payroll_runtime_fixtures import (
     build_payroll_tenant,
+    make_driver_self_user,
     map_import_columns,
     open_period_with_grid,
     rated_definition,
@@ -377,4 +378,21 @@ async def test_mapping_body_is_not_read_before_mutation_authorization(
         headers={**tenant.headers(tenant.viewer), "Content-Type": "application/json"},
     )
     assert response.status_code == 403, response.text
+    assert called is False
+
+    rejected_row_policy = await p3c_client.put(
+        f"/payroll/imports/{uploaded.json()['import_id']}/row-handling",
+        content=b'{"expected_revision":1,"invalid":true}',
+        headers={**tenant.headers(tenant.viewer), "Content-Type": "application/json"},
+    )
+    assert rejected_row_policy.status_code == 403, rejected_row_policy.text
+    assert called is False
+
+    rejected_category_read = await p3c_client.post(
+        f"/payroll/imports/{uploaded.json()['import_id']}/categories/inspect",
+        content=b'{"expected_revision":1,"invalid":true}',
+        headers={**make_driver_self_user(tenant, ["payroll.entry", "payroll.view"]),
+                 "Content-Type": "application/json"},
+    )
+    assert rejected_category_read.status_code == 403, rejected_category_read.text
     assert called is False

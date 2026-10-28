@@ -15,6 +15,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from app.imports.aggregation import (
+    CategoryEvidenceError,
+    category_key_from_json,
+    category_key_to_json,
+    typed_category_key,
+)
 from app.imports.canonical import (
     canonical_source_unit,
     decode_canonical_file,
@@ -26,6 +32,7 @@ from app.imports.contracts import (
     CANONICALIZATION_VERSION,
     FILE_SOURCE_CONTRACT_VERSION,
     IMPORT_CONTRACT_VERSION,
+    ROW_HANDLING_VERSION,
     RULE_CONTRACT_VERSION,
     SOURCE_CONTRACT_VERSION,
     TARGET_CONTRACT_VERSION,
@@ -61,6 +68,7 @@ from app.imports.payroll_context import context_identity, load_context
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY, ImportResourcePolicy
 from app.imports.preview_model import build_batch_preview
 from app.imports.preview_store import persist_preview, prepare_preview
+from app.imports.readmodels import bounded_page
 from app.imports.rules import current_rule_context
 from app.imports.runtime import admission, authorize, failure
 from app.imports.staging import clear_derived_state
@@ -114,6 +122,47 @@ class MappingRequest(RevisionRequest):
     targets: list[TargetRuleRequest] = Field(default_factory=list)
 
 
+class CategoryInspectionRequest(RevisionRequest):
+    column: ColumnSelector
+    offset: int = Field(default=0, strict=True, ge=0)
+    limit: int | None = Field(default=None, strict=True, ge=1)
+
+
+class CategoryChoiceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    category: dict
+    decision: str
+
+    @model_validator(mode="after")
+    def validate_choice(self):
+        try:
+            category_key_from_json(self.category)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if self.decision not in {"Include", "Exclude"}:
+            raise ValueError("decision must be Include or Exclude")
+        return self
+
+
+class RowHandlingRequest(RevisionRequest):
+    mode: str
+    filter_column: ColumnSelector | None = None
+    choices: list[CategoryChoiceRequest] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_mode(self):
+        if self.mode not in {"RejectRepeated", "SumRows", "FilterThenSum"}:
+            raise ValueError("mode must be RejectRepeated, SumRows, or FilterThenSum")
+        if self.mode == "FilterThenSum" and self.filter_column is None:
+            raise ValueError("FilterThenSum requires filter_column")
+        if self.mode != "FilterThenSum" and (self.filter_column is not None or self.choices):
+            raise ValueError("filter_column and choices are valid only for FilterThenSum")
+        keys = [encoded(category_key_from_json(item.category)) for item in self.choices]
+        if len(set(keys)) != len(keys):
+            raise ValueError("Each category choice may appear only once")
+        return self
+
+
 class DuplicateOccurrence(BaseModel):
     model_config = ConfigDict(extra="forbid")
     duplicate_signature: str | None
@@ -157,6 +206,8 @@ class TargetRuleRequest(BaseModel):
 
 
 MappingRequest.model_rebuild()
+CategoryInspectionRequest.model_rebuild()
+RowHandlingRequest.model_rebuild()
 
 
 def _json(value) -> str:
@@ -390,11 +441,15 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
                  "pending_rule_version_id": pending["ruleversionid"] if pending else None,
                  "pending_revision": pending["revision"] if pending else None,
                  "pending_expected_head_revision": pending["expectedheadrevision"] if pending else None,
-                 "pending_rule": _stored_rule_payload(pending["rulepayload"]) if pending else None,
-                 "current_rule": _stored_rule_payload(head["rulepayload"]) if head else None,
+                 "pending_rule": _public_rule_summary(pending["rulepayload"],
+                                                       choice_sample=policy.row_detail_sample) if pending else None,
+                 "current_rule": _public_rule_summary(head["rulepayload"],
+                                                       choice_sample=policy.row_detail_sample) if head else None,
                  "reusable": reusable, "reason": reason}
         state["state"] = ("head_changed" if pending and pending["expectedheadrevision"] != state["current_head_revision"]
-                           else "pending" if pending else "missing_inputs" if reusable and reason == "Known source columns are absent"
+                           else "pending" if pending else "missing_inputs" if reusable and reason in {
+                               "Known source columns are absent",
+                               "The saved category column is absent; choose a replacement filter column"}
                            else "reusable" if reusable
                            else "remap_required" if head else "unmapped")
         item["rule_state"] = state
@@ -879,10 +934,12 @@ def _selector_payload(selector: ColumnSelector) -> dict:
 def _stored_rule_payload(value) -> dict | None:
     if (not isinstance(value, dict) or set(value) not in ({
             "payload_version", "transform", "inputs", "shared_columns"}, {
-            "payload_version", "transform", "inputs", "shared_columns", "date_interpretation"})
+            "payload_version", "transform", "inputs", "shared_columns", "date_interpretation"}, {
+            "payload_version", "transform", "inputs", "shared_columns", "row_handling"}, {
+            "payload_version", "transform", "inputs", "shared_columns", "date_interpretation", "row_handling"})
             or type(value.get("payload_version")) is not int or value["payload_version"] != 1):
         return None
-    if value.get("transform") not in {"Direct", "Sum"}:
+    if not isinstance(value.get("transform"), str) or value["transform"] not in {"Direct", "Sum"}:
         return None
     inputs = value.get("inputs")
     shared = value.get("shared_columns")
@@ -915,6 +972,37 @@ def _stored_rule_payload(value) -> dict | None:
         if canonical_profiles != sorted(canonical_profiles, key=encoded) or len(
                 {_json(item) for item in canonical_profiles}) != len(canonical_profiles):
             return None
+    if "row_handling" in value:
+        row_handling = value["row_handling"]
+        if (not isinstance(row_handling, dict) or set(row_handling) != {"version", "mode", "choices"}
+                or type(row_handling.get("version")) is not int
+                or row_handling["version"] != ROW_HANDLING_VERSION
+                or not isinstance(row_handling.get("mode"), str)
+                or row_handling["mode"] not in {"SumRows", "FilterThenSum"}
+                or not isinstance(row_handling.get("choices"), list)):
+            return None
+        choices = []
+        seen_choice_keys = set()
+        for choice in row_handling["choices"]:
+            if not isinstance(choice, dict) or set(choice) != {"category", "decision"}:
+                return None
+            try:
+                key = category_key_from_json(choice["category"])
+            except (TypeError, ValueError):
+                return None
+            decision = choice.get("decision")
+            if (not isinstance(decision, str) or decision not in {"Include", "Exclude"}
+                    or key in seen_choice_keys):
+                return None
+            seen_choice_keys.add(key)
+            choices.append({"category": {"type": key[0], "value": key[1]},
+                            "decision": decision})
+        if choices != sorted(choices, key=encoded):
+            return None
+        if row_handling["mode"] == "SumRows" and choices:
+            return None
+        if (row_handling["mode"] == "FilterThenSum") != ("Filter" in shared):
+            return None
     def selector_ok(selector):
         if not isinstance(selector, dict) or set(selector) - {"header", "occurrences"}:
             return False
@@ -943,7 +1031,7 @@ def _stored_rule_payload(value) -> dict | None:
             seen.add(signature)
         return True
     if any(not selector_ok(item) for item in inputs) or set(shared) - {
-            "DriverNumber", "EmployeeKey", "DriverName", "WorkDate"}:
+            "DriverNumber", "EmployeeKey", "DriverName", "WorkDate", "Filter"}:
         return None
     if any(not selector_ok(item) for item in shared.values()):
         return None
@@ -960,6 +1048,22 @@ def _stored_rule_payload(value) -> dict | None:
     if value["transform"] == "Sum" and len(inputs) < 2:
         return None
     return value
+
+
+def _public_rule_summary(value, *, choice_sample: int) -> dict | None:
+    payload = _stored_rule_payload(value)
+    if payload is None:
+        return None
+    result = dict(payload)
+    row_handling = payload.get("row_handling")
+    if row_handling is not None:
+        choices = row_handling["choices"]
+        result["row_handling"] = {
+            "version": row_handling["version"], "mode": row_handling["mode"],
+            "choice_count": len(choices), "choices_sample": choices[:choice_sample],
+            "choices_truncated": len(choices) > choice_sample,
+        }
+    return result
 
 
 def _rule_reuse_reason(head, definition, headers):
@@ -982,6 +1086,7 @@ def _rule_reuse_reason(head, definition, headers):
     date_profiles = payload.get("date_interpretation", {}).get("profiles", [])
     work_date_is_dependency = any(item["authority"] == "column" for item in date_profiles)
     missing_date_column = False
+    missing_filter_column = False
     try:
         inputs = [resolve_selector(selector, headers, required=False,
                                    allow_unobserved_arrangements=True)
@@ -989,16 +1094,20 @@ def _rule_reuse_reason(head, definition, headers):
         for role, selector in payload["shared_columns"].items():
             if role == "WorkDate" and not work_date_is_dependency:
                 continue
-            resolved = resolve_selector(selector, headers, required=role != "WorkDate",
+            resolved = resolve_selector(selector, headers, required=role not in {"WorkDate", "Filter"},
                                         allow_unobserved_arrangements=True)
             if role == "WorkDate" and not any(column is not None for column in resolved.values()):
                 missing_date_column = work_date_is_dependency
+            if role == "Filter" and not any(column is not None for column in resolved.values()):
+                missing_filter_column = True
     except ImportFailure:
         return "A relevant header or duplicate arrangement changed", False
     if any(column is None for result in inputs for column in result.values()):
         return "Known source columns are absent", True
     if missing_date_column:
         return "The saved date column is absent; choose another date authority or map a date column", True
+    if missing_filter_column:
+        return "The saved category column is absent; choose a replacement filter column", True
     return "Matched the current successful relationship", True
 
 
@@ -1018,10 +1127,11 @@ def _stored_source_signature(value, payload):
 
 async def accept_mapping(request, engine, cid, uid, iid, body: MappingRequest):
     """Save one revisioned mapping snapshot without promoting current rule heads."""
-    async with engine.begin() as db:
-        row = await _lock_mutable(db, cid, uid, iid, body.expected_revision)
-        await _save_mapping(request, db, cid, uid, iid, row, body)
-        return await metadata(db, cid, iid, policy=_policy(request))
+    async with admission(request):
+        async with engine.begin() as db:
+            row = await _lock_mutable(db, cid, uid, iid, body.expected_revision)
+            await _save_mapping(request, db, cid, uid, iid, row, body)
+            return await metadata(db, cid, iid, policy=_policy(request))
 
 
 async def _prepare_current_rules(request, db, cid, uid, iid):
@@ -1073,7 +1183,7 @@ async def _prepare_current_rules(request, db, cid, uid, iid):
                                             allow_unobserved_arrangements=True)
                            for item in payload["inputs"]]
             for role, selector in payload["shared_columns"].items():
-                resolve_selector(selector, headers, required=role != "WorkDate",
+                resolve_selector(selector, headers, required=role not in {"WorkDate", "Filter"},
                                  allow_unobserved_arrangements=True)
         except ImportFailure:
             continue
@@ -1126,9 +1236,12 @@ async def _prepare_current_rules(request, db, cid, uid, iid):
     await _save_mapping(request, db, cid, uid, iid, row, body)
 
 
-async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
+async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest, *,
+                        row_handling_overrides: dict[int, dict | None] | None = None,
+                        filter_selector_override: dict | None = None,
+                        preserve_pending_targets: set[int] | None = None):
     """Persist validated proposals under the caller's period and Import locks."""
-    roles = {"DriverNumber", "EmployeeKey", "DriverName", "WorkDate"}
+    roles = {"DriverNumber", "EmployeeKey", "DriverName", "WorkDate", "Filter"}
     await require_supported_import_contract(db, cid, iid)
     _files, units, layouts = await load_sources(db, cid, iid)
     _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
@@ -1145,7 +1258,8 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
         layout_headers[layout["sourcelayoutid"]] = inspection["header_cells"]
 
     if set(body.shared_columns) - roles:
-        raise failure("IMPORT_SHARED_COLUMN_INVALID", "Only Driver identifiers and WorkDate can be shared columns.", 422)
+        raise failure("IMPORT_SHARED_COLUMN_INVALID",
+                      "Only Driver identifiers, WorkDate, and an explicit category Filter can be shared columns.", 422)
     definitions = await list_period_definitions(row["payrollperiodid"], cid, db, active_only=True)
     importable_targets = {item["target"] for item in mapping_targets(definitions)
                           if item["target"].startswith("Definition:")}
@@ -1352,6 +1466,9 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
     outcome_selectors = [*shared_json.values(), *quantity_selectors, *ignored_json]
 
 
+    row_handling_overrides = row_handling_overrides or {}
+    preserve_pending_targets = preserve_pending_targets or set()
+
     async def save_or_reuse(definition, transform, input_payload, source_signature, *, head_revision,
                             replace_existing, payload_shared=None, reuse_version_id=None):
         pay_definition_id = definition.pay_definition_id
@@ -1368,8 +1485,13 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
             if (candidate_payload is None
                     or candidate_payload["transform"] != payload["transform"]
                     or candidate_payload["inputs"] != payload["inputs"]
-                    or candidate_payload["shared_columns"] != payload["shared_columns"]
                     or "date_interpretation" not in candidate_payload):
+                return False
+            prior_shared = {key: value for key, value in candidate_payload["shared_columns"].items()
+                            if key != "Filter"}
+            current_shared = {key: value for key, value in payload["shared_columns"].items()
+                              if key != "Filter"}
+            if prior_shared != current_shared:
                 return False
             payload["date_interpretation"] = candidate_payload["date_interpretation"]
             return True
@@ -1378,6 +1500,11 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
             existing["originimportid"] == iid or
             head and existing["ruleversionid"] == head["ruleversionid"]
             and head.get("originstatus") == "Completed"))
+        existing_payload = (_stored_rule_payload(existing.get("rulepayload"))
+                            if pending_is_owned_or_current else None)
+        owned_row_handling_reset = bool(
+            pending_is_owned_or_current and existing_payload is not None
+            and "row_handling" not in existing_payload)
         if pending_is_owned_or_current:
             carry_date_configuration(existing)
         if "date_interpretation" not in payload and head is not None:
@@ -1385,6 +1512,41 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
                             and (reuse_version_id is None or head["ruleversionid"] == reuse_version_id))
             if can_use_head:
                 carry_date_configuration(head)
+        def carry_row_handling(candidate):
+            if candidate is None or candidate.get("targetmeaning") != meaning:
+                return
+            candidate_payload = _stored_rule_payload(candidate.get("rulepayload"))
+            if candidate_payload is None or "row_handling" not in candidate_payload:
+                return
+            if "row_handling" in payload:
+                return
+            if row_handling_overrides and definition.pay_definition_id in row_handling_overrides:
+                return
+            filter_selector = candidate_payload["shared_columns"].get("Filter")
+            if filter_selector is not None and "Filter" not in payload["shared_columns"]:
+                payload["shared_columns"]["Filter"] = filter_selector
+            if (candidate_payload["row_handling"]["mode"] == "FilterThenSum"
+                    and payload["shared_columns"].get("Filter") != filter_selector):
+                return
+            payload["row_handling"] = candidate_payload["row_handling"]
+
+        if pending_is_owned_or_current:
+            carry_row_handling(existing)
+        if head is not None and "row_handling" not in payload and not owned_row_handling_reset:
+            can_use_head = (head.get("originstatus") == "Completed"
+                            and (reuse_version_id is None or head["ruleversionid"] == reuse_version_id))
+            if can_use_head:
+                carry_row_handling(head)
+        if row_handling_overrides and definition.pay_definition_id in row_handling_overrides:
+            policy_value = row_handling_overrides[definition.pay_definition_id]
+            payload.pop("row_handling", None)
+            payload["shared_columns"].pop("Filter", None)
+            if policy_value is not None:
+                payload["row_handling"] = policy_value
+                if policy_value["mode"] == "FilterThenSum":
+                    if filter_selector_override is None:
+                        raise failure("IMPORT_FILTER_COLUMN_REQUIRED", "Choose a category column for FilterThenSum.", 422)
+                    payload["shared_columns"]["Filter"] = filter_selector_override
         # Ancillary Ignore choices help repeat setup, but are not dependencies
         # of another target's quantity meaning.
         source_signature = {"inputs": input_payload, "ignored_columns": ignored_json}
@@ -1549,9 +1711,13 @@ async def _save_mapping(request, db, cid, uid, iid, row, body: MappingRequest):
         did = definition.pay_definition_id
         if not definition.is_active or did in requested_ids:
             continue
+        if did in preserve_pending_targets:
+            continue
         existing = pending_by_definition.get(did)
         candidate = candidates.get(did)
         if existing and candidate is None:
+            if did in preserve_pending_targets:
+                continue
             await db.execute(text("""
                 DELETE FROM import.PayrollWorkPendingRules
                 WHERE ImportID=:iid AND CompanyID=:cid AND PayDefinitionID=:definition
@@ -1672,6 +1838,8 @@ def _layout_rule_mappings(layouts, units, pending_rules):
             quantity_rules.setdefault(layout_id, []).append({
                 "target": target, "transform": payload["transform"], "columns": columns,
                     "source_signature": {"inputs": payload["inputs"]},
+                    "row_handling": payload.get("row_handling"),
+                    "filter_selector": payload["shared_columns"].get("Filter"),
             })
         for role, selector in payload["shared_columns"].items():
             resolved = resolve_selector(selector, headers_by_layout, required=False,
@@ -1772,7 +1940,8 @@ def _materialize_batch(files, units, layouts, policy, product_policy=None, pendi
             materialized_by_name[unit["unitname"]] = materialized
         for unit in file_units:
             layout = layouts_by_id[unit["sourcelayoutid"]]
-            source_rows.append({"source_unit_id": unit["sourceunitid"], "file_ordinal": unit["fileordinal"],
+            source_rows.append({"source_unit_id": unit["sourceunitid"],
+                "sourcelayoutid": unit["sourcelayoutid"], "file_ordinal": unit["fileordinal"],
                 "file_name": file["originalfilename"],
                 "unit_name": unit["unitname"], "unit_kind": unit["unitkind"],
                 "structure_fingerprint": layout["structurefingerprint"],
@@ -1783,12 +1952,370 @@ def _materialize_batch(files, units, layouts, policy, product_policy=None, pendi
     return source_rows
 
 
+def _inspect_category_sources(sources, layout_headers, selector, remembered, policy, *,
+                              previously_validated=False):
+    resolved = resolve_selector(selector, layout_headers, required=True,
+                                allow_unobserved_arrangements=False)
+    counts = defaultdict(int)
+    invalid_samples = []
+    invalid_count = 0
+    inspected_rows = 0
+    repeated_occurrences = 0
+    evidence_bytes = 0
+    for source in sources:
+        column = resolved.get(source["sourcelayoutid"])
+        if column is None:
+            continue
+        for row in source["materialized"]["rows"]:
+            cells = row["cells"]
+            if not any(not blank(cell) for cell in cells.values()):
+                continue
+            inspected_rows += 1
+            cell = cells.get(str(column))
+            try:
+                key = typed_category_key(cell or {"kind": "blank", "value": None})
+                if key not in counts:
+                    evidence_bytes += len(encoded(category_key_to_json(key)).encode("utf-8")) + 48
+                    if evidence_bytes > policy.max_inspection_bytes:
+                        raise failure("IMPORT_CATEGORY_EVIDENCE_TOO_LARGE",
+                                      "Distinct category evidence exceeds the configured inspection-work limit.", 422)
+                counts[key] += 1
+            except CategoryEvidenceError as exc:
+                invalid_count += 1
+                if len(invalid_samples) < policy.row_detail_sample:
+                    invalid_samples.append({"file_ordinal": source["file_ordinal"],
+                        "unit_name": source["unit_name"], "source_row": row["source_row"],
+                        "reason": str(exc)})
+    repeated_occurrences = sum(count for count in counts.values() if count > 1)
+    observed = set(counts)
+    keys = observed | set(remembered)
+    evidence_bytes += sum(len(encoded(category_key_to_json(key)).encode("utf-8")) + 48
+                          for key in set(remembered) - observed)
+    if evidence_bytes > policy.max_inspection_bytes:
+        raise failure("IMPORT_CATEGORY_EVIDENCE_TOO_LARGE",
+                      "Distinct category evidence exceeds the configured inspection-work limit.", 422)
+    evidence = [{"category": category_key_to_json(key), "count": counts.get(key, 0),
+                 "observed": key in observed, "previous_decision": remembered.get(key)}
+                for key in sorted(keys, key=lambda item: encoded(category_key_to_json(item)))]
+    if len(encoded(evidence).encode("utf-8")) > policy.max_inspection_bytes:
+        raise failure("IMPORT_CATEGORY_EVIDENCE_TOO_LARGE",
+                      "Distinct category evidence exceeds the configured inspection-work limit.", 422)
+    repeat_proven = repeated_occurrences > 0 or bool(remembered) or previously_validated
+    return {"suitable": repeat_proven and invalid_count == 0,
+            "repetition_observed": repeated_occurrences > 0,
+            "repeated_occurrence_count": repeated_occurrences,
+            "distinct_count": len(keys), "observed_distinct_count": len(observed),
+            "inspected_row_count": inspected_rows, "invalid_value_count": invalid_count,
+            "invalid_samples": invalid_samples, "values": evidence}
+
+
+async def _current_filter_suitability_proof(db, cid: int, iid: int, selector: dict) -> bool:
+    """A compatible current Completed Filter rule can prove structure, never choices."""
+    rows = (await db.execute(text("""
+        SELECT head_rule.RulePayload
+        FROM import.PayrollWorkPendingRules pending
+        JOIN import.PayrollWorkRuleVersions pending_rule ON pending_rule.RuleVersionID=pending.RuleVersionID
+          AND pending_rule.CompanyID=pending.CompanyID AND pending_rule.BranchID=pending.BranchID
+          AND pending_rule.PayDefinitionID=pending.PayDefinitionID
+        JOIN import.PayrollWorkRuleHeads head ON head.CompanyID=pending.CompanyID
+          AND head.BranchID=pending.BranchID AND head.PayDefinitionID=pending.PayDefinitionID
+          AND head.Revision=pending.ExpectedHeadRevision
+        JOIN import.PayrollWorkRuleVersions head_rule ON head_rule.RuleVersionID=head.RuleVersionID
+          AND head_rule.CompanyID=head.CompanyID AND head_rule.BranchID=head.BranchID
+          AND head_rule.PayDefinitionID=head.PayDefinitionID
+        JOIN import.Imports origin ON origin.ImportID=head_rule.OriginImportID
+          AND origin.CompanyID=head_rule.CompanyID
+        WHERE pending.ImportID=:iid AND pending.CompanyID=:cid
+          AND pending_rule.TargetMeaning=head_rule.TargetMeaning AND origin.Status='Completed'
+    """), {"iid": iid, "cid": cid})).mappings()
+    for row in rows:
+        payload = _stored_rule_payload(row["rulepayload"])
+        row_policy = payload.get("row_handling") if payload is not None else None
+        if (payload is not None and payload["shared_columns"].get("Filter") == selector
+                and row_policy and row_policy["mode"] == "FilterThenSum"):
+            return True
+    return False
+
+
+async def inspect_categories(request, engine, cid: int, uid: int, iid: int,
+                             body: CategoryInspectionRequest) -> dict:
+    policy = _policy(request)
+    limit = policy.category_page_default if body.limit is None else body.limit
+    if limit > policy.category_page_max:
+        raise failure("IMPORT_CATEGORY_PAGE_INVALID",
+                      f"Category values require a limit of 1–{policy.category_page_max}.", 422)
+    async with admission(request):
+        async with engine.begin() as db:
+            await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+            row = await load_import(db, cid, iid)
+            await authorize(db, cid, uid, row["payrollperiodid"], mutate=False)
+            if row["revision"] != body.expected_revision:
+                raise failure("IMPORT_REVISION_CONFLICT", "Import changed. Read its current revision and retry.")
+            if row["status"] not in ("NeedsMapping", "NeedsReview") or row["detailpurgedatutc"] is not None:
+                raise failure("IMPORT_NOT_EDITABLE", "Category evidence is unavailable for this Import.")
+            await require_supported_import_contract(db, cid, iid)
+            files, units, layouts = await load_sources(db, cid, iid, include_canonical=True)
+            if any(file["contentpurgedatutc"] is not None for file in files):
+                raise failure("IMPORT_CONTENT_PURGED", "Source file content has been purged.")
+            _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
+            selected_layout_ids = {unit["sourcelayoutid"] for unit in units
+                                   if unit["isselected"] and unit["sourcelayoutid"] is not None}
+            layout_headers = {layout["sourcelayoutid"]:
+                (layout["inspectionmetadata"] or {}).get("header_cells", [])
+                for layout in layouts if layout["sourcelayoutid"] in selected_layout_ids}
+            if not layout_headers or any(not headers for headers in layout_headers.values()):
+                raise failure("IMPORT_HEADER_REQUIRED", "Every selected source needs a readable header.", 422)
+            pending = [dict(item) for item in (await db.execute(text("""
+                SELECT r.RulePayload FROM import.PayrollWorkPendingRules p
+                JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+                  AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID
+                  AND r.PayDefinitionID=p.PayDefinitionID
+                WHERE p.ImportID=:iid AND p.CompanyID=:cid ORDER BY p.PayDefinitionID
+            """), {"iid": iid, "cid": cid})).mappings()]
+            selector = _selector_payload(body.column)
+            known_decisions = {}
+            conflicting_decisions = set()
+            layout_refs = []
+            for item in pending:
+                payload = _stored_rule_payload(item["rulepayload"])
+                if payload is None:
+                    continue
+                for role, reference in payload["shared_columns"].items():
+                    if role != "Filter":
+                        layout_refs.append(reference)
+                layout_refs.extend(payload["inputs"])
+                row_policy = payload.get("row_handling")
+                if (payload["shared_columns"].get("Filter") == selector and row_policy
+                        and row_policy["mode"] == "FilterThenSum"):
+                    for choice in row_policy["choices"]:
+                        key = category_key_from_json(choice["category"])
+                        previous = known_decisions.get(key)
+                        if previous is not None and previous != choice["decision"]:
+                            conflicting_decisions.add(key)
+                            continue
+                        known_decisions[key] = choice["decision"]
+            for key in conflicting_decisions:
+                known_decisions.pop(key, None)
+            for header_set in layout_headers.values():
+                resolved = resolve_selector(selector, {1: header_set}, required=False,
+                                            allow_unobserved_arrangements=False)
+                if next(iter(resolved.values())) is not None and any(
+                        selectors_overlap(selector, reference) for reference in layout_refs):
+                    raise failure("IMPORT_FILTER_COLUMN_AMBIGUOUS",
+                                  "The category column cannot also be a quantity, identity, or date column.", 422)
+            previously_validated = await _current_filter_suitability_proof(db, cid, iid, selector)
+            inspection_layouts = []
+            for layout in layouts:
+                layout = dict(layout)
+                if layout["sourcelayoutid"] in selected_layout_ids:
+                    headers = layout_headers[layout["sourcelayoutid"]]
+                    layout["columnmapping"] = {
+                        str(item["source_column"]): "Ignore"
+                        for item in describe_headers(headers)["header_occurrences"]}
+                inspection_layouts.append(layout)
+        sources = await anyio.to_thread.run_sync(partial(
+            _materialize_batch, files, units, inspection_layouts, policy,
+            _product_policy(request), []))
+        result = await anyio.to_thread.run_sync(partial(
+            _inspect_category_sources, sources, layout_headers, selector, known_decisions, policy,
+            previously_validated=previously_validated))
+        all_values = result.pop("values")
+        base = {"revision": body.expected_revision, "column": selector,
+                "suitable": result["suitable"],
+                "explanation": ("A repeated exact typed value was observed, or a compatible saved rule retains suitability."
+                                if result["suitable"] else
+                                "At least one exact typed category value must repeat in relevant source rows."),
+                "repetition_observed": result["repetition_observed"],
+                "repeated_occurrence_count": result["repeated_occurrence_count"],
+                "distinct_count": result["distinct_count"],
+                "observed_distinct_count": result["observed_distinct_count"],
+                "inspected_row_count": result["inspected_row_count"],
+                "invalid_value_count": result["invalid_value_count"],
+                "invalid_samples": result["invalid_samples"]}
+        return await anyio.to_thread.run_sync(partial(
+            bounded_page, base, all_values, body.offset, limit, len(all_values), policy=policy))
+
+
+async def update_row_handling(request, engine, cid: int, uid: int, iid: int,
+                              body: RowHandlingRequest) -> dict:
+    policy = _policy(request)
+    async with admission(request):
+        async with engine.begin() as db:
+            row = await load_import(db, cid, iid)
+            period = await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
+            if row["revision"] != body.expected_revision:
+                raise failure("IMPORT_REVISION_CONFLICT", "Import changed. Read its current revision and retry.")
+            if (period.status not in SOURCE_ENTRY_STATUSES or row["status"] not in ("NeedsMapping", "NeedsReview")
+                    or row["detailpurgedatutc"] is not None):
+                raise failure("IMPORT_NOT_EDITABLE", "This Import can no longer change row handling.")
+            await require_supported_import_contract(db, cid, iid)
+            files, units, layouts = await load_sources(db, cid, iid, include_canonical=True)
+            _validate_header_policy(units, _product_policy(request).max_import_combined_columns)
+            if any(file["contentpurgedatutc"] is not None for file in files):
+                raise failure("IMPORT_CONTENT_PURGED", "Source file content has been purged.")
+            selected_layout_ids = {unit["sourcelayoutid"] for unit in units
+                                   if unit["isselected"] and unit["sourcelayoutid"] is not None}
+            headers_by_layout = {layout["sourcelayoutid"]:
+                (layout["inspectionmetadata"] or {}).get("header_cells", [])
+                for layout in layouts if layout["sourcelayoutid"] in selected_layout_ids}
+            pending = [dict(item) for item in (await db.execute(text("""
+                SELECT p.PayDefinitionID, p.PayrollPeriodDefinitionID, p.ExpectedHeadRevision, p.Revision AS PendingRevision,
+                       p.RuleVersionID, r.RulePayload, r.TargetMeaning
+                FROM import.PayrollWorkPendingRules p
+                JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+                  AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID
+                  AND r.PayDefinitionID=p.PayDefinitionID
+                WHERE p.ImportID=:iid AND p.CompanyID=:cid ORDER BY p.PayDefinitionID
+            """), {"iid": iid, "cid": cid})).mappings()]
+            if not pending:
+                raise failure("IMPORT_MAPPING_REQUIRED", "Map at least one Pay Item before choosing row handling.", 409)
+            payloads = []
+            preserved_ids = set()
+            shared_without_filter = None
+            for item in pending:
+                payload = _stored_rule_payload(item["rulepayload"])
+                if payload is None:
+                    raise failure("IMPORT_RULE_PAYLOAD_UNSUPPORTED", "A saved target rule uses an unsupported format.", 409)
+                try:
+                    resolutions = [resolve_selector(reference, headers_by_layout, required=False,
+                                                    allow_unobserved_arrangements=True)
+                                   for reference in payload["inputs"]]
+                except ImportFailure as exc:
+                    raise failure("IMPORT_RULE_PAYLOAD_UNSUPPORTED",
+                                  "A saved quantity selector is no longer valid.", 409) from exc
+                if not any(column is not None for mapping in resolutions for column in mapping.values()):
+                    preserved_ids.add(item["paydefinitionid"])
+                    continue
+                shared = {key: value for key, value in payload["shared_columns"].items() if key != "Filter"}
+                if shared_without_filter is None:
+                    shared_without_filter = shared
+                elif shared != shared_without_filter:
+                    raise failure("IMPORT_ROW_HANDLING_CONFLICT",
+                                  "Current target rules use different identity/date columns. Resolve mapping first.", 409)
+                payloads.append((item, payload))
+            selector = _selector_payload(body.filter_column) if body.filter_column else None
+            remembered = {}
+            conflicting_choices = set()
+            if selector is not None:
+                for _item, payload in payloads:
+                    if payload["shared_columns"].get("Filter") == selector:
+                        row_rule = payload.get("row_handling")
+                        if row_rule and row_rule["mode"] == "FilterThenSum":
+                            for choice in row_rule["choices"]:
+                                key = category_key_from_json(choice["category"])
+                                previous = remembered.get(key)
+                                if previous is not None and previous != choice["decision"]:
+                                    conflicting_choices.add(key)
+                                else:
+                                    remembered[key] = choice["decision"]
+            previously_validated = (await _current_filter_suitability_proof(db, cid, iid, selector)
+                                    if selector is not None else False)
+            inspection_layouts = []
+            for layout in layouts:
+                layout = dict(layout)
+                if layout["sourcelayoutid"] in selected_layout_ids:
+                    header_cells = headers_by_layout.get(layout["sourcelayoutid"], [])
+                    layout["columnmapping"] = {
+                        str(item["source_column"]): "Ignore"
+                        for item in describe_headers(header_cells)["header_occurrences"]}
+                inspection_layouts.append(layout)
+        sources = await anyio.to_thread.run_sync(partial(
+            _materialize_batch, files, units, inspection_layouts, policy,
+            _product_policy(request), []))
+        observed_evidence = await anyio.to_thread.run_sync(partial(
+            _inspect_category_sources, sources, headers_by_layout, selector or {"header": ""},
+            remembered if selector is not None else {}, policy,
+            previously_validated=previously_validated)) if selector is not None else None
+        observed_keys = ({category_key_from_json(item["category"])
+                          for item in observed_evidence["values"] if item["observed"]}
+                         if observed_evidence else set())
+        if body.mode == "FilterThenSum":
+            if observed_evidence["invalid_value_count"]:
+                raise failure("IMPORT_CATEGORY_VALUE_INVALID",
+                              "The selected category column contains invalid or unavailable values.", 422)
+            if not observed_evidence["suitable"]:
+                raise failure("IMPORT_CATEGORY_NOT_SUITABLE",
+                              "The selected column has no repeated exact typed value to establish category suitability.", 422)
+        choices = dict(remembered) if selector is not None else {}
+        explicitly_chosen = set()
+        for choice in body.choices:
+            key = category_key_from_json(choice.category)
+            if key not in observed_keys and key not in remembered:
+                raise failure("IMPORT_CATEGORY_CHOICE_UNKNOWN",
+                              "A category choice must match current evidence or a remembered choice for this column.", 422)
+            choices[key] = choice.decision
+            explicitly_chosen.add(key)
+        if conflicting_choices - explicitly_chosen:
+            raise failure("IMPORT_ROW_HANDLING_CONFLICT",
+                          "Saved targets disagree on category decisions. Choose each conflicting category explicitly.", 409)
+        row_rule = None if body.mode == "RejectRepeated" else {
+            "version": ROW_HANDLING_VERSION,
+            "mode": body.mode,
+            "choices": sorted(({"category": category_key_to_json(key), "decision": decision}
+                               for key, decision in choices.items()), key=encoded),
+        }
+        shared = dict(shared_without_filter or {})
+        if body.mode == "FilterThenSum":
+            shared["Filter"] = selector
+        targets = []
+        released_filter_selectors = []
+        applicable_ids = set()
+        for item, payload in payloads:
+            try:
+                resolved = [resolve_selector(reference, headers_by_layout, required=False,
+                                             allow_unobserved_arrangements=True)
+                            for reference in payload["inputs"]]
+            except ImportFailure:
+                raise failure("IMPORT_RULE_PAYLOAD_UNSUPPORTED", "A saved quantity selector is no longer valid.", 409)
+            applicable = any(column is not None for mapping in resolved for column in mapping.values())
+            if not applicable:
+                preserved_ids.add(item["paydefinitionid"])
+                continue
+            applicable_ids.add(item["paydefinitionid"])
+            old_filter = payload["shared_columns"].get("Filter")
+            if old_filter is not None and old_filter != selector and old_filter not in released_filter_selectors:
+                released_filter_selectors.append(old_filter)
+            targets.append({"target": f"Definition:{item['payrollperioddefinitionid']}",
+                            "transform": payload["transform"],
+                            "inputs": payload["inputs"],
+                            "expected_head_revision": item["expectedheadrevision"],
+                            "replace_existing": True})
+        if not targets:
+            raise failure("IMPORT_MAPPING_REQUIRED", "No mapped target has source columns in the selected units.", 409)
+        mapping_body = MappingRequest.model_validate({
+            "expected_revision": body.expected_revision,
+            "shared_columns": shared,
+            "ignored_columns": released_filter_selectors,
+            "targets": targets,
+        })
+        async with engine.begin() as db:
+            current = await _lock_mutable(db, cid, uid, iid, body.expected_revision)
+            expected_filter = selector if body.mode == "FilterThenSum" else None
+            unchanged = True
+            for item, payload in payloads:
+                if item["paydefinitionid"] in preserved_ids:
+                    continue
+                if (payload.get("row_handling") != row_rule
+                        or payload["shared_columns"].get("Filter") != expected_filter):
+                    unchanged = False
+                    break
+            if unchanged:
+                return await metadata(db, cid, iid, policy=policy)
+            await _save_mapping(request, db, cid, uid, iid, current, mapping_body,
+                                row_handling_overrides={did: row_rule for did in applicable_ids},
+                                filter_selector_override=selector,
+                                preserve_pending_targets=preserved_ids)
+            return await metadata(db, cid, iid, policy=policy)
+
+
 def _stable_identifiers(sources):
     found = {"DriverNumber": set(), "EmployeeKey": set(), "DriverName": set()}
     for source in sources:
         mapping = source["mapping"]
         rules = source.get("quantity_rules", [])
         has_sum = any(rule.get("transform") == "Sum" for rule in rules)
+        row_policy = _common_source_row_policy(rules)
+        filter_column = next((column for column, role in mapping.items() if role == "Filter"), None)
 
         def has_quantity(row):
             return any(column is not None and not blank(row["cells"].get(str(column),
@@ -1797,10 +2324,13 @@ def _stable_identifiers(sources):
 
         date_source = source.get("date_source") or {}
         date_column_authority = date_source.get("kind") in (None, "column")
-        active_rows = [row for row in source["materialized"]["rows"] if has_quantity(row) or
-            has_sum and any((target in IDENTIFIERS or target == "WorkDate" and date_column_authority) and
+        active_rows = [row for row in source["materialized"]["rows"] if not _known_excluded_row(
+            row, filter_column, row_policy) and (has_quantity(row) or
+            (has_sum or row_policy and row_policy.get("mode") != "RejectRepeated") and any((target in IDENTIFIERS or target == "WorkDate" and date_column_authority) and
                 not blank(row["cells"].get(str(column), {"value": None, "missing_cache": False}))
-                for column, target in mapping.items())]
+                for column, target in mapping.items()) or
+            row_policy and row_policy.get("mode") == "FilterThenSum" and filter_column is not None and
+            not blank(row["cells"].get(str(filter_column), {"value": None, "missing_cache": False})))]
         for column, target in mapping.items():
             if target not in found:
                 continue
@@ -1813,6 +2343,31 @@ def _stable_identifiers(sources):
     return {key: sorted(value) for key, value in found.items()}
 
 
+def _common_source_row_policy(rules):
+    rules = [rule for rule in rules if any(column is not None for column in rule.get("columns", []))]
+    if not rules:
+        return None
+    policies = {encoded({"policy": rule.get("row_handling"),
+                         "filter": rule.get("filter_selector")}) for rule in rules}
+    if len(policies) > 1:
+        raise failure("IMPORT_ROW_HANDLING_CONFLICT",
+                      "Mapped targets use different repeated-row rules. Resolve row handling before preview.", 409)
+    return rules[0].get("row_handling") if rules else None
+
+
+def _known_excluded_row(row, filter_column, row_policy):
+    if not row_policy or row_policy.get("mode") != "FilterThenSum" or filter_column is None:
+        return False
+    cell = row["cells"].get(str(filter_column))
+    try:
+        key = typed_category_key(cell or {"kind": "blank", "value": None})
+    except CategoryEvidenceError:
+        return False
+    return any(choice.get("decision") == "Exclude"
+               and category_key_from_json(choice.get("category")) == key
+               for choice in row_policy.get("choices", []))
+
+
 def _orders_agree_on_source_evidence(source, authority: str, orders: set, period_days) -> bool:
     """Allow conflicting remembered orders only when this evidence yields <=1 date."""
     if authority == "column":
@@ -1822,6 +2377,8 @@ def _orders_agree_on_source_evidence(source, authority: str, orders: set, period
             return True
         rules = source.get("quantity_rules", [])
         has_sum = any(rule.get("transform") == "Sum" for rule in rules)
+        row_policy = _common_source_row_policy(rules)
+        filter_column = next((column for column, role in source["mapping"].items() if role == "Filter"), None)
         date_column_authority = (source.get("date_source") or {}).get("kind") in (None, "column")
 
         def has_quantity(row):
@@ -1829,12 +2386,15 @@ def _orders_agree_on_source_evidence(source, authority: str, orders: set, period
                 str(input_column), {"value": None, "missing_cache": False}))
                        for rule in rules for input_column in rule.get("columns", []))
 
-        active_rows = [row for row in source["materialized"]["rows"] if has_quantity(row) or
-                       has_sum and any((target in IDENTIFIERS or
+        active_rows = [row for row in source["materialized"]["rows"] if not _known_excluded_row(
+            row, filter_column, row_policy) and (has_quantity(row) or
+                       (has_sum or row_policy and row_policy.get("mode") != "RejectRepeated") and any((target in IDENTIFIERS or
                                         target == "WorkDate" and date_column_authority) and
                                        not blank(row["cells"].get(
                                            str(input_column), {"value": None, "missing_cache": False}))
-                                       for input_column, target in source["mapping"].items())]
+                                       for input_column, target in source["mapping"].items()) or
+                       row_policy and row_policy.get("mode") == "FilterThenSum" and filter_column is not None
+                       and not blank(row["cells"].get(str(filter_column), {"value": None, "missing_cache": False})))]
         evidence = [row["cells"].get(column) for row in active_rows]
     else:
         label = source["file_name"] if authority == "filename" else source["unit_name"]
@@ -1919,9 +2479,12 @@ def _prepare_preview_dates(sources, pending_rules, period_days, period):
         if date_column:
             from app.imports.mapping import infer_date_order
             rows = source["materialized"]["rows"]
-            cells = [item["cells"].get(date_column) for item in rows]
+            filter_column = next((column for column, role in source["mapping"].items() if role == "Filter"), None)
+            row_policy = _common_source_row_policy(source.get("quantity_rules", []))
+            active_rows = [item for item in rows if not _known_excluded_row(item, filter_column, row_policy)]
+            cells = [item["cells"].get(date_column) for item in active_rows]
             order, _ = infer_date_order(cells, period.start_date, period.end_date, source["date_order"])
-            for item in rows:
+            for item in active_rows:
                 resolved_date = interpret_date(item["cells"].get(date_column), period_days=period_days,
                                                selected_order=order or source["date_order"],
                                                source_kind="column")["resolved_date"]

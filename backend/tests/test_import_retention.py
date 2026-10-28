@@ -185,14 +185,21 @@ async def test_finalization_purges_transient_preview_details_and_retains_batch_h
         assert read.json()["preview"]["summary"] == before[14]
 
     persisted_signature = rows(tenant, """
-        SELECT SourceSignature FROM import.PayrollWorkRuleVersions
+        SELECT RuleVersionID, TargetMeaning, RulePayload, SourceSignature, RuleFingerprint
+        FROM import.PayrollWorkRuleVersions
         WHERE CompanyID=%s AND OriginImportID=%s
     """, tenant.company_id, duplicate_iid)
-    assert len(persisted_signature) == 1
-    assert persisted_signature[0][0]["ignored_columns"] == [{
+    assert len(persisted_signature) == 2
+    expected_ignored = [{
         "header": code.casefold(),
         "occurrences": [{"duplicate_signature": signature, "occurrence_ordinal": 3}],
     }]
+    assert all(row[3]["ignored_columns"] == expected_ignored for row in persisted_signature)
+    assert all(row[1] == persisted_signature[0][1] for row in persisted_signature)
+    payloads = [row[2] for row in persisted_signature]
+    assert sum("date_interpretation" not in payload for payload in payloads) == 1
+    assert sum("date_interpretation" in payload for payload in payloads) == 1
+    assert all("row_handling" not in payload for payload in payloads)
 
     async with p3c_engine.begin() as db:
         await purge_payroll_work_import_details(db, company_id=tenant.company_id, period_id=pid, actor_id=tenant.owner)

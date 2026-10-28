@@ -67,6 +67,8 @@ async def map_import_columns(client, tenant, created, column_mapping):
         value = selector(column)
         if target in {"DriverNumber", "EmployeeKey", "DriverName", "WorkDate"}:
             shared[target] = value
+        elif target == "Filter":
+            shared[target] = value
         elif target == "Ignore":
             ignored.append(value)
         elif target.startswith("Definition:"):

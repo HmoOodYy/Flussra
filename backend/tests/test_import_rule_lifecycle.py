@@ -533,8 +533,9 @@ async def test_old_identity_resolution_context_requires_live_refresh_but_not_ter
     assert all(page.status_code == 200 for page in pages), [page.text for page in pages]
 
 
-async def test_old_date_interpretation_context_requires_live_refresh_but_not_terminal_reads(
-    p3c_client, p3c_engine, tenant, monkeypatch,
+@pytest.mark.parametrize("version_name", ["DATE_INTERPRETATION_VERSION", "ROW_HANDLING_VERSION"])
+async def test_old_versioned_import_rule_context_requires_live_refresh_but_not_terminal_reads(
+    p3c_client, p3c_engine, tenant, monkeypatch, version_name,
 ):
     from app.imports import rules
 
@@ -542,11 +543,11 @@ async def test_old_date_interpretation_context_requires_live_refresh_but_not_ter
     created, period_definition_id, _definition_id = await _upload(p3c_client, p3c_engine, tenant, period)
     preview = await _preview(p3c_client, tenant, created, period_definition_id)
     import_id = created["import_id"]
-    current_version = rules.DATE_INTERPRETATION_VERSION
-    monkeypatch.setattr(rules, "DATE_INTERPRETATION_VERSION", current_version - 1)
+    current_version = getattr(rules, version_name)
+    monkeypatch.setattr(rules, version_name, current_version - 1)
     async with p3c_engine.connect() as db:
         old_date_context = await rules.current_rule_context(db, tenant.company_id, import_id)
-    monkeypatch.setattr(rules, "DATE_INTERPRETATION_VERSION", current_version)
+    monkeypatch.setattr(rules, version_name, current_version)
 
     context_trigger = TriggerIdentity(
         "import", "payrollworkpreviewrulecontexts", "trg_payrollworkpreviewrulecontexts_writable")
@@ -1487,3 +1488,407 @@ async def test_period_day_snapshot_mismatch_preserves_existing_preview_and_pendi
     assert new_pending == old_pending
     assert new_line_count == old_line_count
     assert unchanged_head is None
+
+
+async def test_completed_filter_rule_reuse_and_explicit_reset_survive_origin_purge(
+    p3c_client, p3c_engine, tenant,
+):
+    from tests.calculation_snapshot_helpers import finalize, submit_and_approve
+
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    driver = await _eligible_driver(p3c_engine, tenant, period)
+    target_period_id, pay_definition_id, code = await _definition(p3c_engine, tenant, period)
+    initial_csv = (f"DriverNumber,WorkDate,{code},Category\n"
+                   f"{driver['drivernumber']},{driver['workdate'].isoformat()},1,Trip\n"
+                   f"{driver['drivernumber']},{driver['workdate'].isoformat()},2,Trip\n").encode()
+    upload = await p3c_client.post(
+        f"/payroll/periods/{period['payroll_period_id']}/imports",
+        files={"file": ("filter-head.csv", initial_csv, "text/csv")},
+        headers={**tenant.admin, "Idempotency-Key": str(uuid4())})
+    assert upload.status_code == 200, upload.text
+    created = upload.json()
+    mapped = await map_import_columns(p3c_client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{target_period_id}"})
+    assert mapped.status_code == 200, mapped.text
+    selected = await p3c_client.put(
+        f"/payroll/imports/{created['import_id']}/row-handling",
+        json={"expected_revision": mapped.json()["revision"], "mode": "FilterThenSum",
+              "filter_column": {"header": "Category"},
+              "choices": [{"category": {"type": "text", "value": "Trip"}, "decision": "Include"}]},
+        headers=tenant.admin)
+    assert selected.status_code == 200, selected.text
+    preview = await p3c_client.post(
+        f"/payroll/imports/{created['import_id']}/preview",
+        json={"expected_revision": selected.json()["revision"]}, headers=tenant.admin)
+    assert preview.status_code == 200, preview.text
+    stable_id, frozen_ppd, rate_id = await _target(
+        p3c_engine, tenant, period, target_period_id)
+    assert stable_id == pay_definition_id
+    async with p3c_engine.connect() as db:
+        rule_id = await db.scalar(text("""
+            SELECT p.RuleVersionID FROM import.PayrollWorkPendingRules p
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=:definition
+        """), {"iid": created["import_id"], "cid": tenant.company_id,
+               "definition": pay_definition_id})
+    async with p3c_engine.begin() as db:
+        await db.execute(text("""
+            INSERT INTO import.PayrollWorkReviewDecisions
+                (ImportID, CompanyID, BranchID, PayrollPeriodID, DecisionKey, ContractVersion,
+                 ReviewedRevision, PlanFingerprint, DecisionKind, Choice, BasisJSON,
+                 PayrollPeriodDefinitionID, PayDefinitionID, RateDefinitionID, ActorUserID)
+            VALUES (:iid,:cid,:bid,:pid,'reviewed-filter-target',1,:revision,:fingerprint,
+                    'MappingReview','Keep','{}'::jsonb,:ppd,:definition,:rate,:uid)
+        """), {"iid": created["import_id"], "cid": tenant.company_id,
+               "bid": period["branch_id"], "pid": period["payroll_period_id"],
+               "revision": preview.json()["revision"],
+               "fingerprint": preview.json()["preview"]["plan_fingerprint"],
+               "ppd": frozen_ppd, "definition": stable_id, "rate": rate_id, "uid": tenant.owner})
+    await _write_source_change(
+        p3c_engine, tenant, period, import_id=created["import_id"],
+        revision=preview.json()["revision"], plan_fingerprint=preview.json()["preview"]["plan_fingerprint"],
+        definition_id=stable_id, ppd_id=frozen_ppd, rate_id=rate_id, rule_id=rule_id, complete=True)
+    await submit_and_approve(p3c_client, tenant, period)
+    finalized = await finalize(p3c_client, tenant, period)
+    assert finalized.status_code == 200, finalized.text
+    async with p3c_engine.connect() as db:
+        purged = await db.scalar(text("""
+            SELECT c.Payload IS NULL AND c.PurgedAtUtc IS NOT NULL
+            FROM import.FileCanonicalData c WHERE c.ImportID=:iid AND c.CompanyID=:cid
+        """), {"iid": created["import_id"], "cid": tenant.company_id})
+        completed_head = (await db.execute(text("""
+            SELECT h.RuleVersionID, h.Revision, r.RulePayload
+            FROM import.PayrollWorkRuleHeads h
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=h.RuleVersionID
+              AND r.CompanyID=h.CompanyID AND r.BranchID=h.BranchID AND r.PayDefinitionID=h.PayDefinitionID
+            WHERE h.CompanyID=:cid AND h.BranchID=:bid AND h.PayDefinitionID=:definition
+        """), {"cid": tenant.company_id, "bid": period["branch_id"],
+               "definition": pay_definition_id})).one()
+    assert purged is True
+    assert completed_head.rulepayload["row_handling"]["mode"] == "FilterThenSum"
+
+    next_period = await create_period(p3c_client, tenant, tenant.branch_a)
+    next_driver = await _eligible_driver(p3c_engine, tenant, next_period)
+    next_target, _, next_code = await _definition(p3c_engine, tenant, next_period)
+    later_csv = (f"DriverNumber,WorkDate,{next_code},Category\n"
+                 f"{next_driver['drivernumber']},{next_driver['workdate'].isoformat()},4,Trip\n").encode()
+    later_upload = await p3c_client.post(
+        f"/payroll/periods/{next_period['payroll_period_id']}/imports",
+        files={"file": ("single-category.csv", later_csv, "text/csv")},
+        headers={**tenant.admin, "Idempotency-Key": str(uuid4())})
+    assert later_upload.status_code == 200, later_upload.text
+    later = later_upload.json()
+    async with p3c_engine.connect() as db:
+        before_later_payroll = await db.scalar(text("""
+            SELECT count(*) FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid
+        """), {"cid": tenant.company_id, "pid": next_period["payroll_period_id"]})
+        reused = (await db.execute(text("""
+            SELECT p.RuleVersionID, p.ExpectedHeadRevision, r.RulePayload
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=:definition
+        """), {"iid": later["import_id"], "cid": tenant.company_id,
+               "definition": pay_definition_id})).one()
+    assert reused.expectedheadrevision == completed_head.revision
+    assert reused.rulepayload["row_handling"]["choices"] == completed_head.rulepayload["row_handling"]["choices"]
+    inspected = await p3c_client.post(
+        f"/payroll/imports/{later['import_id']}/categories/inspect",
+        json={"expected_revision": later["revision"], "column": {"header": "Category"}, "limit": 1},
+        headers=tenant.admin)
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()["suitable"] is True
+    assert inspected.json()["items"][0]["previous_decision"] == "Include"
+
+    reset = await p3c_client.put(
+        f"/payroll/imports/{later['import_id']}/row-handling",
+        json={"expected_revision": later["revision"], "mode": "RejectRepeated"}, headers=tenant.admin)
+    assert reset.status_code == 200, reset.text
+    reset_mapping = await p3c_client.put(
+        f"/payroll/imports/{later['import_id']}/mapping",
+        json={"expected_revision": reset.json()["revision"],
+              "shared_columns": {"DriverNumber": {"header": "DriverNumber"},
+                                 "WorkDate": {"header": "WorkDate"}},
+              "targets": [{"target": f"Definition:{next_target}", "transform": "Direct",
+                           "inputs": [{"header": next_code}], "expected_head_revision": completed_head.revision,
+                           "replace_existing": True}]}, headers=tenant.admin)
+    assert reset_mapping.status_code == 200, reset_mapping.text
+    assert reset_mapping.json()["revision"] == reset.json()["revision"] + 1
+    async with p3c_engine.connect() as db:
+        after_reset = (await db.execute(text("""
+            SELECT p.RuleVersionID, p.Revision, r.RulePayload
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=:definition
+        """), {"iid": later["import_id"], "cid": tenant.company_id,
+               "definition": pay_definition_id})).one()
+        current_head = await db.scalar(text("""
+            SELECT RuleVersionID FROM import.PayrollWorkRuleHeads
+            WHERE CompanyID=:cid AND BranchID=:bid AND PayDefinitionID=:definition
+        """), {"cid": tenant.company_id, "bid": next_period["branch_id"],
+               "definition": pay_definition_id})
+    assert "row_handling" not in after_reset.rulepayload
+    assert "Filter" not in after_reset.rulepayload["shared_columns"]
+    assert "date_interpretation" in after_reset.rulepayload
+    assert current_head == completed_head.ruleversionid
+
+    proof = await p3c_client.post(
+        f"/payroll/imports/{later['import_id']}/categories/inspect",
+        json={"expected_revision": reset_mapping.json()["revision"],
+              "column": {"header": "Category"}, "limit": 1}, headers=tenant.admin)
+    assert proof.status_code == 200, proof.text
+    assert proof.json()["suitable"] is True
+    assert proof.json()["items"][0]["previous_decision"] is None
+    reselected = await p3c_client.put(
+        f"/payroll/imports/{later['import_id']}/row-handling",
+        json={"expected_revision": reset_mapping.json()["revision"], "mode": "FilterThenSum",
+              "filter_column": {"header": "Category"}, "choices": []}, headers=tenant.admin)
+    assert reselected.status_code == 200, reselected.text
+    refreshed = await p3c_client.post(
+        f"/payroll/imports/{later['import_id']}/preview",
+        json={"expected_revision": reselected.json()["revision"]}, headers=tenant.admin)
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["preview"]["counts"]["unresolved"] == 1
+    async with p3c_engine.connect() as db:
+        final_head = await db.scalar(text("""
+            SELECT RuleVersionID FROM import.PayrollWorkRuleHeads
+            WHERE CompanyID=:cid AND BranchID=:bid AND PayDefinitionID=:definition
+        """), {"cid": tenant.company_id, "bid": next_period["branch_id"],
+               "definition": pay_definition_id})
+        final_payload = await db.scalar(text("""
+            SELECT r.RulePayload FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=:definition
+        """), {"iid": later["import_id"], "cid": tenant.company_id,
+               "definition": pay_definition_id})
+    assert final_head == completed_head.ruleversionid
+    assert final_payload["row_handling"]["choices"] == []
+    assert "date_interpretation" in final_payload
+    async with p3c_engine.connect() as db:
+        after_later_payroll = await db.scalar(text("""
+            SELECT count(*) FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid
+        """), {"cid": tenant.company_id, "pid": next_period["payroll_period_id"]})
+    assert after_later_payroll == before_later_payroll
+
+    repair_period = next_period
+    repair_driver = next_driver
+    repair_code = next_code
+    missing_filter_csv = (f"DriverNumber,WorkDate,{repair_code},Activity\n"
+                          f"{repair_driver['drivernumber']},{repair_driver['workdate'].isoformat()},1,Trip\n"
+                          f"{repair_driver['drivernumber']},{repair_driver['workdate'].isoformat()},2,Trip\n").encode()
+    missing_filter_upload = await p3c_client.post(
+        f"/payroll/periods/{repair_period['payroll_period_id']}/imports",
+        files={"file": ("missing-filter.csv", missing_filter_csv, "text/csv")},
+        headers={**tenant.admin, "Idempotency-Key": str(uuid4())})
+    assert missing_filter_upload.status_code == 200, missing_filter_upload.text
+    missing_filter = missing_filter_upload.json()
+    async with p3c_engine.connect() as db:
+        preserved = (await db.execute(text("""
+            SELECT r.RulePayload, p.RuleVersionID, p.ExpectedHeadRevision
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=:definition
+        """), {"iid": missing_filter["import_id"], "cid": tenant.company_id,
+               "definition": pay_definition_id})).one()
+    assert preserved.rulepayload["row_handling"] == completed_head.rulepayload["row_handling"]
+    assert preserved.rulepayload["shared_columns"]["Filter"] == {"header": "category"}
+    assert preserved.rulepayload["inputs"] == completed_head.rulepayload["inputs"]
+    assert preserved.rulepayload["date_interpretation"] == completed_head.rulepayload["date_interpretation"]
+    assert preserved.expectedheadrevision == completed_head.revision
+    blocked_preview = await p3c_client.post(
+        f"/payroll/imports/{missing_filter['import_id']}/preview",
+        json={"expected_revision": missing_filter["revision"]}, headers=tenant.admin)
+    assert blocked_preview.status_code == 409, blocked_preview.text
+    assert blocked_preview.json()["detail"]["code"] == "IMPORT_RULE_PAYLOAD_UNSUPPORTED"
+    repaired_filter = await p3c_client.put(
+        f"/payroll/imports/{missing_filter['import_id']}/row-handling",
+        json={"expected_revision": missing_filter["revision"], "mode": "FilterThenSum",
+              "filter_column": {"header": "Activity"},
+              "choices": [{"category": {"type": "text", "value": "Trip"}, "decision": "Include"}]},
+        headers=tenant.admin)
+    assert repaired_filter.status_code == 200, repaired_filter.text
+    async with p3c_engine.connect() as db:
+        repaired_payload = await db.scalar(text("""
+            SELECT r.RulePayload FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=:definition
+        """), {"iid": missing_filter["import_id"], "cid": tenant.company_id,
+               "definition": pay_definition_id})
+    assert repaired_payload["shared_columns"]["Filter"] == {"header": "activity"}
+    assert repaired_payload["inputs"] == preserved.rulepayload["inputs"]
+    assert repaired_payload["date_interpretation"] == preserved.rulepayload["date_interpretation"]
+    repaired_preview = await p3c_client.post(
+        f"/payroll/imports/{missing_filter['import_id']}/preview",
+        json={"expected_revision": repaired_filter.json()["revision"]}, headers=tenant.admin)
+    assert repaired_preview.status_code == 200, repaired_preview.text
+    unit_id = missing_filter["files"][0]["units"][0]["source_unit_id"]
+    date_refresh = await p3c_client.put(
+        f"/payroll/imports/{missing_filter['import_id']}/interpretation",
+        json={"expected_revision": repaired_preview.json()["revision"], "units": [{
+            "source_unit_id": unit_id, "selected": True,
+            "date_source": {"kind": "filename", "value": repair_driver["workdate"].isoformat()},
+        }]}, headers=tenant.admin)
+    assert date_refresh.status_code == 200, date_refresh.text
+    date_refreshed_preview = await p3c_client.post(
+        f"/payroll/imports/{missing_filter['import_id']}/preview",
+        json={"expected_revision": date_refresh.json()["revision"]}, headers=tenant.admin)
+    assert date_refreshed_preview.status_code == 200, date_refreshed_preview.text
+    async with p3c_engine.connect() as db:
+        after_date_refresh = await db.scalar(text("""
+            SELECT r.RulePayload FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid AND p.PayDefinitionID=:definition
+        """), {"iid": missing_filter["import_id"], "cid": tenant.company_id,
+               "definition": pay_definition_id})
+    assert after_date_refresh["row_handling"] == repaired_payload["row_handling"]
+    assert after_date_refresh["date_interpretation"]["profiles"][0]["authority"] == "filename"
+
+
+async def test_conflicting_completed_filter_decisions_require_explicit_source_choice(
+    p3c_client, p3c_engine, tenant,
+):
+    first_definition = await rated_definition(p3c_client, tenant, definition_code=f"FILTER_A_{uuid4().hex[:8]}")
+    second_definition = await rated_definition(p3c_client, tenant, definition_code=f"FILTER_B_{uuid4().hex[:8]}")
+    await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
+    period = await create_period(p3c_client, tenant, tenant.branch_a)
+    driver = await _eligible_driver(p3c_engine, tenant, period)
+    from app.imports.mapping import targets as mapping_targets
+    from app.payroll.period_definitions import list_period_definitions
+    async with p3c_engine.connect() as db:
+        definitions = await list_period_definitions(period["payroll_period_id"], tenant.company_id,
+                                                    db, active_only=True)
+    targets = {item["code"]: item for item in mapping_targets(definitions) if item.get("code")}
+    target_choices = [targets[first_definition["definition_code"]],
+                      targets[second_definition["definition_code"]]]
+    assert len(target_choices) == 2
+    first_target, second_target = target_choices
+    first_definition_id = int(first_target["target"].split(":", 1)[1])
+    second_definition_id = int(second_target["target"].split(":", 1)[1])
+    csv = (f"DriverNumber,WorkDate,Category,{first_target['code']},{second_target['code']}\n"
+           f"{driver['drivernumber']},{driver['workdate'].isoformat()},Trip,1,2\n"
+           f"{driver['drivernumber']},{driver['workdate'].isoformat()},Trip,3,4\n").encode()
+
+    async def complete_target(target, decision, filename):
+        target_csv = (f"DriverNumber,WorkDate,Category,{target['code']}\n"
+                      f"{driver['drivernumber']},{driver['workdate'].isoformat()},Trip,1\n"
+                      f"{driver['drivernumber']},{driver['workdate'].isoformat()},Trip,3\n").encode()
+        uploaded = await p3c_client.post(
+            f"/payroll/periods/{period['payroll_period_id']}/imports",
+            files={"file": (filename, target_csv, "text/csv")},
+            headers={**tenant.admin, "Idempotency-Key": str(uuid4())})
+        assert uploaded.status_code == 200, uploaded.text
+        created = uploaded.json()
+        target_ppd = first_definition_id if target == first_target else second_definition_id
+        mapping = {"1": "DriverNumber", "2": "WorkDate", "4": f"Definition:{target_ppd}"}
+        mapped = await map_import_columns(p3c_client, tenant, created, mapping)
+        assert mapped.status_code == 200, mapped.text
+        selected = await p3c_client.put(
+            f"/payroll/imports/{created['import_id']}/row-handling",
+            json={"expected_revision": mapped.json()["revision"], "mode": "FilterThenSum",
+                  "filter_column": {"header": "Category"},
+                  "choices": [{"category": {"type": "text", "value": "Trip"},
+                               "decision": decision}]}, headers=tenant.admin)
+        assert selected.status_code == 200, selected.text
+        preview = await p3c_client.post(
+            f"/payroll/imports/{created['import_id']}/preview",
+            json={"expected_revision": selected.json()["revision"]}, headers=tenant.admin)
+        assert preview.status_code == 200, preview.text
+        stable_id, ppd_id, rate_id = await _target(p3c_engine, tenant, period, target_ppd)
+        async with p3c_engine.connect() as db:
+            rule_id = await db.scalar(text("""
+                SELECT RuleVersionID FROM import.PayrollWorkPendingRules
+                WHERE ImportID=:iid AND CompanyID=:cid AND PayDefinitionID=:definition
+            """), {"iid": created["import_id"], "cid": tenant.company_id,
+                   "definition": stable_id})
+        await _write_source_change(
+            p3c_engine, tenant, period, import_id=created["import_id"],
+            revision=preview.json()["revision"], plan_fingerprint=preview.json()["preview"]["plan_fingerprint"],
+            definition_id=stable_id, ppd_id=ppd_id, rate_id=rate_id, rule_id=rule_id, complete=True)
+        return stable_id
+
+    first_id = await complete_target(first_target, "Include", "filter-include-head.csv")
+    second_id = await complete_target(second_target, "Exclude", "filter-exclude-head.csv")
+    assert first_id != second_id
+
+    receiving = await p3c_client.post(
+        f"/payroll/periods/{period['payroll_period_id']}/imports",
+        files={"file": ("conflicting-filter-heads.csv", csv, "text/csv")},
+        headers={**tenant.admin, "Idempotency-Key": str(uuid4())})
+    assert receiving.status_code == 200, receiving.text
+    created = receiving.json()
+    receiving_id = created["import_id"]
+    async with p3c_engine.connect() as db:
+        before = (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, p.ExpectedHeadRevision,
+                   r.RulePayload
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid ORDER BY p.PayDefinitionID
+        """), {"iid": receiving_id, "cid": tenant.company_id})).all()
+        heads_before = (await db.execute(text("""
+            SELECT h.PayDefinitionID, h.RuleVersionID, h.Revision
+            FROM import.PayrollWorkRuleHeads h
+            WHERE h.CompanyID=:cid AND h.BranchID=:bid AND h.PayDefinitionID=ANY(:definitions)
+            ORDER BY h.PayDefinitionID
+        """), {"cid": tenant.company_id, "bid": period["branch_id"],
+               "definitions": [first_id, second_id]})).all()
+        payroll_before = await db.scalar(text("""
+            SELECT count(*) FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})
+    assert {row.rulepayload["row_handling"]["choices"][0]["decision"] for row in before} == {
+        "Include", "Exclude"}
+    conflict = await p3c_client.put(
+        f"/payroll/imports/{receiving_id}/row-handling",
+        json={"expected_revision": created["revision"], "mode": "FilterThenSum",
+              "filter_column": {"header": "Category"}, "choices": []}, headers=tenant.admin)
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"]["code"] == "IMPORT_ROW_HANDLING_CONFLICT"
+    async with p3c_engine.connect() as db:
+        unchanged = (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, p.ExpectedHeadRevision,
+                   r.RulePayload
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid ORDER BY p.PayDefinitionID
+        """), {"iid": receiving_id, "cid": tenant.company_id})).all()
+    assert unchanged == before
+
+    resolved = await p3c_client.put(
+        f"/payroll/imports/{receiving_id}/row-handling",
+        json={"expected_revision": created["revision"], "mode": "FilterThenSum",
+              "filter_column": {"header": "Category"},
+              "choices": [{"category": {"type": "text", "value": "Trip"}, "decision": "Include"}]},
+        headers=tenant.admin)
+    assert resolved.status_code == 200, resolved.text
+    async with p3c_engine.connect() as db:
+        after = (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, p.ExpectedHeadRevision,
+                   r.RulePayload
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid ORDER BY p.PayDefinitionID
+        """), {"iid": receiving_id, "cid": tenant.company_id})).all()
+        heads_after = (await db.execute(text("""
+            SELECT h.PayDefinitionID, h.RuleVersionID, h.Revision
+            FROM import.PayrollWorkRuleHeads h
+            WHERE h.CompanyID=:cid AND h.BranchID=:bid AND h.PayDefinitionID=ANY(:definitions)
+            ORDER BY h.PayDefinitionID
+        """), {"cid": tenant.company_id, "bid": period["branch_id"],
+               "definitions": [first_id, second_id]})).all()
+        payroll_after = await db.scalar(text("""
+            SELECT count(*) FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})
+    assert {row.rulepayload["row_handling"]["choices"][0]["decision"] for row in after} == {"Include"}
+    assert heads_after == heads_before
+    assert payroll_after == payroll_before

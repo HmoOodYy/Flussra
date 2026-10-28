@@ -11,6 +11,7 @@ from openpyxl import Workbook
 from sqlalchemy import text
 
 from app.imports.mapping import normalized_identifier
+from app.imports.readmodels import _visible_group_predicate
 from tests.calculation_snapshot_helpers import finalize, standard_scenario, submit_and_approve
 from tests.compensation_api_fixtures import (  # noqa: F401 - register isolated API fixtures
     p3c_application,
@@ -488,6 +489,236 @@ async def test_grid_keeps_all_definitions_when_more_than_five_layouts_share_one_
     assert all(len(value["candidates"]) == 1 for value in grid["values"].values())
 
 
+async def test_category_filter_sums_included_rows_and_keeps_exclusions_out_of_driver_grid(
+    p3c_client, p3c_app, p3c_engine, tenant, monkeypatch,
+):
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    driver = await _eligible_driver_date(p3c_engine, tenant, period)
+    definition_id, definition_code = await _definition(p3c_engine, tenant, period)
+    async with p3c_engine.connect() as db:
+        second_date = await db.scalar(text("""
+            SELECT x.workdate FROM payroll.payrollperioddrivereligibility p
+            JOIN core.driverassignments a ON a.driverassignmentid=p.driverassignmentid
+                AND a.companyid=p.companyid AND a.branchid=p.branchid
+            CROSS JOIN LATERAL unnest(p.eligibleworkdates) AS x(workdate)
+            WHERE p.companyid=:cid AND p.payrollperiodid=:pid
+              AND a.driverid=:driver AND p.iseligibleforperiod AND x.workdate<>:first
+            ORDER BY x.workdate LIMIT 1
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"],
+               "driver": driver["driverid"], "first": driver["workdate"]})
+    assert second_date is not None
+    header = f"DriverNumber,WorkDate,{definition_code},Category\n"
+    first = (header + f"{driver['drivernumber']},{driver['workdate'].isoformat()},1,Include\n").encode()
+    second = (header + f"{driver['drivernumber']},{driver['workdate'].isoformat()},2,Include\n"
+              "not-a-driver,not-a-date,not-a-quantity,Exclude\n"
+              "not-a-driver,not-a-date,not-a-quantity,Exclude\n").encode()
+    third = (header + f"{driver['drivernumber']},{second_date.isoformat()},5,Include\n").encode()
+    uploaded = await _upload(p3c_client, tenant, period,
+                             [("row-policy-1.csv", first), ("row-policy-2.csv", second),
+                              ("row-policy-3.csv", third)])
+    assert uploaded.status_code == 200, uploaded.text
+    created = uploaded.json()
+    mapped = await map_import_columns(p3c_client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
+    assert mapped.status_code == 200, mapped.text
+    revision = mapped.json()["revision"]
+
+    settings = p3c_app.state.settings
+    old_inspection_limit = settings.IMPORT_MAX_INSPECTION_BYTES
+    old_category_page_max = settings.IMPORT_CATEGORY_PAGE_MAX
+    old_category_page_default = settings.IMPORT_CATEGORY_PAGE_DEFAULT
+    monkeypatch.setattr(settings, "IMPORT_MAX_INSPECTION_BYTES", 1)
+    too_much_evidence = await p3c_client.post(
+        f"/payroll/imports/{created['import_id']}/categories/inspect",
+        json={"expected_revision": revision, "column": {"header": "Category"}, "offset": 0, "limit": 1},
+        headers=tenant.admin)
+    assert too_much_evidence.status_code == 422, too_much_evidence.text
+    assert too_much_evidence.json()["detail"]["code"] == "IMPORT_CATEGORY_EVIDENCE_TOO_LARGE"
+    monkeypatch.setattr(settings, "IMPORT_MAX_INSPECTION_BYTES", old_inspection_limit)
+    monkeypatch.setattr(settings, "IMPORT_CATEGORY_PAGE_MAX", 1)
+    monkeypatch.setattr(settings, "IMPORT_CATEGORY_PAGE_DEFAULT", 1)
+    too_many_values = await p3c_client.post(
+        f"/payroll/imports/{created['import_id']}/categories/inspect",
+        json={"expected_revision": revision, "column": {"header": "Category"}, "offset": 0, "limit": 2},
+        headers=tenant.admin)
+    assert too_many_values.status_code == 422, too_many_values.text
+    assert too_many_values.json()["detail"]["code"] == "IMPORT_CATEGORY_PAGE_INVALID"
+    monkeypatch.setattr(settings, "IMPORT_CATEGORY_PAGE_MAX", old_category_page_max)
+    monkeypatch.setattr(settings, "IMPORT_CATEGORY_PAGE_DEFAULT", old_category_page_default)
+
+    inspected_pages = []
+    inspect_offset = 0
+    while True:
+        inspected = await p3c_client.post(
+            f"/payroll/imports/{created['import_id']}/categories/inspect",
+            json={"expected_revision": revision, "column": {"header": "Category"},
+                  "offset": inspect_offset, "limit": 1}, headers=tenant.admin)
+        assert inspected.status_code == 200, inspected.text
+        inspected_pages.extend(inspected.json()["items"])
+        next_offset = inspected.json()["next_offset"]
+        if next_offset is None:
+            break
+        inspect_offset = next_offset
+    assert inspected.status_code == 200, inspected.text
+    assert inspected.json()["suitable"] is True
+    assert len(inspected_pages) == 2
+    assert {item["category"]["value"]: item["count"] for item in inspected_pages} == {
+        "Include": 3, "Exclude": 2}
+
+    row_policy = await p3c_client.put(
+        f"/payroll/imports/{created['import_id']}/row-handling",
+        json={"expected_revision": revision, "mode": "FilterThenSum",
+              "filter_column": {"header": "Category"},
+              "choices": [
+                  {"category": {"type": "text", "value": "Include"}, "decision": "Include"},
+                  {"category": {"type": "text", "value": "Exclude"}, "decision": "Exclude"},
+              ]}, headers=tenant.admin)
+    assert row_policy.status_code == 200, row_policy.text
+    partial_upsert = await p3c_client.put(
+        f"/payroll/imports/{created['import_id']}/row-handling",
+        json={"expected_revision": row_policy.json()["revision"], "mode": "FilterThenSum",
+              "filter_column": {"header": "Category"},
+              "choices": [{"category": {"type": "text", "value": "Include"},
+                           "decision": "Include"}]}, headers=tenant.admin)
+    assert partial_upsert.status_code == 200, partial_upsert.text
+    assert partial_upsert.json()["revision"] == row_policy.json()["revision"]
+    async with p3c_engine.connect() as db:
+        saved_choices = await db.scalar(text("""
+            SELECT v.rulepayload->'row_handling'->'choices'
+            FROM import.payrollworkpendingrules p
+            JOIN import.payrollworkruleversions v ON v.ruleversionid=p.ruleversionid
+                AND v.companyid=p.companyid AND v.branchid=p.branchid
+                AND v.paydefinitionid=p.paydefinitionid
+            WHERE p.importid=:iid AND p.companyid=:cid
+        """), {"iid": created["import_id"], "cid": tenant.company_id})
+    assert {item["category"]["value"]: item["decision"] for item in saved_choices} == {
+        "Include": "Include", "Exclude": "Exclude"}
+    row_policy = partial_upsert
+    preview_response = await p3c_client.post(
+        f"/payroll/imports/{created['import_id']}/preview",
+        json={"expected_revision": row_policy.json()["revision"]}, headers=tenant.admin)
+    assert preview_response.status_code == 200, preview_response.text
+    preview = preview_response.json()
+    assert preview["preview"]["counts"]["prepared_excluded_rows"] == 2
+    query = (f"expected_revision={preview['revision']}&"
+             f"plan_fingerprint={preview['preview']['plan_fingerprint']}")
+    rows = await p3c_client.get(f"/payroll/imports/{created['import_id']}/rows?{query}",
+                                headers=tenant.admin)
+    assert rows.status_code == 200, rows.text
+    assert rows.json()["filtered_count"] == 2
+    prepared = {item["values"][str(definition_id)]["candidates"][0]["quantity"]:
+                item["source_record_count"] for item in rows.json()["items"]}
+    assert prepared == {"3": 2, "5": 1}
+    assert all(item["values"][str(definition_id)]["candidate_count"] == 1
+               for item in rows.json()["items"])
+
+    source_page = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&offset=0&limit=2&cell_limit=10",
+        headers=tenant.admin)
+    assert source_page.status_code == 200, source_page.text
+    assert source_page.json()["filtered_count"] == 5
+    assert source_page.json()["next_offset"] == 2
+    source_page_two = await p3c_client.get(
+        f"/payroll/imports/{created['import_id']}/source-records?{query}&offset=2&limit=10&cell_limit=10",
+        headers=tenant.admin)
+    assert source_page_two.status_code == 200, source_page_two.text
+    source_items = source_page.json()["items"] + source_page_two.json()["items"]
+    assert len(source_items) == 5
+    included_sources = [item for item in source_items if item["category_decision"] == "Include"]
+    assert {item["values_json"][str(definition_id)]["contribution_quantity"] for item in included_sources} == {
+        "1", "2", "5"}
+    included_source = next(item for item in source_items
+                           if item["source_row"] == 2 and item["file_name"] == "row-policy-1.csv")
+    excluded_sources = [item for item in source_items if item.get("proposed_exclusion")]
+    assert len(excluded_sources) == 2
+    assert all(item["issue_count"] == 0 for item in excluded_sources)
+    excluded_source = excluded_sources[0]
+    assert included_source["row_handling"] == {"mode": "FilterThenSum"}
+    assert "choices" not in included_source["row_handling"]
+    assert excluded_source["skipped"] is True
+    assert excluded_source["proposed_exclusion"]["status"] == "proposed_excluded"
+    assert excluded_source["row_handling"] is None
+    async with p3c_engine.connect() as db:
+        excluded_state = (await db.execute(text("""
+            SELECT count(*), count(*) FILTER (WHERE IsExcluded)
+            FROM import.payrollworkrecords
+            WHERE importid=:iid AND companyid=:cid AND contextjson ? 'proposed_exclusion' AND isskipped
+        """), {"iid": created["import_id"], "cid": tenant.company_id})).one()
+    assert excluded_state == (2, 0)  # Exclusion is proposed; accepted IsExcluded stays false.
+    async with p3c_engine.connect() as db:
+        excluded_group_count = await db.scalar(text("""
+            SELECT count(DISTINCT previewgroupid) FROM import.payrollworkrecords
+            WHERE importid=:iid AND companyid=:cid AND contextjson ? 'proposed_exclusion'
+        """), {"iid": created["import_id"], "cid": tenant.company_id})
+    assert excluded_group_count == 1
+
+    async with p3c_engine.connect() as db:
+        pending_before_repeat = (await db.execute(text("""
+            SELECT p.RuleVersionID, p.Revision FROM import.PayrollWorkPendingRules p
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid
+        """), {"iid": created["import_id"], "cid": tenant.company_id})).one()
+    repeated = await p3c_client.put(
+        f"/payroll/imports/{created['import_id']}/row-handling",
+        json={"expected_revision": preview["revision"], "mode": "FilterThenSum",
+              "filter_column": {"header": "Category"},
+              "choices": [
+                  {"category": {"type": "text", "value": "Include"}, "decision": "Include"},
+                  {"category": {"type": "text", "value": "Exclude"}, "decision": "Exclude"},
+              ]}, headers=tenant.admin)
+    assert repeated.status_code == 200, repeated.text
+    assert repeated.json()["revision"] == preview["revision"]
+    still_current = await p3c_client.get(f"/payroll/imports/{created['import_id']}", headers=tenant.admin)
+    assert still_current.status_code == 200, still_current.text
+    assert still_current.json()["revision"] == preview["revision"]
+    async with p3c_engine.connect() as db:
+        pending_after_repeat = (await db.execute(text("""
+            SELECT p.RuleVersionID, p.Revision FROM import.PayrollWorkPendingRules p
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid
+        """), {"iid": created["import_id"], "cid": tenant.company_id})).one()
+    assert pending_after_repeat == pending_before_repeat
+
+    reset_policy = await p3c_client.put(
+        f"/payroll/imports/{created['import_id']}/row-handling",
+        json={"expected_revision": preview["revision"], "mode": "RejectRepeated"}, headers=tenant.admin)
+    assert reset_policy.status_code == 200, reset_policy.text
+    assert reset_policy.json()["revision"] == preview["revision"] + 1
+    async with p3c_engine.connect() as db:
+        filter_outcome = await db.scalar(text("""
+            SELECT l.columnmapping->>'4' FROM import.sourcelayouts l
+            WHERE l.importid=:iid AND l.companyid=:cid
+        """), {"iid": created["import_id"], "cid": tenant.company_id})
+        reset_payload = await db.scalar(text("""
+            SELECT v.rulepayload FROM import.payrollworkpendingrules p
+            JOIN import.payrollworkruleversions v ON v.ruleversionid=p.ruleversionid
+                AND v.companyid=p.companyid AND v.branchid=p.branchid
+                AND v.paydefinitionid=p.paydefinitionid
+            WHERE p.importid=:iid AND p.companyid=:cid
+        """), {"iid": created["import_id"], "cid": tenant.company_id})
+    assert filter_outcome == "Ignore"
+    assert "date_interpretation" in reset_payload
+    assert "row_handling" not in reset_payload
+    assert "Filter" not in reset_payload["shared_columns"]
+
+
+async def test_row_grid_keeps_mixed_groups_visible_and_hides_all_excluded_groups(p3c_engine):
+    predicate = _visible_group_predicate("g", "test_records")
+    async with p3c_engine.connect() as db:
+        result = await db.execute(text(f"""
+            WITH test_groups(previewgroupid, importid, companyid) AS (
+                VALUES (1, 10, 20), (2, 10, 20), (3, 10, 20)
+            ), test_records(previewgroupid, importid, companyid, contextjson) AS (
+                VALUES (1, 10, 20, '{{}}'::jsonb),
+                       (1, 10, 20, '{{"proposed_exclusion": {{}}}}'::jsonb),
+                       (2, 10, 20, '{{"proposed_exclusion": {{}}}}'::jsonb),
+                       (3, 10, 20, '{{}}'::jsonb)
+            )
+            SELECT g.previewgroupid FROM test_groups g
+            WHERE TRUE {predicate}
+            ORDER BY g.previewgroupid
+        """))
+        visible = result.scalars().all()
+    assert visible == [1, 3]
+
 async def test_company_identity_resolves_before_period_roster_and_rejects_foreign_identity(
     p3c_client, p3c_engine, tenant, p3b_dsn,
 ):
@@ -615,7 +846,9 @@ async def test_matching_stable_ids_disagreeing_ids_and_name_proposals_are_distin
                  and item["driver_id"] == driver["driverid"])
     proposal = next(item for item in rows.json()["items"] if item["work_date"] == dates[1].isoformat())
     assert exact["error_count"] == 0
-    assert next(iter(exact["values"].values()))["candidates"][0]["outcome"] == "New"
+    # A stable-code row with a conflicting-name contribution cannot be promoted
+    # through the default repeated-row policy for the same Driver/day.
+    assert next(iter(exact["values"].values()))["candidates"][0]["outcome"] == "Unresolved"
     assert proposal["driver_id"] == other.driverid
     assert proposal["conflict_count"] >= 1
     assert any(issue["code"] == "IMPORT_DRIVER_DISAGREEMENT" for issue in issues.json()["items"])
@@ -1220,6 +1453,165 @@ async def test_second_target_date_profile_size_failure_rolls_back_first_target_w
     assert persisted == (mapped_revision, None)
     assert after_payroll == before_payroll
     assert head_count == 0
+
+
+async def test_row_policy_failure_on_second_target_rolls_back_first_target_and_preview(
+    p3c_client, p3c_engine, tenant, monkeypatch,
+):
+    from app.imports import batch_service
+    from tests.payroll_runtime_fixtures import assign_weekly_setup, create_period, rated_definition
+
+    first = await rated_definition(p3c_client, tenant, definition_code=f"ROW_A_{uuid4().hex[:8]}")
+    second = await rated_definition(p3c_client, tenant, definition_code=f"ROW_B_{uuid4().hex[:8]}")
+    await assign_weekly_setup(p3c_engine, tenant, tenant.branch_a)
+    period = await create_period(p3c_client, tenant, tenant.branch_a)
+    driver = await _eligible_driver_date(p3c_engine, tenant, period)
+    from app.imports.mapping import targets as mapping_targets
+    from app.payroll.period_definitions import list_period_definitions
+    async with p3c_engine.connect() as db:
+        definitions = await list_period_definitions(period["payroll_period_id"], tenant.company_id,
+                                                    db, active_only=True)
+    targets = {item["code"]: item for item in mapping_targets(definitions) if item.get("code")}
+    first_ppd = int(targets[first["definition_code"]]["target"].split(":", 1)[1])
+    second_ppd = int(targets[second["definition_code"]]["target"].split(":", 1)[1])
+    csv = (f"DriverNumber,WorkDate,{first['definition_code']},{second['definition_code']},Category\n"
+           f"{driver['drivernumber']},{driver['workdate'].isoformat()},1,2,Included\n"
+           f"{driver['drivernumber']},{driver['workdate'].isoformat()},3,4,Included\n").encode()
+    uploaded = await _upload(p3c_client, tenant, period, [("two-row-targets.csv", csv)])
+    assert uploaded.status_code == 200, uploaded.text
+    created = uploaded.json()
+    mapped = await map_import_columns(p3c_client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate",
+        "3": f"Definition:{first_ppd}", "4": f"Definition:{second_ppd}",
+    })
+    assert mapped.status_code == 200, mapped.text
+    preview = await p3c_client.post(
+        f"/payroll/imports/{created['import_id']}/preview",
+        json={"expected_revision": mapped.json()["revision"]}, headers=tenant.admin)
+    assert preview.status_code == 200, preview.text
+    iid = created["import_id"]
+    async with p3c_engine.connect() as db:
+        pending_before = (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, p.ExpectedHeadRevision
+            FROM import.PayrollWorkPendingRules p WHERE p.ImportID=:iid AND p.CompanyID=:cid
+            ORDER BY p.PayDefinitionID
+        """), {"iid": iid, "cid": tenant.company_id})).all()
+        versions_before = set((await db.execute(text("""
+            SELECT RuleVersionID FROM import.PayrollWorkRuleVersions
+            WHERE OriginImportID=:iid AND CompanyID=:cid
+        """), {"iid": iid, "cid": tenant.company_id})).scalars())
+        import_before = (await db.execute(text("""
+            SELECT i.Revision, w.PlanFingerprint, w.ReviewSummary
+            FROM import.Imports i JOIN import.PayrollWorkImports w
+              ON w.ImportID=i.ImportID AND w.CompanyID=i.CompanyID
+            WHERE i.ImportID=:iid AND i.CompanyID=:cid
+        """), {"iid": iid, "cid": tenant.company_id})).one()
+        heads_before = await db.scalar(text("""
+            SELECT count(*) FROM import.PayrollWorkRuleHeads
+            WHERE CompanyID=:cid AND BranchID=:bid AND PayDefinitionID=ANY(:definitions)
+        """), {"cid": tenant.company_id, "bid": period["branch_id"],
+               "definitions": [first["pay_definition_id"], second["pay_definition_id"]]})
+        payroll_before = await db.scalar(text("""
+            SELECT count(*) FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})
+
+    original_meaning = batch_service._target_meaning
+    second_definition = max(first["pay_definition_id"], second["pay_definition_id"])
+    calls_for_second = 0
+
+    def fail_second_target(definition):
+        nonlocal calls_for_second
+        if definition.pay_definition_id == second_definition:
+            calls_for_second += 1
+            if calls_for_second == 1:
+                raise batch_service.failure("INJECTED_ROW_TARGET_FAILURE", "Injected second-target failure.", 422)
+        return original_meaning(definition)
+
+    monkeypatch.setattr(batch_service, "_target_meaning", fail_second_target)
+    row_request = {"expected_revision": preview.json()["revision"], "mode": "SumRows"}
+    rejected = await p3c_client.put(
+        f"/payroll/imports/{iid}/row-handling", json=row_request, headers=tenant.admin)
+    assert rejected.status_code == 422, rejected.text
+    assert rejected.json()["detail"]["code"] == "INJECTED_ROW_TARGET_FAILURE"
+    assert calls_for_second == 1
+
+    async with p3c_engine.connect() as db:
+        pending_after = (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, p.ExpectedHeadRevision
+            FROM import.PayrollWorkPendingRules p WHERE p.ImportID=:iid AND p.CompanyID=:cid
+            ORDER BY p.PayDefinitionID
+        """), {"iid": iid, "cid": tenant.company_id})).all()
+        versions_after = set((await db.execute(text("""
+            SELECT RuleVersionID FROM import.PayrollWorkRuleVersions
+            WHERE OriginImportID=:iid AND CompanyID=:cid
+        """), {"iid": iid, "cid": tenant.company_id})).scalars())
+        import_after = (await db.execute(text("""
+            SELECT i.Revision, w.PlanFingerprint, w.ReviewSummary
+            FROM import.Imports i JOIN import.PayrollWorkImports w
+              ON w.ImportID=i.ImportID AND w.CompanyID=i.CompanyID
+            WHERE i.ImportID=:iid AND i.CompanyID=:cid
+        """), {"iid": iid, "cid": tenant.company_id})).one()
+        heads_after = await db.scalar(text("""
+            SELECT count(*) FROM import.PayrollWorkRuleHeads
+            WHERE CompanyID=:cid AND BranchID=:bid AND PayDefinitionID=ANY(:definitions)
+        """), {"cid": tenant.company_id, "bid": period["branch_id"],
+               "definitions": [first["pay_definition_id"], second["pay_definition_id"]]})
+        payroll_after = await db.scalar(text("""
+            SELECT count(*) FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})
+    assert pending_after == pending_before
+    assert versions_after == versions_before
+    assert import_after == import_before
+    assert heads_after == heads_before == 0
+    assert payroll_after == payroll_before
+
+    accepted = await p3c_client.put(
+        f"/payroll/imports/{iid}/row-handling", json=row_request, headers=tenant.admin)
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["revision"] == preview.json()["revision"] + 1
+    async with p3c_engine.connect() as db:
+        accepted_pending = (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, r.RulePayload
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid ORDER BY p.PayDefinitionID
+        """), {"iid": iid, "cid": tenant.company_id})).all()
+        accepted_heads = await db.scalar(text("""
+            SELECT count(*) FROM import.PayrollWorkRuleHeads
+            WHERE CompanyID=:cid AND BranchID=:bid AND PayDefinitionID=ANY(:definitions)
+        """), {"cid": tenant.company_id, "bid": period["branch_id"],
+               "definitions": [first["pay_definition_id"], second["pay_definition_id"]]})
+        accepted_payroll = await db.scalar(text("""
+            SELECT count(*) FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})
+    assert {row.paydefinitionid for row in accepted_pending} == {
+        first["pay_definition_id"], second["pay_definition_id"]}
+    assert all(row.rulepayload["row_handling"]["mode"] == "SumRows" for row in accepted_pending)
+    assert all("date_interpretation" in row.rulepayload for row in accepted_pending)
+    assert accepted_heads == 0
+    assert accepted_payroll == payroll_before
+    accepted_snapshot = [(row.paydefinitionid, row.ruleversionid, row.revision, row.rulepayload)
+                         for row in accepted_pending]
+    unchanged = await p3c_client.put(
+        f"/payroll/imports/{iid}/row-handling",
+        json={"expected_revision": accepted.json()["revision"], "mode": "SumRows"},
+        headers=tenant.admin)
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json()["revision"] == accepted.json()["revision"]
+    async with p3c_engine.connect() as db:
+        after_noop = (await db.execute(text("""
+            SELECT p.PayDefinitionID, p.RuleVersionID, p.Revision, r.RulePayload
+            FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions r ON r.RuleVersionID=p.RuleVersionID
+              AND r.CompanyID=p.CompanyID AND r.BranchID=p.BranchID AND r.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid ORDER BY p.PayDefinitionID
+        """), {"iid": iid, "cid": tenant.company_id})).all()
+    assert [(row.paydefinitionid, row.ruleversionid, row.revision, row.rulepayload)
+            for row in after_noop] == accepted_snapshot
 
 
 async def test_inferred_date_order_survives_refresh_and_finalization_purge(p3c_client, p3c_engine, tenant):

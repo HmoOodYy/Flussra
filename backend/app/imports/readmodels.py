@@ -57,6 +57,7 @@ def project_source_record(item: dict, cell_offset: int, cell_limit: int) -> dict
     """Project one source row's cells and matching normalized details as a page."""
     projected = dict(item)
     payload = projected.pop("payload", None) or {}
+    context = projected.pop("context_json", None) or {}
     ordered = sorted(payload.items(), key=lambda pair: (0, int(pair[0])) if str(pair[0]).isdigit()
                      else (1, str(pair[0])))
     page = ordered[cell_offset:cell_offset + cell_limit]
@@ -79,6 +80,10 @@ def project_source_record(item: dict, cell_offset: int, cell_limit: int) -> dict
     ]
     for issue in projected["issues"]:
         _page_operand_details(issue, "value", page_columns)
+    projected["row_handling"] = context.get("row_handling")
+    projected["category"] = context.get("category")
+    projected["category_decision"] = context.get("category_decision")
+    projected["proposed_exclusion"] = context.get("proposed_exclusion")
     projected["cell_count"] = len(ordered)
     projected["cell_offset"] = cell_offset
     projected["cell_limit"] = cell_limit
@@ -99,6 +104,15 @@ def _page_operand_details(record: dict, field: str, page_columns: set[int]) -> N
     record[f"{field}_missing_operand_count"] = sum(operand is None for operand in operands)
     record[field] = [operand for operand in operands
                      if isinstance(operand, dict) and operand["column"] in page_columns]
+
+
+def _visible_group_predicate(group_alias: str = "g", records_relation: str = "import.payrollworkrecords") -> str:
+    """Keep a preview group visible whenever it contains any non-excluded record."""
+    return f"""AND EXISTS (
+        SELECT 1 FROM {records_relation} visible_row
+        WHERE visible_row.previewgroupid={group_alias}.previewgroupid
+          AND visible_row.importid={group_alias}.importid AND visible_row.companyid={group_alias}.companyid
+          AND NOT (visible_row.contextjson ? 'proposed_exclusion'))"""
 
 
 async def _read_identity(db, cid: int, uid: int, iid: int, revision: int, plan_fingerprint: str):
@@ -134,15 +148,16 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
         identity = await _read_identity(db, cid, uid, iid, revision, plan_fingerprint)
         params = {"cid": cid, "iid": iid, "severity": severity}
         severity_sql = "AND g.errorcount > 0" if severity == "Error" else "AND g.warningcount > 0" if severity == "Warning" else "AND g.conflictcount > 0" if severity == "Conflict" else ""
+        visible_group_sql = _visible_group_predicate()
         total = (await db.execute(text(f"""
             SELECT count(*) FROM import.payrollworkpreviewgroups g
-            WHERE g.companyid = :cid AND g.importid = :iid {severity_sql}
+            WHERE g.companyid = :cid AND g.importid = :iid {visible_group_sql} {severity_sql}
         """), params)).scalar_one()
         groups = (await db.execute(text(f"""
             SELECT g.previewgroupid, g.groupfingerprint, g.driverid, g.workdate,
                 g.driverdisplay, g.errorcount, g.warningcount, g.conflictcount
             FROM import.payrollworkpreviewgroups g
-            WHERE g.companyid = :cid AND g.importid = :iid {severity_sql}
+            WHERE g.companyid = :cid AND g.importid = :iid {visible_group_sql} {severity_sql}
             ORDER BY g.workdate NULLS LAST, g.driverdisplay->>'driver_name' NULLS LAST,
                      g.groupfingerprint OFFSET :offset LIMIT :limit
         """), {**params, "offset": offset, "limit": limit})).mappings().all()
@@ -194,6 +209,7 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                     JOIN import.filesources f ON f.filesourceid=u.filesourceid
                         AND f.importid=u.importid AND f.companyid=u.companyid
                     WHERE r.companyid=:cid AND r.importid=:iid
+                        AND COALESCE((entry.value->>'is_candidate')::boolean, TRUE)
                         AND r.previewgroupid = ANY(CAST(:ids AS bigint[]))
                 )
                 SELECT * FROM expanded WHERE candidate_rank <= :sample
@@ -227,6 +243,12 @@ async def read_rows(engine, cid: int, uid: int, iid: int, revision: int,
                     "file_name": record["originalfilename"], "unit_name": record["unitname"],
                     "source_row": record["sourcerownumber"], "skipped": record["isskipped"],
                     "date_interpretation": (record["contextjson"] or {}).get("date_interpretation"),
+                    "proposed_exclusion": (record["contextjson"] or {}).get("proposed_exclusion"),
+                    "contributions": {key: {"is_candidate": value.get("is_candidate", True),
+                        "contribution_quantity": value.get("contribution_quantity"),
+                        "aggregate_status": value.get("aggregate_status"),
+                        "outcome": value.get("outcome")}
+                        for key, value in (record["valuesjson"] or {}).items()},
                     "issue_count": len(record_issues),
                     "issue_codes": [item["code"] for item in record_issues[:policy.row_detail_sample]]})
             for def_id, candidates in candidates_by_group[group["previewgroupid"]].items():
@@ -323,7 +345,7 @@ async def read_sources(engine, cid, uid, iid, revision, plan_fingerprint, offset
                 f.sourcerownumber AS source_row, r.locator, r.payload,
                 w.driverid AS driver_id, w.driverassignmentid AS driver_assignment_id,
                 w.workdate AS work_date, w.isskipped AS skipped, w.valuesjson AS values_json,
-                w.issuesjson AS issues
+                w.issuesjson AS issues, w.contextjson AS context_json
             FROM import.filesourcerecords f
             JOIN import.importsourcerecords r ON r.sourcerecordid=f.sourcerecordid
                 AND r.importid=f.importid AND r.companyid=f.companyid

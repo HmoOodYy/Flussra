@@ -509,6 +509,70 @@ async def test_two_active_parsers_bound_capacity_while_ordinary_requests_continu
     assert all(response.status_code == 200 for response in await asyncio.gather(*tasks))
 
 
+async def test_mapping_mutation_retains_bounded_admission_after_body_parsing(
+    p3c_client, p3c_app, p3c_engine, tenant, monkeypatch,
+):
+    import anyio
+
+    period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    async with p3c_engine.connect() as db:
+        driver = (await db.execute(text("""
+            SELECT d.drivernumber, x.workdate
+            FROM payroll.payrollperioddrivereligibility p
+            JOIN core.driverassignments a ON a.driverassignmentid=p.driverassignmentid
+                AND a.companyid=p.companyid AND a.branchid=p.branchid
+            JOIN core.drivers d ON d.driverid=a.driverid AND d.companyid=a.companyid
+            CROSS JOIN LATERAL unnest(p.eligibleworkdates) AS x(workdate)
+            WHERE p.companyid=:cid AND p.payrollperiodid=:pid AND p.iseligibleforperiod
+            ORDER BY d.driverid,x.workdate LIMIT 1
+        """), {"cid": tenant.company_id, "pid": period["payroll_period_id"]})).one()
+        from app.payroll.period_definitions import list_period_definitions
+        definitions = await list_period_definitions(period["payroll_period_id"], tenant.company_id,
+                                                    db, active_only=True)
+    target = next(item for item in mapping_targets(definitions)
+                  if item["target"].startswith("Definition:"))
+    csv = (f"DriverNumber,WorkDate,{target['code']}\n"
+           f"{driver.drivernumber},{driver.workdate.isoformat()},1\n").encode()
+    first = await upload(p3c_client, tenant, period, uuid4(), csv)
+    second = await upload(p3c_client, tenant, period, uuid4(), csv)
+    assert first.status_code == second.status_code == 200
+
+    def mapping_body(created):
+        return {"expected_revision": created.json()["revision"],
+                "shared_columns": {"DriverNumber": {"header": "DriverNumber"},
+                                   "WorkDate": {"header": "WorkDate"}},
+                "targets": [{"target": target["target"], "transform": "Direct",
+                             "inputs": [{"header": target["code"]}],
+                             "expected_head_revision": 0, "replace_existing": False}]}
+
+    monkeypatch.setattr(p3c_app.state, "import_admission", anyio.CapacityLimiter(1))
+    entered, release = threading.Event(), threading.Event()
+
+    # Pause the service write while its request owns the single admission slot.
+    from app.imports import batch_service
+    save = batch_service._save_mapping
+
+    async def held_save(*args, **kwargs):
+        entered.set()
+        if not await asyncio.to_thread(release.wait, 10):
+            raise RuntimeError("mapping mutation was not released")
+        return await save(*args, **kwargs)
+
+    monkeypatch.setattr(batch_service, "_save_mapping", held_save)
+    first_task = asyncio.create_task(p3c_client.put(
+        f"/payroll/imports/{first.json()['import_id']}/mapping", json=mapping_body(first), headers=tenant.admin))
+    try:
+        assert await asyncio.to_thread(entered.wait, 10)
+        excess = await p3c_client.put(
+            f"/payroll/imports/{second.json()['import_id']}/mapping", json=mapping_body(second), headers=tenant.admin)
+        assert excess.status_code == 429, excess.text
+        assert excess.json()["detail"]["code"] == "IMPORT_BUSY"
+    finally:
+        release.set()
+    accepted = await first_task
+    assert accepted.status_code == 200, accepted.text
+
+
 async def test_parse_failure_and_unsupported_contract_fail_closed(p3c_client, p3c_engine, tenant):
     period, _ = await open_period_with_grid(p3c_client, p3c_engine, tenant)
     refused = await upload(p3c_client, tenant, period, uuid4(), b"bad\x00binary")

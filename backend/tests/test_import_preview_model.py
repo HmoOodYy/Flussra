@@ -11,7 +11,11 @@ from app.imports.errors import ImportFailure
 from app.imports.mapping import normalized_identifier
 from app.imports.payroll_context import context_identity
 from app.imports.policy import ImportResourcePolicy
-from app.imports.preview_model import build_batch_preview
+from app.imports.preview_model import (
+    _apply_row_handling,
+    _effective_row_policy,
+    build_batch_preview,
+)
 from app.imports.preview_store import prepare_preview
 from app.payroll.definition_calculation import PeriodDefinition
 
@@ -262,6 +266,63 @@ def test_formula_without_cached_name_blocks_a_known_driver_code():
     assert preview["rows"][0]["driver_id"] is None
     assert any(issue["code"] == "IMPORT_DRIVER_UNRESOLVED" and issue["severity"] == "Error"
                for issue in preview["issues"])
+
+
+def test_invalid_target_contribution_does_not_block_other_target_aggregation():
+    first_definition = _definition()
+    second_definition = _definition(101, "BONUS", "Bonus", "Decimal")
+    context = _context(definition=first_definition)
+    context["definitions"].append(second_definition)
+    context["definition_by_id"][101] = second_definition
+    source = _source(quantity_value="not-a-number")
+    source["mapping"]["4"] = "Definition:101"
+    source["quantity_rules"] = [
+        {"target": "Definition:100", "transform": "Direct", "columns": ["3"],
+         "row_handling": {"version": 1, "mode": "SumRows", "choices": []}},
+        {"target": "Definition:101", "transform": "Direct", "columns": ["4"],
+         "row_handling": {"version": 1, "mode": "SumRows", "choices": []}},
+    ]
+    first = source["materialized"]["rows"][0]
+    first["cells"]["4"] = {"value": "2", "kind": "number", "formula": False, "missing_cache": False}
+    second = deepcopy(first)
+    second["source_row"] = 3
+    second["cells"]["3"] = {"value": "3", "kind": "number", "formula": False, "missing_cache": False}
+    second["cells"]["4"] = {"value": "4", "kind": "number", "formula": False, "missing_cache": False}
+    source["materialized"]["rows"].append(second)
+
+    preview = build_batch_preview([source], context)
+
+    assert preview["rows"][0]["values"]["100"]["outcome"] == "Invalid"
+    assert preview["rows"][0]["values"]["101"]["quantity"] == "6"
+    assert preview["rows"][0]["values"]["101"]["outcome"] == "New"
+    assert any(issue["code"] == "IMPORT_QUANTITY_INVALID" and issue.get("column") == 3
+               for issue in preview["issues"])
+
+
+def test_row_context_size_does_not_repeat_the_category_choice_domain():
+    source = _source()
+    source["mapping"]["4"] = "Filter"
+    source["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "Include", "kind": "text", "formula": False, "missing_cache": False,
+    }
+
+    def preview_with_choices(count):
+        source_copy = deepcopy(source)
+        choices = [{"category": {"type": "text", "value": f"Category {index}"},
+                    "decision": "Include"} for index in range(count)]
+        choices[0] = {"category": {"type": "text", "value": "Include"}, "decision": "Include"}
+        source_copy["quantity_rules"][0]["row_handling"] = {
+            "version": 1, "mode": "FilterThenSum", "choices": choices,
+        }
+        result = build_batch_preview([source_copy], _context())
+        return result["rows"][0]["context"]
+
+    small = preview_with_choices(1)
+    large = preview_with_choices(1000)
+
+    assert small["row_handling"] == large["row_handling"] == {"mode": "FilterThenSum"}
+    assert "choices" not in large["row_handling"]
+    assert len(json.dumps(large, separators=(",", ":"))) == len(json.dumps(small, separators=(",", ":")))
 
 
 def test_import_metadata_response_uses_a_serialized_byte_bound():
@@ -641,3 +702,218 @@ def test_preview_preparation_serializes_rows_and_discards_duplicate_python_paylo
     assert json.loads(row["_prepared_json"]["payload"])["3"]["value"] == "4.0000"
     assert {key: prepared["groups"][0][key] for key in original_group_counts} == original_group_counts
     assert "issues" not in prepared
+
+
+def test_sum_rows_prepares_one_final_quantity_candidate_and_preserves_contributions():
+    source = _source(quantity_value="0.5")
+    source["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": []}
+    second = deepcopy(source["materialized"]["rows"][0])
+    second["source_row"] = 3
+    second["cells"]["3"] = {"value": "0.5", "kind": "text", "formula": False,
+                             "missing_cache": False}
+    source["materialized"]["rows"].append(second)
+
+    preview = build_batch_preview([source], _context())
+
+    assert len(preview["rows"]) == 2
+    assert preview["rows"][0]["values"]["100"]["quantity"] == "1"
+    assert preview["rows"][0]["values"]["100"]["is_candidate"] is True
+    assert preview["rows"][0]["values"]["100"]["contribution_quantity"] == "0.5"
+    assert preview["rows"][1]["values"]["100"]["quantity"] is None
+    assert preview["rows"][1]["values"]["100"]["is_candidate"] is False
+    assert preview["rows"][1]["values"]["100"]["contribution_quantity"] == "0.5"
+    assert not any(issue["code"] == "IMPORT_DUPLICATE_FACT" for issue in preview["issues"])
+
+
+def test_sum_rows_applies_current_value_and_eligibility_checks_to_final_total():
+    source = _source(quantity_value="0.5")
+    source["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": []}
+    second = deepcopy(source["materialized"]["rows"][0])
+    second["source_row"] = 3
+    second["cells"]["3"] = {"value": "0.5", "kind": "number", "formula": False,
+                             "missing_cache": False}
+    source["materialized"]["rows"].append(second)
+
+    unchanged = build_batch_preview([source], _context(current_lines={(71, WORK_DATE, 100): Decimal("1")}))
+    assert unchanged["rows"][0]["values"]["100"]["quantity"] == "1"
+    assert unchanged["rows"][0]["values"]["100"]["outcome"] == "Unchanged"
+    assert not any(issue["code"] == "IMPORT_VALUE_CONFLICT" for issue in unchanged["issues"])
+
+    ineligible = build_batch_preview([source], _context(live=False, existing_dates={(71, WORK_DATE)}))
+    assert ineligible["rows"][0]["values"]["100"]["outcome"] == "Invalid"
+    assert any(issue["code"] == "IMPORT_NEW_SOURCE_NOT_ELIGIBLE" for issue in ineligible["issues"])
+
+    source["materialized"]["rows"][0]["cells"]["3"]["value"] = "1"
+    second["cells"]["3"]["value"] = "-1"
+    context = _context()
+    context["days"][WORK_DATE] = True
+    cancelled = build_batch_preview([source], context)
+    assert cancelled["rows"][0]["values"]["100"]["quantity"] == "0"
+    assert not any(issue["code"] == "IMPORT_DAY_OFF_DECISION_REQUIRED" for issue in cancelled["issues"])
+
+
+def test_incomplete_row_aggregate_has_no_candidate_quantity_and_is_blank():
+    source = _source(quantity_value="0.5")
+    source["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": []}
+    second = deepcopy(source["materialized"]["rows"][0])
+    second["source_row"] = 3
+    second["cells"]["3"] = {"value": "", "kind": "text", "formula": False,
+                             "missing_cache": False}
+    source["materialized"]["rows"].append(second)
+
+    preview = build_batch_preview([source], _context())
+
+    value = preview["rows"][0]["values"]["100"]
+    assert value["quantity"] is None
+    assert value["is_blank"] is True
+    assert value["aggregate_status"] == "withheld"
+    assert value["aggregate_reason"] == "incomplete_contribution"
+    assert value["outcome"] == "Blank"
+    assert any(issue["code"] == "IMPORT_ROW_CONTRIBUTION_WITHHELD" for issue in preview["issues"])
+
+
+def test_repeated_driver_day_with_multiple_assignments_is_not_split_or_aggregated():
+    rows = []
+    for source_row, assignment_id in ((2, 71), (3, 72)):
+        rows.append({
+            "file_ordinal": 1, "unit_name": "CSV", "source_row": source_row,
+            "driver_id": 7, "driver_assignment_id": assignment_id, "work_date": WORK_DATE,
+            "skipped": False, "issues": [],
+            "context": {"identity_resolved": True, "row_handling": {"mode": "SumRows"}},
+            "values": {"100": {"quantity": "1", "contribution_quantity": "1",
+                                "is_blank": False, "outcome": "New"}},
+        })
+    issues = []
+
+    _apply_row_handling(rows, {"Definition:100": _definition()}, {}, issues, max_work_digits=16000)
+
+    assert [row["values"]["100"]["is_candidate"] for row in rows] == [True, False]
+    assert all(row["values"]["100"]["quantity"] is None for row in rows)
+    assert all(row["values"]["100"]["outcome"] == "Unresolved" for row in rows)
+    assert all(row["values"]["100"]["aggregate_reason"] == "multiple_assignments" for row in rows)
+    assert [issue["code"] for issue in issues] == [
+        "IMPORT_ROW_ASSIGNMENT_CONFLICT", "IMPORT_ROW_ASSIGNMENT_CONFLICT"]
+
+
+def test_name_proposal_cannot_become_an_accepted_repeated_row_contribution():
+    source = _source(quantity_value="2")
+    source["mapping"]["4"] = "DriverName"
+    source["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "SumRows", "choices": []}
+    source["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "Driver One", "kind": "text", "formula": False, "missing_cache": False,
+    }
+    proposed = deepcopy(source["materialized"]["rows"][0])
+    proposed["source_row"] = 3
+    proposed["cells"]["1"]["value"] = ""
+    proposed["cells"]["3"]["value"] = "5"
+    source["materialized"]["rows"].append(proposed)
+
+    preview = build_batch_preview([source], _context())
+
+    assert preview["rows"][0]["context"]["driver_identity"]["status"] == "Exact"
+    assert preview["rows"][1]["context"]["driver_identity"]["status"] == "Proposed"
+    assert preview["rows"][0]["values"]["100"]["quantity"] is None
+    assert preview["rows"][0]["values"]["100"]["outcome"] == "Unresolved"
+    assert preview["rows"][1]["values"]["100"]["is_candidate"] is False
+    assert preview["rows"][1]["values"]["100"]["quantity"] is None
+    assert not any(value["outcome"] == "New" for row in preview["rows"]
+                   for value in row["values"].values())
+
+
+def test_conflicting_target_row_policies_are_not_resolved_by_target_order():
+    source = _source()
+    source["mapping"]["4"] = "Definition:101"
+    source["quantity_rules"] = [
+        {"target": "Definition:100", "transform": "Direct", "columns": ["3"],
+         "row_handling": {"version": 1, "mode": "SumRows", "choices": []}},
+        {"target": "Definition:101", "transform": "Direct", "columns": ["4"],
+         "row_handling": {"version": 1, "mode": "RejectRepeated", "choices": []}},
+    ]
+    context = _context()
+    second_definition = _definition(101, "BONUS", "Bonus", "Decimal")
+    context["definitions"].append(second_definition)
+    context["definition_by_id"][101] = second_definition
+
+    try:
+        build_batch_preview([source], context)
+    except ImportFailure as exc:
+        assert exc.code == "IMPORT_ROW_HANDLING_CONFLICT"
+    else:
+        raise AssertionError("Contradictory target policies must require an explicit common setup.")
+
+
+def test_inactive_filter_metadata_does_not_change_nonfilter_row_policy_meaning():
+    assert _effective_row_policy({"row_handling": None,
+                                  "filter_selector": {"header": "Old category"}}) == {
+        "mode": "RejectRepeated"}
+    assert _effective_row_policy({"row_handling": {"mode": "SumRows", "choices": []},
+                                  "filter_selector": {"header": "Old category"}}) == {
+        "mode": "SumRows"}
+    assert _effective_row_policy({"row_handling": {
+        "mode": "FilterThenSum", "choices": [{"category": {"type": "text", "value": "X"},
+                                                  "decision": "Include"}]},
+        "filter_selector": {"header": "Activity"}}) == {
+        "mode": "FilterThenSum", "filter": {"header": "Activity"},
+        "choices": [{"category": {"type": "text", "value": "X"}, "decision": "Include"}]}
+
+
+def test_filter_exclusion_precedes_identifier_date_and_quantity_validation():
+    source = _source(quantity_value="4")
+    source["mapping"]["4"] = "Filter"
+    source["materialized"]["inspection"]["header_cells"].append("Category")
+    source["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "Include", "kind": "text", "formula": False, "missing_cache": False}
+    excluded = deepcopy(source["materialized"]["rows"][0])
+    excluded["source_row"] = 3
+    excluded["cells"]["1"] = {"value": "bad-driver", "kind": "text", "formula": False,
+                               "missing_cache": False}
+    excluded["cells"]["2"] = {"value": "2025-99-99", "kind": "text", "formula": False,
+                               "missing_cache": False}
+    excluded["cells"]["3"] = {"value": "not-a-quantity", "kind": "text", "formula": False,
+                               "missing_cache": False}
+    excluded["cells"]["4"] = {"value": "Ignore", "kind": "text", "formula": False,
+                               "missing_cache": False}
+    source["materialized"]["rows"].append(excluded)
+    source["quantity_rules"][0]["row_handling"] = {
+        "version": 1, "mode": "FilterThenSum", "choices": [
+            {"category": {"type": "text", "value": "Ignore"}, "decision": "Exclude"},
+            {"category": {"type": "text", "value": "Include"}, "decision": "Include"},
+        ]}
+
+    preview = build_batch_preview([source], _context())
+
+    excluded_row = next(row for row in preview["rows"] if row["source_row"] == 3)
+    assert excluded_row["skipped"] is True
+    assert excluded_row["context"]["proposed_exclusion"]["status"] == "proposed_excluded"
+    assert excluded_row["driver_id"] is None and excluded_row["work_date"] is None
+    assert not any(issue["source_row"] == 3 for issue in preview["issues"])
+    assert preview["counts"]["prepared_excluded_rows"] == 1
+
+
+def test_repeated_driver_day_is_rejected_without_rule_even_for_complementary_targets():
+    source = _source(quantity_value="4")
+    source["mapping"]["4"] = "Definition:101"
+    source["quantity_rules"].append({"target": "Definition:101", "transform": "Direct",
+                                     "columns": ["4"], "source_signature": {"inputs": [{"header": "overtime"}]}})
+    second = deepcopy(source["materialized"]["rows"][0])
+    second["source_row"] = 3
+    source["materialized"]["rows"][0]["cells"]["4"] = {
+        "value": "", "kind": "text", "formula": False, "missing_cache": False}
+    second["cells"]["3"] = {"value": "", "kind": "text", "formula": False, "missing_cache": False}
+    second["cells"]["4"] = {"value": "2", "kind": "text", "formula": False, "missing_cache": False}
+    source["materialized"]["inspection"]["header_cells"].append("OVERTIME")
+    source["materialized"]["rows"].append(second)
+    context = _context()
+    second_definition = _definition(101, "OVERTIME", "Overtime")
+    context["definitions"].append(second_definition)
+    context["definition_by_id"][101] = second_definition
+
+    preview = build_batch_preview([source], context)
+
+    assert len([issue for issue in preview["issues"] if issue["code"] == "IMPORT_DUPLICATE_FACT"]) == 2
+    assert all(value["outcome"] == "Invalid"
+               for row in preview["rows"] for value in row["values"].values())

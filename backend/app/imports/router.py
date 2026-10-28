@@ -9,18 +9,22 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.dependencies import get_current_user, get_engine
 from app.imports.batch_service import (
+    CategoryInspectionRequest,
     InterpretationRequest,
     MappingRequest,
     RegroupRequest,
     RevisionRequest,
+    RowHandlingRequest,
     accept_mapping,
     build_preview,
     cancel_import,
     create_import,
     create_layout,
+    inspect_categories,
     load_import,
     read_import,
     update_interpretation,
+    update_row_handling,
 )
 from app.imports.errors import ImportFailure
 from app.imports.policy_metadata import ImportPolicyMetadataResponse, read_period_import_policy
@@ -54,6 +58,23 @@ def _mapping_request_body() -> dict:
     definitions = schema.pop("$defs", {})
     return {"required": True, "content": {"application/json": {
         "schema": _inline_mapping_schema_refs(schema, definitions)}}}
+
+
+def _model_request_body(model) -> dict:
+    schema = model.model_json_schema()
+    definitions = schema.pop("$defs", {})
+    return {"required": True, "content": {"application/json": {
+        "schema": _inline_mapping_schema_refs(schema, definitions)}}}
+
+
+async def _read_bounded_model(request: Request, model, policy):
+    async with admission(request):
+        payload = await receive_mapping_json(request, policy.max_mapping_request_bytes)
+        try:
+            return await anyio.to_thread.run_sync(model.model_validate_json, payload)
+        except ValidationError as exc:
+            raise ImportFailure("IMPORT_MAPPING_REQUEST_INVALID",
+                                "Request does not match the supported Import configuration format.", 422) from exc
 
 
 @router.post("/periods/{period_id}/imports")
@@ -108,14 +129,36 @@ async def change_mapping(import_id: int, request: Request,
         row = await load_import(db, cid, import_id)
         await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
     policy = request.app.state.settings.import_resource_policy
-    async with admission(request):
-        payload = await receive_mapping_json(request, policy.max_mapping_request_bytes)
-        try:
-            body = await anyio.to_thread.run_sync(MappingRequest.model_validate_json, payload)
-        except ValidationError as exc:
-            raise ImportFailure("IMPORT_MAPPING_REQUEST_INVALID",
-                                "Mapping request does not match the supported target mapping format.", 422) from exc
-        return await accept_mapping(request, engine, cid, uid, import_id, body)
+    body = await _read_bounded_model(request, MappingRequest, policy)
+    return await accept_mapping(request, engine, cid, uid, import_id, body)
+
+
+@router.post("/imports/{import_id}/categories/inspect",
+             openapi_extra={"requestBody": _model_request_body(CategoryInspectionRequest)})
+async def inspect_import_categories(import_id: int, request: Request,
+                                    user: dict = Depends(get_current_user),
+                                    engine: AsyncEngine = Depends(get_engine)):
+    cid, uid = int(user["cid"]), int(user["sub"])
+    async with engine.begin() as db:
+        row = await load_import(db, cid, import_id)
+        await authorize(db, cid, uid, row["payrollperiodid"], mutate=False)
+    policy = request.app.state.settings.import_resource_policy
+    body = await _read_bounded_model(request, CategoryInspectionRequest, policy)
+    return await inspect_categories(request, engine, cid, uid, import_id, body)
+
+
+@router.put("/imports/{import_id}/row-handling",
+            openapi_extra={"requestBody": _model_request_body(RowHandlingRequest)})
+async def change_row_handling(import_id: int, request: Request,
+                              user: dict = Depends(get_current_user),
+                              engine: AsyncEngine = Depends(get_engine)):
+    cid, uid = int(user["cid"]), int(user["sub"])
+    async with engine.begin() as db:
+        row = await load_import(db, cid, import_id)
+        await authorize(db, cid, uid, row["payrollperiodid"], mutate=True)
+    policy = request.app.state.settings.import_resource_policy
+    body = await _read_bounded_model(request, RowHandlingRequest, policy)
+    return await update_row_handling(request, engine, cid, uid, import_id, body)
 
 
 @router.post("/imports/{import_id}/preview")

@@ -4,24 +4,20 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from datetime import date
-from decimal import (
-    MAX_EMAX,
-    MIN_EMIN,
-    Decimal,
-    DecimalException,
-    Inexact,
-    InvalidOperation,
-    Rounded,
-    localcontext,
-)
+from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
 
+from app.imports.aggregation import (
+    CategoryEvidenceError,
+    aggregate_quantity_contributions,
+    category_key_from_json,
+    typed_category_key,
+)
 from app.imports.date_interpretation import interpret_date, make_date_profile
 from app.imports.errors import ImportFailure
 from app.imports.identity import resolve_row_identity
 from app.imports.mapping import (
     IDENTIFIERS,
-    NUMBER,
     assignment_meaning,
     blank,
     canonical,
@@ -39,6 +35,8 @@ from app.imports.mapping import (
     targets as mapping_targets,
 )
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
+from app.imports.quantity_math import exact_decimal_sum as _exact_decimal_sum
+from app.imports.quantity_math import parse_sum_operand
 from app.payroll.definition_calculation import quantity_error
 from app.payroll.eligibility import _is_snapshot_row_eligible_for_workdate
 
@@ -77,38 +75,18 @@ def _date_source_semantics(source):
     return {"kind": kind, "value": value}
 
 
-def _exact_decimal_sum(values: list[Decimal], max_work_digits: int) -> Decimal:
-    """Add bounded finite decimals exactly, independent of the process context."""
-    nonzero = [value for value in values if value]
-    if not nonzero:
-        return Decimal(0)
-    lowest_exponent = min(value.as_tuple().exponent for value in nonzero)
-    highest_adjusted = max(value.adjusted() for value in nonzero)
-    required_span = highest_adjusted - lowest_exponent + len(str(len(nonzero))) + 1
-    if required_span > max_work_digits:
-        raise ArithmeticError("configured numeric work limit exceeded")
-    try:
-        with localcontext() as context:
-            context.prec = max(1, required_span)
-            context.Emax = MAX_EMAX
-            context.Emin = MIN_EMIN
-            context.traps[Inexact] = True
-            context.traps[Rounded] = True
-            total = sum(nonzero, Decimal(0))
-    except DecimalException as exc:
-        raise ArithmeticError("exact decimal sum could not be represented") from exc
-    if not total:
-        return Decimal(0)
-    parts = total.as_tuple()
-    digits = list(parts.digits)
-    exponent = parts.exponent
-    while len(digits) > 1 and digits[-1] == 0:
-        digits.pop()
-        exponent += 1
-    return Decimal((parts.sign, tuple(digits), exponent))
+def _effective_row_policy(rule):
+    """Normalize inactive filter metadata away from RejectRepeated/SumRows."""
+    row_rule = rule.get("row_handling") or {}
+    mode = row_rule.get("mode", "RejectRepeated")
+    if mode == "FilterThenSum":
+        return {"mode": mode, "filter": rule.get("filter_selector"),
+                "choices": row_rule.get("choices", [])}
+    return {"mode": mode}
 
 
-def _sum_quantity(cells: dict, columns: list[int | None], definition, max_work_digits: int):
+def _sum_quantity(cells: dict, columns: list[int | None], definition, max_work_digits: int, *,
+                  validate_result: bool = True):
     values = []
     raw_operands = []
     missing = not columns or any(column is None for column in columns)
@@ -123,32 +101,14 @@ def _sum_quantity(cells: dict, columns: list[int | None], definition, max_work_d
         raw_operands.append({"column": int(column), "value": canonical(cell.get("value")),
                              "kind": cell.get("kind"), "formula": bool(cell.get("formula")),
                              "missing_cache": bool(cell.get("missing_cache"))})
-        if cell.get("missing_cache"):
+        value, error, is_blank = parse_sum_operand(cell)
+        if error:
             if first_error is None:
-                first_error = "Formula without a calculated value."
+                first_error = error
                 first_error_column = int(column)
             continue
-        if blank(cell):
+        if is_blank:
             missing = True
-            continue
-        raw = str(cell.get("value", "")).strip()
-        if cell.get("kind") not in ("number", "text") or (
-                cell.get("kind") == "text" and not NUMBER.fullmatch(raw)):
-            if first_error is None:
-                first_error = "Numbers only; use digits with an optional decimal point."
-                first_error_column = int(column)
-            continue
-        try:
-            value = Decimal(raw)
-        except InvalidOperation:
-            if first_error is None:
-                first_error = "Numbers only."
-                first_error_column = int(column)
-            continue
-        if not value.is_finite():
-            if first_error is None:
-                first_error = "Quantity must be a finite number."
-                first_error_column = int(column)
             continue
         values.append(value)
     if first_error:
@@ -168,10 +128,208 @@ def _sum_quantity(cells: dict, columns: list[int | None], definition, max_work_d
     except ArithmeticError:
         return None, (f"Sum operands exceed the configured numeric work limit of "
                       f"{max_work_digits} decimal digits."), raw_operands, False, None
-    error = quantity_error(definition.input_type, result)
-    if error is None and result.as_tuple().exponent < -4:
+    error = quantity_error(definition.input_type, result) if validate_result else None
+    if validate_result and error is None and result.as_tuple().exponent < -4:
         error = "At most four decimal places are supported."
     return (None if error else result), error, raw_operands, False, None
+
+
+def _apply_row_handling(output_rows, definitions_by_target, context, issues, *, max_work_digits):
+    """Collapse repeated resolved Driver/day contributions to one candidate per target."""
+    by_driver_day = defaultdict(list)
+    potential_rows = defaultdict(list)
+    for row in output_rows:
+        for value in row["values"].values():
+            value.setdefault("is_candidate", True)
+            value.setdefault("contribution_quantity", value.get("quantity"))
+        if row["skipped"] or row["work_date"] is None:
+            continue
+        if row["context"].get("identity_resolved") and row["driver_assignment_id"] is not None:
+            by_driver_day[(row["driver_id"], row["work_date"])].append(row)
+        elif row["context"].get("potential_driver_ids"):
+            for driver_id in row["context"]["potential_driver_ids"]:
+                potential_rows[(driver_id, row["work_date"])].append(row)
+
+    def append_issue(row, column, severity, code, message, value=None, *, target_id=None):
+        item = {"file_ordinal": row["file_ordinal"], "unit_name": row["unit_name"],
+                "source_row": row["source_row"], "column": column, "severity": severity,
+                "code": code, "message": message, "value": value}
+        if target_id is not None:
+            item["_target_id"] = target_id
+        row["issues"].append(item)
+        issues.append(item)
+
+    deferred_codes = {"IMPORT_QUANTITY_INVALID", "IMPORT_NEW_SOURCE_NOT_ELIGIBLE",
+                      "IMPORT_VALUE_CONFLICT", "IMPORT_STATUS_DECISION_REQUIRED",
+                      "IMPORT_DAY_OFF_DECISION_REQUIRED", "IMPORT_SUM_INPUT_MISSING"}
+    for (driver_id, work_date), group_rows in by_driver_day.items():
+        group_rows.sort(key=lambda row: (row["file_ordinal"], row["unit_name"], row["source_row"]))
+        assignment_ids = {row["driver_assignment_id"] for row in group_rows}
+        if len(assignment_ids) != 1:
+            representative = group_rows[0]
+            for index, row in enumerate(group_rows):
+                for value in row["values"].values():
+                    value["is_candidate"] = index == 0
+                    value["quantity"] = None
+                    value["is_blank"] = False
+                    value["aggregate_status"] = "withheld"
+                    value["aggregate_reason"] = "multiple_assignments"
+                    value["outcome"] = "Unresolved"
+            for row in group_rows:
+                append_issue(row, None, "Error", "IMPORT_ROW_ASSIGNMENT_CONFLICT",
+                             "Repeated Driver/day rows resolve to different Branch assignments; no aggregate is prepared.")
+            continue
+        policies = {encoded(row["context"].get("row_handling") or {"mode": "RejectRepeated"})
+                    for row in group_rows}
+        if len(policies) != 1:
+            for row in group_rows:
+                append_issue(row, None, "Error", "IMPORT_ROW_HANDLING_CONFLICT",
+                             "Source units use different repeated-row rules; no quantity is prepared.")
+            continue
+        policy_value = group_rows[0]["context"].get("row_handling") or {"mode": "RejectRepeated"}
+        mode = policy_value.get("mode", "RejectRepeated")
+        possible_rows = potential_rows.get((driver_id, work_date), [])
+        if mode == "RejectRepeated":
+            if len(group_rows) < 2:
+                if possible_rows:
+                    row = group_rows[0]
+                    for value in row["values"].values():
+                        value["outcome"] = "Unresolved"
+                    for possible in possible_rows:
+                        for target_id, value in possible["values"].items():
+                            if target_id in row["values"]:
+                                value["is_candidate"] = False
+                                value["quantity"] = None
+                    append_issue(row, None, "Warning", "IMPORT_ROW_CONTRIBUTION_WITHHELD",
+                                 "A known but unconfirmed Driver identity may add another row to this Driver/day.")
+                continue
+            for row in group_rows:
+                for value in row["values"].values():
+                    value["outcome"] = "Invalid"
+                    value["quantity"] = None
+                append_issue(row, None, "Error", "IMPORT_DUPLICATE_FACT",
+                             "The same resolved Driver and WorkDate occurs more than once in this Import.")
+            continue
+
+        target_ids = sorted({target for row in group_rows for target in row["values"]})
+        for target_id in target_ids:
+            members = [row for row in group_rows if target_id in row["values"]]
+            if not members:
+                continue
+            representative = members[0]
+            definition = definitions_by_target.get(f"Definition:{target_id}")
+            if definition is None:
+                continue
+            contributions = []
+            for row in members:
+                value = row["values"][target_id]
+                if value.get("contribution_error"):
+                    contributions.append({"state": "invalid", "error": value["contribution_error"]})
+                elif row["context"].get("category_invalid"):
+                    contributions.append({"state": "invalid", "error": "Category value is invalid."})
+                elif mode == "FilterThenSum" and row["context"].get("category_decision") is None:
+                    contributions.append({"state": "unknown_category"})
+                elif value.get("is_blank"):
+                    contributions.append({"state": "blank"})
+                else:
+                    raw_quantity = value.get("contribution_quantity", value.get("quantity"))
+                    try:
+                        number = Decimal(str(raw_quantity))
+                    except (InvalidOperation, ValueError, TypeError):
+                        number = None
+                    if number is None or not number.is_finite():
+                        contributions.append({"state": "invalid", "error": "An included source quantity is invalid."})
+                    else:
+                        contributions.append({"state": "present", "quantity": number})
+            for possible in possible_rows:
+                if target_id not in possible["values"]:
+                    continue
+                possible["values"][target_id]["is_candidate"] = False
+                possible["values"][target_id]["quantity"] = None
+                possible_value = possible["values"][target_id]
+                if possible_value.get("contribution_error"):
+                    contributions.append({"state": "invalid", "error": possible_value["contribution_error"]})
+                else:
+                    contributions.append({"state": "unresolved_identity"})
+            result = aggregate_quantity_contributions(
+                contributions, input_type=definition.input_type, max_work_digits=max_work_digits)
+            original = representative["values"][target_id]
+            for row in members:
+                for item in row["issues"][:]:
+                    if item["code"] in deferred_codes and item.get("_target_id") == target_id:
+                        row["issues"].remove(item)
+                        if item in issues:
+                            issues.remove(item)
+                value = row["values"][target_id]
+                value["is_candidate"] = row is representative
+                value["contribution_quantity"] = value.get("quantity")
+                if row is not representative:
+                    value["quantity"] = None
+                    value["outcome"] = "Blank"
+            original["quantity"] = canonical(result.get("quantity"))
+            original["is_blank"] = result["status"] in {"absent", "withheld"}
+            original["aggregate_status"] = result["status"]
+            original["aggregate_reason"] = result.get("reason")
+            if result["status"] == "invalid":
+                original["outcome"] = "Invalid"
+                append_issue(representative, original.get("source_column"), "Error",
+                             "IMPORT_QUANTITY_INVALID", str(result.get("reason") or "Combined quantity is invalid."),
+                             target_id=target_id)
+                continue
+            if result["status"] == "withheld":
+                original["outcome"] = (
+                    "Blank" if result.get("reason") == "incomplete_contribution" else "Unresolved")
+                append_issue(representative, original.get("source_column"), "Warning",
+                             "IMPORT_ROW_CONTRIBUTION_WITHHELD",
+                             "At least one included row is incomplete or unresolved; no partial quantity is prepared.",
+                             target_id=target_id)
+                continue
+            if result["status"] != "complete":
+                original["outcome"] = "Blank"
+                continue
+            current = original.get("current_quantity")
+            current_decimal = Decimal(str(current)) if current is not None else Decimal(0)
+            current_present = original.get("current_source_exists", False)
+            if any(row["context"].get("driver_identity", {}).get("requires_confirmation") for row in members):
+                outcome = "Unresolved"
+            elif current_decimal == result["quantity"]:
+                outcome = "Unchanged"
+            elif not current_present:
+                outcome = "New"
+            else:
+                outcome = "Conflict"
+            assignment_id = representative["driver_assignment_id"]
+            work_date = representative["work_date"]
+            assignment = next((item for item in context["assignments_by_driver"].get(
+                representative["driver_id"], []) if item["driverassignmentid"] == assignment_id), None)
+            fresh = bool(assignment and (assignment_id, work_date) in context["live_days"] and
+                         _is_snapshot_row_eligible_for_workdate(SimpleNamespace(**assignment), work_date))
+            quantity_value = result["quantity"]
+            if quantity_value > 0 and not fresh and not current_present:
+                outcome = "Invalid"
+                append_issue(representative, original.get("source_column"), "Error",
+                             "IMPORT_NEW_SOURCE_NOT_ELIGIBLE",
+                             "Existing-source rescue permits changing existing input on this date, not adding new source.",
+                             target_id=target_id)
+            else:
+                entry = context["entries"].get((assignment_id, work_date))
+                day_off = context["days"].get(work_date, False)
+                if quantity_value > 0 and outcome in {"New", "Conflict", "Unresolved"} and entry and entry["isoffreason"]:
+                    append_issue(representative, original.get("source_column"), "Conflict",
+                                 "IMPORT_STATUS_DECISION_REQUIRED",
+                                 "Positive work overlaps a held full-day-off Status; no Status removal is selected.",
+                                 target_id=target_id)
+                if quantity_value > 0 and outcome in {"New", "Conflict", "Unresolved"} and day_off:
+                    append_issue(representative, original.get("source_column"), "Conflict",
+                                 "IMPORT_DAY_OFF_DECISION_REQUIRED",
+                                 "Positive work is on a configured day off; no exception is accepted.",
+                                 target_id=target_id)
+            original["outcome"] = outcome
+            if outcome == "Conflict":
+                append_issue(representative, original.get("source_column"), "Conflict",
+                             "IMPORT_VALUE_CONFLICT",
+                             "Incoming combined quantity differs from the current quantity; no replacement is selected.",
+                             target_id=target_id)
 
 
 def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> dict:
@@ -187,11 +345,20 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
     mapping_semantics = []
     data_rows = candidates = selected_cells = 0
 
+    row_policy_meanings = {
+        encoded(_effective_row_policy(rule))
+        for source in sources for rule in source.get("quantity_rules", [])
+        if any(column is not None for column in rule.get("columns", []))
+    }
+    if len(row_policy_meanings) > 1:
+        raise ImportFailure("IMPORT_ROW_HANDLING_CONFLICT",
+                            "Selected source units use different repeated-row rules or category columns. Resolve row handling before preview.", 409)
+
     for source in sources:
         source_date = _date_source_semantics(source.get("date_source") or {})
         date_column = next((column for column, target in source["mapping"].items() if target == "WorkDate"), None)
         mapping = {str(column): target for column, target in source["mapping"].items()}
-        allowed_targets = {item["target"] for item in mapping_targets(definitions)}
+        allowed_targets = {item["target"] for item in mapping_targets(definitions)} | {"Filter"}
         if any(not str(column).isdigit() or int(column) < 1 or target not in allowed_targets
                for column, target in mapping.items()):
             raise ImportFailure("IMPORT_MAPPING_INVALID", "Saved target mapping is outside the current frozen period.", 422)
@@ -207,6 +374,24 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         if not quantity_rules:
             raise ImportFailure("IMPORT_MAPPING_REQUIRED_TARGET", "Map at least one Pay Item target.")
         definition_columns = {}
+        applicable_rules = [rule for rule in quantity_rules
+                            if any(column is not None for column in rule.get("columns", []))]
+        row_policies = {encoded(_effective_row_policy(rule)) for rule in applicable_rules}
+        if len(row_policies) > 1:
+            raise ImportFailure("IMPORT_ROW_HANDLING_CONFLICT",
+                                "Mapped targets use different repeated-row rules. Resolve row handling before preview.", 409)
+        row_policy = applicable_rules[0].get("row_handling") if applicable_rules else None
+        effective_row_policy = _effective_row_policy(applicable_rules[0]) if applicable_rules else {
+            "mode": "RejectRepeated"}
+        filter_column = next((column for column, role in mapped.items() if role == "Filter"), None)
+        category_decisions = {}
+        row_rule_mode = (row_policy or {}).get("mode", "RejectRepeated")
+        if row_rule_mode == "FilterThenSum":
+            if filter_column is None:
+                raise ImportFailure("IMPORT_RULE_PAYLOAD_UNSUPPORTED",
+                                    "A saved category rule has no resolved filter column.", 409)
+            category_decisions = {category_key_from_json(choice["category"]): choice["decision"]
+                                  for choice in row_policy.get("choices", [])}
         for rule in quantity_rules:
             target = rule.get("target")
             if (target not in definitions_by_target or rule.get("transform") not in {"Direct", "Sum"}
@@ -223,13 +408,25 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             return any(column is not None and not blank(item["cells"].get(str(column), _date_cell(None)))
                        for column in rule["columns"])
 
+        def is_known_excluded(item):
+            if row_rule_mode != "FilterThenSum" or filter_column is None:
+                return False
+            cell = item["cells"].get(str(filter_column))
+            try:
+                return category_decisions.get(typed_category_key(cell or _date_cell(None))) == "Exclude"
+            except CategoryEvidenceError:
+                return False
+
         has_sum_rule = any(rule["transform"] == "Sum" for _definition, rule in definition_columns.values())
-        active_rows = [item for item in raw_rows if any(
+        row_policy_activates_identity = has_sum_rule or row_rule_mode != "RejectRepeated"
+        active_rows = [item for item in raw_rows if not is_known_excluded(item) and (any(
             has_operand(item, rule) for _definition, rule in definition_columns.values())
-            or has_sum_rule and any(not blank(item["cells"].get(str(column), _date_cell(None)))
+            or row_policy_activates_identity and any(not blank(item["cells"].get(str(column), _date_cell(None)))
                                     for column, target in mapped.items()
                                     if target in IDENTIFIERS or
-                                    target == "WorkDate" and source_date.get("kind") == "column")]
+                                    target == "WorkDate" and source_date.get("kind") == "column")
+            or row_rule_mode == "FilterThenSum" and filter_column is not None
+            and not blank(item["cells"].get(str(filter_column), _date_cell(None))))]
         effective_date_column = date_column if source_date.get("kind") == "column" else None
         date_cells = [item["cells"].get(str(effective_date_column)) for item in active_rows] if effective_date_column else []
         date_order, order_state = infer_date_order(date_cells, period["start"], period["end"],
@@ -302,6 +499,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                for definition, rule in definition_columns.values()],
             "date_source": source_date,
             "date_order": date_order,
+            "row_handling": effective_row_policy,
             "header_row_number": inspection["header_row_number"],
             "headers": inspection.get("header_cells", []),
             "encoding": inspection.get("encoding"), "delimiter": inspection.get("delimiter"),
@@ -315,29 +513,73 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                   "unit_name": source["unit_name"]})
         for source_row in raw_rows:
             cells = source_row["cells"]
+            category_cell = cells.get(str(filter_column)) if filter_column is not None else None
+            category_key = None
+            category_decision = None
+            category_invalid = False
+            if row_rule_mode == "FilterThenSum":
+                try:
+                    category_key = typed_category_key(category_cell or _date_cell(None))
+                    category_decision = category_decisions.get(category_key)
+                except CategoryEvidenceError:
+                    category_invalid = True
+            proposed_excluded = category_decision == "Exclude"
             has_quantity = any(has_operand(source_row, rule)
                                for _definition, rule in definition_columns.values())
             has_identity_or_date = any(not blank(cells.get(str(column), _date_cell(None)))
                                        for column, kind in mapped.items()
                                        if kind in IDENTIFIERS or kind == "WorkDate" and effective_date_column is not None)
-            has_sum = any(rule["transform"] == "Sum" for _definition, rule in definition_columns.values())
-            skipped = not has_quantity and not (has_sum and has_identity_or_date)
+            skipped = proposed_excluded or (not has_quantity and not (row_policy_activates_identity and has_identity_or_date)
+                and not (row_rule_mode == "FilterThenSum" and filter_column is not None
+                         and not blank(category_cell or _date_cell(None))))
             data_rows += 0 if skipped else 1
-            candidates += sum(any(column is not None for column in rule["columns"])
-                              for _definition, rule in definition_columns.values())
+            candidates += 0 if skipped else sum(any(column is not None for column in rule["columns"])
+                                                for _definition, rule in definition_columns.values())
             selected_cells += len(mapped) + sum(sum(column is not None for column in rule["columns"])
                                                 for _definition, rule in definition_columns.values())
             row_issues: list[dict] = []
 
-            def issue(column, severity, code, message, *, value_override=None):
+            def issue(column, severity, code, message, *, value_override=None, target_id=None):
                 value = cells.get(str(column)) if column else None
                 item = {"file_ordinal": source["file_ordinal"], "unit_name": source["unit_name"],
                         "source_row": source_row["source_row"], "column": int(column) if column else None,
                         "severity": severity, "code": code, "message": message,
                         "value": (value_override if value_override is not None else
                                   None if value is None else canonical(value.get("value")))}
+                if target_id is not None:
+                    item["_target_id"] = target_id
                 row_issues.append(item)
                 issues.append(item)
+
+            if proposed_excluded:
+                exclusion = {"status": "proposed_excluded", "rule": "FilterThenSum",
+                             "category": {"type": category_key[0], "value": category_key[1]}}
+                source_semantics = {"excluded": exclusion,
+                                    "source": [source["file_ordinal"], source["unit_name"], source_row["source_row"]],
+                                    "structure": source["structure_fingerprint"]}
+                row_fp = fingerprint("row", source_semantics)
+                output_rows.append({
+                    "file_ordinal": source["file_ordinal"], "unit_name": source["unit_name"],
+                    "source_row": source_row["source_row"], "source_unit_id": source.get("source_unit_id"),
+                    "source_record_id": None, "driver_id": None, "driver_assignment_id": None,
+                    "work_date": None, "row_fingerprint": row_fp, "skipped": True,
+                    "raw_payload": {key: {"value": canonical(cell.get("value")), "kind": cell.get("kind"),
+                                          "formula": bool(cell.get("formula")),
+                                          "missing_cache": bool(cell.get("missing_cache"))}
+                                    for key, cell in cells.items()},
+                    "values": {}, "issues": [], "identifiers": [],
+                    "context": {"proposed_exclusion": exclusion},
+                    "group_fingerprint": fingerprint("excluded-source", {
+                        "source_unit": [source["file_ordinal"], source["unit_name"]],
+                        "category": exclusion["category"]}),
+                    "driver_display": {}, "semantic": source_semantics,
+                })
+                continue
+            if row_rule_mode == "FilterThenSum" and not skipped and (category_invalid or category_decision is None):
+                issue(filter_column, "Error" if category_invalid else "Warning",
+                      "IMPORT_CATEGORY_VALUE_INVALID" if category_invalid else "IMPORT_CATEGORY_UNRESOLVED",
+                      "This category value has no Include or Exclude choice; affected quantities are withheld.",
+                      value_override=None if category_cell is None else canonical(category_cell.get("value")))
 
             provided_identifiers = []
             row_error = False
@@ -361,6 +603,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             driver_id = identity["driver_id"]
             proposed = identity["status"] == "Proposed"
             identity_requires_confirmation = identity["requires_confirmation"]
+            identity_resolved = identity["status"] == "Exact" and not identity_requires_confirmation
             if identity["issue_code"] and not skipped:
                 row_error = identity["issue_severity"] == "Error"
                 issue_column = (provided_identifiers[0]["column"] if provided_identifiers else
@@ -458,6 +701,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
             values = {}
             semantic_values = {}
             for target, (definition, rule) in definition_columns.items():
+                defid = str(definition.payroll_period_definition_id)
                 columns = rule["columns"]
                 is_sum = rule["transform"] == "Sum"
                 issue_column = next((item for item in columns if item is not None), None)
@@ -466,7 +710,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 if is_sum:
                     value, error, raw_operands, missing_sum, error_column = _sum_quantity(
                         cells, columns, definition,
-                        policy.max_numeric_work_digits if policy else DEFAULT_IMPORT_RESOURCE_POLICY.max_numeric_work_digits)
+                        policy.max_numeric_work_digits if policy else DEFAULT_IMPORT_RESOURCE_POLICY.max_numeric_work_digits,
+                        validate_result=row_rule_mode == "RejectRepeated")
                     if error_column is not None:
                         issue_column = error_column
                     cell = {"value": canonical(value), "kind": "number", "formula": False,
@@ -478,6 +723,8 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                     is_blank = blank(cell)
                     if skipped:
                         value, error = None, None
+                    elif row_rule_mode != "RejectRepeated":
+                        value, error, is_blank = parse_sum_operand(cell)
                     else:
                         value, error = quantity(cell, SimpleNamespace(input_type=definition.input_type))
                 source_columns = [int(item) for item in columns if item is not None]
@@ -485,7 +732,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                     if is_sum and not skipped:
                         issue(None, "Warning", "IMPORT_SUM_INPUT_MISSING",
                               "A required Sum input is missing or blank; no quantity is supplied for this target.",
-                              value_override=raw_operands)
+                              value_override=raw_operands, target_id=defid)
                     semantic_values[definition.code] = {
                         "transform": "Sum" if is_sum else "Direct",
                         "operands": raw_operands if is_sum else None,
@@ -515,37 +762,46 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 fresh = bool(assignment and date_value and
                              (assignment_id, date_value) in context["live_days"] and
                              _is_snapshot_row_eligible_for_workdate(SimpleNamespace(**assignment), date_value))
-                if value is not None and assignment_id and date_value and value > 0 and not fresh and not current_present:
+                if (row_rule_mode == "RejectRepeated" and value is not None and assignment_id and date_value
+                        and value > 0 and not fresh and not current_present):
                     outcome = "Invalid"
                     error = "Existing-source rescue permits changing existing input on this date, not adding new source."
                 if error:
                     issue(issue_column, "Error", "IMPORT_QUANTITY_INVALID" if not (value is not None and not fresh and not current_present)
                           else "IMPORT_NEW_SOURCE_NOT_ELIGIBLE", error,
-                          value_override=raw_operands if raw_operands is not None else None)
-                elif missing_sum and not skipped:
+                          value_override=raw_operands if raw_operands is not None else None,
+                          target_id=defid)
+                elif missing_sum and not skipped and row_rule_mode == "RejectRepeated":
                     issue(issue_column, "Warning",
                           "IMPORT_SUM_INPUT_MISSING",
                           "A required Sum input is missing or blank; no quantity is supplied for this target.",
-                          value_override=raw_operands)
-                if outcome == "Conflict":
+                          value_override=raw_operands, target_id=defid)
+                if outcome == "Conflict" and row_rule_mode == "RejectRepeated":
                     issue(issue_column, "Conflict", "IMPORT_VALUE_CONFLICT",
-                          "Incoming quantity differs from the current quantity; no replacement is selected.")
+                          "Incoming quantity differs from the current quantity; no replacement is selected.",
+                          target_id=defid)
                 entry_state = context["entries"].get((assignment_id, date_value)) if assignment_id and date_value else None
                 day_off = bool(date_value and context["days"].get(date_value, False))
-                if value is not None and value > 0 and outcome in ("New", "Conflict", "Unresolved") and entry_state and entry_state["isoffreason"]:
+                if (row_rule_mode == "RejectRepeated" and value is not None and value > 0
+                        and outcome in ("New", "Conflict", "Unresolved") and entry_state and entry_state["isoffreason"]):
                     issue(issue_column, "Conflict", "IMPORT_STATUS_DECISION_REQUIRED",
-                          "Positive work overlaps a held full-day-off Status; no Status removal is selected.")
-                if value is not None and value > 0 and outcome in ("New", "Conflict", "Unresolved") and day_off:
+                          "Positive work overlaps a held full-day-off Status; no Status removal is selected.",
+                          target_id=defid)
+                if (row_rule_mode == "RejectRepeated" and value is not None and value > 0
+                        and outcome in ("New", "Conflict", "Unresolved") and day_off):
                     issue(issue_column, "Conflict", "IMPORT_DAY_OFF_DECISION_REQUIRED",
-                          "Positive work is on a configured day off; no exception is accepted.")
-                defid = str(definition.payroll_period_definition_id)
+                          "Positive work is on a configured day off; no exception is accepted.",
+                          target_id=defid)
                 source_columns = [int(item) for item in columns if item is not None]
                 raw_value = raw_operands if raw_operands is not None else canonical(cell.get("value"))
                 values[defid] = {"source_column": source_columns[0] if source_columns else None,
                                  "source_columns": source_columns, "transform": "Sum" if is_sum else "Direct",
                                  "raw_value": raw_value,
                                  "quantity": canonical(value), "is_blank": is_blank, "outcome": outcome,
-                                 "current_quantity": canonical(current), "current_source_exists": current_present}
+                                 "current_quantity": canonical(current), "current_source_exists": current_present,
+                                 "is_candidate": True,
+                                 "contribution_quantity": canonical(value),
+                                 "contribution_error": error}
                 semantic_values[definition.code] = (
                     {"transform": "Sum" if is_sum else "Direct", "operands": raw_operands,
                      "blank": is_blank, "quantity": canonical(value), "error": source_quantity_error}
@@ -558,6 +814,9 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                                         for item in identifiers),
                                 "date": source_date_value,
                                 "date_source": source_date, "values": semantic_values,
+                                "category": (None if category_key is None else
+                                             {"type": category_key[0], "value": category_key[1]}),
+                                "category_decision": category_decision,
                                 "unit_kind": source.get("unit_kind"),
                                 "structure": source["structure_fingerprint"],
                                 "source_contract": source["row_contract_fingerprint"], "skipped": skipped}
@@ -575,7 +834,15 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                 "context": {"status_code": (context["entries"].get((assignment_id, date_value)) or {}).get("statuscode"),
                             "day_off": bool(date_value and context["days"].get(date_value, False)),
                             "source_date": source_date, "date_interpretation": date_review,
-                            "driver_identity": driver_identity},
+                            "driver_identity": driver_identity,
+                            "identity_resolved": identity_resolved,
+                            "potential_driver_ids": (identity["review_candidate_ids"]
+                                                      if not identity_resolved else []),
+                            "category": (None if category_key is None else
+                                         {"type": category_key[0], "value": category_key[1]}),
+                            "category_decision": category_decision,
+                            "category_invalid": category_invalid,
+                            "row_handling": {"mode": row_rule_mode}},
                 "group_fingerprint": fingerprint("group", {
                     "driver": driver_meaning(context["drivers_by_id"][driver_id]) if driver_id in context["drivers_by_id"] else None,
                     "date": date_value.isoformat() if date_value else None,
@@ -595,26 +862,10 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
         if selected_cells > policy.max_selected_cells:
             raise ImportFailure("IMPORT_SELECTED_CELL_LIMIT_EXCEEDED", "Selected batch exceeds its configured cell limit.")
 
-    # A mapped nonblank candidate may occur only once across the entire batch.
-    duplicate_index = defaultdict(list)
-    for row in output_rows:
-        if row["skipped"] or row["driver_assignment_id"] is None or row["work_date"] is None:
-            continue
-        for definition_id, value in row["values"].items():
-            if not value["is_blank"]:
-                duplicate_index[(row["driver_assignment_id"], row["work_date"], definition_id)].append((row, value))
-    for entries in duplicate_index.values():
-        if len(entries) < 2:
-            continue
-        for row, value in entries:
-            value["outcome"] = "Invalid"
-            issue = {"file_ordinal": row["file_ordinal"], "unit_name": row["unit_name"],
-                     "source_row": row["source_row"], "column": value["source_column"],
-                     "severity": "Error", "code": "IMPORT_DUPLICATE_FACT",
-                     "message": "The same Driver, WorkDate and Pay Item occurs more than once in this Import.",
-                     "value": value["raw_value"]}
-            row["issues"].append(issue)
-            issues.append(issue)
+    _apply_row_handling(output_rows, definitions_by_target, context, issues,
+                        max_work_digits=(policy or DEFAULT_IMPORT_RESOURCE_POLICY).max_numeric_work_digits)
+    candidates = sum(value.get("is_candidate", False)
+                     for row in output_rows for value in row["values"].values())
 
     mapping_fp = fingerprint("mapping", {"period": period_meaning(period),
                                           "layouts": sorted(mapping_semantics, key=encoded)})
@@ -659,6 +910,7 @@ def build_batch_preview(sources: list[dict], context: dict, *, policy=None) -> d
                                                       for i in issues), key=encoded),
                                     "decisions": None, "confirmations": None})
     counts = Counter(rows=len(output_rows), skipped=sum(row["skipped"] for row in output_rows),
+                     prepared_excluded_rows=sum("proposed_exclusion" in row["context"] for row in output_rows),
                      errors=0, warnings=0, conflicts=0, new=0, unchanged=0, blank=0, invalid=0,
                      unresolved=0, conflict_cells=0, error_rows=0, warning_rows=0, conflict_rows=0)
     for item in issues:

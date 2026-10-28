@@ -48,6 +48,8 @@ class ImportResourcePolicy:
     max_mapping_request_bytes: int = 2_000_000
     max_identity_lookup_rows: int = 100_000
     identity_lookup_batch_rows: int = 512
+    category_page_default: int = 50
+    category_page_max: int = 200
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -62,6 +64,7 @@ class ImportResourcePolicy:
             ("source_cell_page_default", "source_cell_page_max"),
             ("target_page_default", "target_page_max"),
             ("header_page_default", "header_page_max"),
+            ("category_page_default", "category_page_max"),
         ):
             if getattr(self, default_name) > getattr(self, maximum_name):
                 raise ValueError(f"{default_name} must not exceed {maximum_name}")
