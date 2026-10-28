@@ -700,6 +700,75 @@ async def test_category_filter_sums_included_rows_and_keeps_exclusions_out_of_dr
     assert "Filter" not in reset_payload["shared_columns"]
 
 
+async def test_category_inspection_returns_the_requested_window_with_whole_column_totals(
+    p3c_client, p3c_app, p3c_engine, tenant, monkeypatch,
+):
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    driver = await _eligible_driver_date(p3c_engine, tenant, period)
+    definition_id, definition_code = await _definition(p3c_engine, tenant, period)
+    categories = [f"Category-{index}" for index in range(7)]
+    lines = [f"{driver['drivernumber']},{driver['workdate'].isoformat()},1,{category}"
+             for category in categories + [categories[0]]]
+    content = (f"DriverNumber,WorkDate,{definition_code},Category\n" + "\n".join(lines) + "\n").encode()
+    uploaded = await _upload(p3c_client, tenant, period, [("categories.csv", content)])
+    assert uploaded.status_code == 200, uploaded.text
+    created = uploaded.json()
+    mapped = await map_import_columns(p3c_client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
+    assert mapped.status_code == 200, mapped.text
+    revision = mapped.json()["revision"]
+    path = f"/payroll/imports/{created['import_id']}/categories/inspect"
+
+    async def inspect(**window):
+        response = await p3c_client.post(
+            path, json={"expected_revision": revision, "column": {"header": "Category"}, **window},
+            headers=tenant.admin)
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def key(item):
+        return item["category"]["value"]
+
+    everything = await inspect(offset=0, limit=50)
+    assert [key(item) for item in everything["items"]] == sorted(categories)
+    assert everything["next_offset"] is None
+    column_facts = {name: value for name, value in everything.items()
+                    if name not in ("items", "offset", "limit", "next_offset")}
+    assert column_facts["filtered_count"] == len(categories)
+    assert column_facts["distinct_count"] == column_facts["observed_distinct_count"] == len(categories)
+    assert column_facts["inspected_row_count"] == len(categories) + 1
+    assert column_facts["suitable"] is True
+
+    pages = []
+    offset = 0
+    while True:
+        page = await inspect(offset=offset, limit=3)
+        pages.append(page)
+        assert page["offset"] == offset and page["limit"] == 3
+        assert {name: value for name, value in page.items()
+                if name not in ("items", "offset", "limit", "next_offset")} == column_facts
+        if page["next_offset"] is None:
+            break
+        assert page["next_offset"] == offset + 3
+        offset = page["next_offset"]
+    assert [len(page["items"]) for page in pages] == [3, 3, 1]
+    paged = [key(item) for page in pages for item in page["items"]]
+    assert len(set(paged)) == len(paged)
+    assert paged == [key(item) for item in everything["items"]]
+    assert {key(item): item["count"] for page in pages for item in page["items"]} == {
+        name: (2 if name == categories[0] else 1) for name in categories}
+
+    beyond = await inspect(offset=len(categories) + 5, limit=3)
+    assert beyond["items"] == [] and beyond["next_offset"] is None
+    assert beyond["filtered_count"] == len(categories)
+
+    monkeypatch.setattr(p3c_app.state.settings, "IMPORT_CATEGORY_PAGE_DEFAULT", 4)
+    defaulted = await inspect(offset=0)
+    assert defaulted["limit"] == 4
+    assert [key(item) for item in defaulted["items"]] == [key(item) for item in everything["items"][:4]]
+    assert defaulted["next_offset"] == 4
+
+
 async def test_row_grid_keeps_mixed_groups_visible_and_hides_all_excluded_groups(p3c_engine):
     predicate = _visible_group_predicate("g", "test_records")
     async with p3c_engine.connect() as db:

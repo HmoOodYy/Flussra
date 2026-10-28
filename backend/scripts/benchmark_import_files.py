@@ -813,7 +813,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 assert page["suitable"] is True and page["invalid_value_count"] == 0
                 assert len(categories) == CATEGORY_COUNT == page["distinct_count"]
                 assert sum(item["count"] for item in categories) == totals["rows"] == page["inspected_row_count"]
-                # The requested window is recorded, not assumed: offset and limit must narrow the page.
+                # offset and limit must narrow each page: full pages first, then the remainder.
                 probe, probe_metrics = await timed_request(client, ordinary_path, tenant.admin, json_request(
                     client, "POST", f"/payroll/imports/{iid}/categories/inspect", {
                         "expected_revision": rejected["revision"], "column": {"header": CATEGORY_HEADER},
@@ -823,6 +823,10 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                                 "offset_applied": probe["items"][:1] != first_page_head,
                                 "request_seconds": probe_metrics["request_seconds"],
                                 "response_bytes": probe_metrics["response_bytes"]}
+                expected_pages = [page_size] * (CATEGORY_COUNT // page_size) + (
+                    [CATEGORY_COUNT % page_size] if CATEGORY_COUNT % page_size else [])
+                assert [item["items"] for item in category_pages] == expected_pages, category_pages
+                assert paging_probe["limit_honored"] and paging_probe["offset_applied"], paging_probe
                 assert all(item["observed"] for item in categories)
                 size, send = json_request(client, "PUT", f"/payroll/imports/{iid}/row-handling",
                     {"expected_revision": rejected["revision"], "mode": "SumRows"}, tenant.admin)

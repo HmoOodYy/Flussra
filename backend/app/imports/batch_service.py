@@ -2133,7 +2133,8 @@ async def inspect_categories(request, engine, cid: int, uid: int, iid: int,
                 "invalid_value_count": result["invalid_value_count"],
                 "invalid_samples": result["invalid_samples"]}
         return await anyio.to_thread.run_sync(partial(
-            bounded_page, base, all_values, body.offset, limit, len(all_values), policy=policy))
+            bounded_page, base, all_values[body.offset:body.offset + limit], body.offset, limit,
+            len(all_values), policy=policy))
 
 
 async def update_row_handling(request, engine, cid: int, uid: int, iid: int,
