@@ -1,19 +1,25 @@
+import asyncio
 import csv
 import io
+import json
 from collections import Counter
 from datetime import date, timedelta
 from decimal import Decimal
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from openpyxl import load_workbook
 
 from app.imports.canonical import extract_canonical_file
 from app.imports.date_interpretation import interpret_date
+from app.imports.errors import ImportFailure
 from app.imports.headers import combined_column_count
 from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
 from app.product_policy import DEFAULT_PRODUCT_POLICY
 from scripts.benchmark_import_files import (
+    ACCEPTANCE_SCENARIOS,
     BASE_CURRENT_SCENARIOS,
     CAPABILITY_SCENARIOS,
     CATEGORY_COUNT,
@@ -23,13 +29,19 @@ from scripts.benchmark_import_files import (
     IDENTITY_FINDINGS,
     MISSING_COVERAGE_DAY_INDEX,
     REPEATS,
+    Phases,
+    canonical_boundary_payloads,
     category_excluded,
     category_label,
+    filename_date_selection,
     identity_kind,
     mapping_expected,
+    mapping_requests,
+    renamed_repeat_files,
     repeated_category,
     repeated_expected,
     repeated_totals,
+    run_scenarios,
     scenario_coverage,
     scenario_covered_days,
     source_files,
@@ -138,8 +150,8 @@ def test_current_generated_workloads_fit_default_import_policy():
 
 
 def test_capability_workloads_fit_default_product_and_resource_policy():
-    assert set(CAPABILITY_SCENARIOS) == set(CURRENT_SCENARIOS) - set(BASE_CURRENT_SCENARIOS)
-    for scenario in CAPABILITY_SCENARIOS:
+    assert set(CAPABILITY_SCENARIOS) | set(ACCEPTANCE_SCENARIOS) == set(CURRENT_SCENARIOS) - set(BASE_CURRENT_SCENARIOS)
+    for scenario in (*CAPABILITY_SCENARIOS, *ACCEPTANCE_SCENARIOS):
         fixture = _scenario_fixture(scenario)
         files = source_files(scenario, fixture)
         assert 0 < len(files) <= DEFAULT_IMPORT_RESOURCE_POLICY.max_files
@@ -152,13 +164,19 @@ def test_capability_workloads_fit_default_product_and_resource_policy():
             headers.append(rows[0])
             data_rows += len(rows) - 1
             assert len(rows) - 1 <= DEFAULT_IMPORT_RESOURCE_POLICY.max_rows_per_unit
-        assert all(header == headers[0] for header in headers)
+        if scenario == "current_partial_overlap_csv":
+            assert len({tuple(header) for header in headers}) == 2
+            assert set().union(*(set(header) for header in headers)) == {
+                "DriverNumber", *(definition.code for definition in fixture["definitions"])}
+        else:
+            assert all(header == headers[0] for header in headers)
         assert combined_column_count(headers) <= DEFAULT_PRODUCT_POLICY.max_import_combined_columns
         assert data_rows <= DEFAULT_IMPORT_RESOURCE_POLICY.max_data_rows
         largest = max(files, key=lambda item: len(item[1]))
         canonical = extract_canonical_file(largest[1], largest[0])
         assert canonical["canonical_byte_count"] <= DEFAULT_PRODUCT_POLICY.max_import_canonical_file_bytes
-        assert scenario_coverage(scenario)["semantic_repeat_recognition"] is False
+        assert scenario_coverage(scenario)["semantic_repeat_recognition"] is (
+            scenario == "current_completed_repeat_csv")
         assert scenario_coverage(scenario)["final_revised_contract_acceptance"] is False
 
 
@@ -166,7 +184,9 @@ def test_each_capability_workload_claims_only_the_capability_it_exercises():
     claimed = {scenario: {key for key, value in scenario_coverage(scenario).items()
                           if value is True and key in {
                               "per_target_mapping_direct_and_sum", "driver_identity_discovery",
-                              "date_authority_inference_and_review", "repeated_rows_and_categories"}}
+                              "date_authority_inference_and_review", "repeated_rows_and_categories",
+                              "completed_input_repeat_after_manual_edit", "partial_column_overlap",
+                              "canonical_byte_boundary_admission"}}
                for scenario in CURRENT_SCENARIOS}
     assert claimed["current_target_mapping_csv"] == {"per_target_mapping_direct_and_sum"}
     assert claimed["current_identity_csv"] == {"driver_identity_discovery"}
@@ -175,6 +195,10 @@ def test_each_capability_workload_claims_only_the_capability_it_exercises():
         assert claimed[scenario] == {"date_authority_inference_and_review"}
     for scenario in BASE_CURRENT_SCENARIOS:
         assert claimed[scenario] == set()
+    assert claimed["current_completed_repeat_csv"] == {
+        "completed_input_repeat_after_manual_edit"}
+    assert claimed["current_partial_overlap_csv"] == {"partial_column_overlap"}
+    assert claimed["current_canonical_byte_boundary_csv"] == {"canonical_byte_boundary_admission"}
 
 
 def test_target_mapping_workload_mixes_direct_sum_duplicate_headers_and_blank_operands():
@@ -305,3 +329,118 @@ def test_repeated_row_workload_has_repeated_driver_days_and_more_categories_than
     assert repeated_expected(0, 0, 3, filtered=False) == [6, 6, 3]
     assert repeated_expected(0, 0, 3, filtered=True) == [6, 6, 3]
     assert repeated_expected(0, 1, 3, filtered=True) == [5, 4, 2]
+
+
+def test_partial_overlap_workload_alternates_two_compatible_daily_layouts():
+    fixture = _scenario_fixture("current_partial_overlap_csv")
+    files = source_files("current_partial_overlap_csv", fixture)
+    assert len(files) == len(fixture["days"]) == 31
+    headers = []
+    for (name, payload), day in zip(files, fixture["days"], strict=True):
+        rows = _csv_rows(payload)
+        assert name == f"{day.isoformat()}.csv"
+        assert len(rows) == len(fixture["drivers"]) + 1
+        headers.append(tuple(rows[0]))
+    assert len(set(headers)) == 2
+    assert set(headers[0]) == {"DriverNumber", "Q1", "Q2", "Q3"}
+    assert set(headers[1]) == {"DriverNumber", "Q1", "Q4", "Q5", "Q6"}
+    assert {"DriverNumber", *(definition.code for definition in fixture["definitions"])} == set().union(
+        *(set(header) for header in headers))
+    assert scenario_coverage("current_partial_overlap_csv")["partial_column_overlap"] is True
+
+
+def test_completed_repeat_workload_uses_same_input_with_written_date_filenames():
+    fixture = _scenario_fixture("current_completed_repeat_csv")
+    initial = source_files("current_completed_repeat_csv", fixture)
+    repeat = renamed_repeat_files(initial, fixture["days"])
+    assert len(initial) == len(repeat) == len(fixture["days"]) == 31
+    for (initial_name, initial_payload), (repeat_name, repeat_payload), day in zip(
+            initial, repeat, fixture["days"], strict=True):
+        assert initial_name == f"{day.isoformat()}.csv"
+        assert repeat_name == f"{written_date(day)}.csv"
+        assert initial_payload == repeat_payload
+    assert {len(_csv_rows(payload)[0]) for _name, payload in initial} == {15}
+    assert scenario_coverage("current_completed_repeat_csv")["semantic_repeat_recognition"] is True
+    assert scenario_coverage("current_completed_repeat_csv")["final_revised_contract_acceptance"] is False
+
+
+def test_written_month_repeat_selects_filename_authority_without_legacy_candidates():
+    # A08 interpretation handles written-month names; inspection's old candidate
+    # list is not the authority and can legitimately be empty for these labels.
+    assert filename_date_selection({"inspection": {"filename_date_candidates": []}}) == {"kind": "filename"}
+
+
+def test_canonical_boundary_mapping_explicitly_ignores_padded_notes_column():
+    shared, ignored, targets = mapping_requests(
+        "current_canonical_byte_boundary_csv", {"layouts": []},
+        [["DriverNumber", "Q1", "Notes"]], {"Q1": 101}, [SimpleNamespace(code="Q1")])
+    assert shared == {"DriverNumber": {"header": "DriverNumber"}}
+    assert ignored == [{"header": "Notes"}]
+    assert targets == [{"target": "Definition:101", "transform": "Direct",
+                        "inputs": [{"header": "Q1"}], "expected_head_revision": 0}]
+
+
+def test_canonical_boundary_workload_constructs_exact_and_one_byte_over_files():
+    fixture = _scenario_fixture("current_canonical_byte_boundary_csv")
+    exact, over, evidence = canonical_boundary_payloads(fixture)
+    accepted = extract_canonical_file(exact, "2026-01-01.csv")
+    assert accepted["canonical_byte_count"] == DEFAULT_PRODUCT_POLICY.max_import_canonical_file_bytes
+    assert evidence["accepted_canonical_bytes"] == accepted["canonical_byte_count"]
+    assert evidence["rejected_canonical_bytes"] == evidence["limit_bytes"] + 1
+    assert len(exact) <= DEFAULT_IMPORT_RESOURCE_POLICY.max_file_bytes
+    assert len(over) <= DEFAULT_IMPORT_RESOURCE_POLICY.max_file_bytes
+    with pytest.raises(ImportFailure) as exc:
+        extract_canonical_file(over, "2026-01-01.csv")
+    assert exc.value.code == "IMPORT_CANONICAL_FILE_TOO_LARGE"
+    assert scenario_coverage("current_canonical_byte_boundary_csv")["canonical_byte_boundary_admission"] is True
+
+
+def test_async_benchmark_phase_timer_includes_awaited_snapshot_work():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def snapshot():
+        started.set()
+        await release.wait()
+        return []
+
+    fake_module = SimpleNamespace(_completed_receipt_snapshot=snapshot)
+    phases = Phases()
+    phases._wrap_async(fake_module, "_completed_receipt_snapshot", "completed_receipt_snapshot")
+
+    async def invoke():
+        task = asyncio.create_task(fake_module._completed_receipt_snapshot())
+        await started.wait()
+        await asyncio.sleep(0.02)
+        release.set()
+        await task
+
+    asyncio.run(invoke())
+    assert phases.calls["completed_receipt_snapshot"] == 1
+    assert phases.values["completed_receipt_snapshot"] >= 0.015
+    phases.restore()
+
+
+def test_scenario_collection_reports_flushed_progress_and_keeps_json_artifacts(
+    tmp_path, monkeypatch, capsys,
+):
+    calls = []
+
+    def fake_run(command, *, check, env):
+        assert check is True and isinstance(env, dict)
+        scene = command[command.index("--scenario") + 1]
+        destination = command[command.index("--output") + 1]
+        calls.append(scene)
+        Path(destination).write_text(json.dumps({"scenario": scene}), encoding="utf-8")
+
+    monkeypatch.setattr("scripts.benchmark_import_files.subprocess.run", fake_run)
+    output = tmp_path / "current.json"
+    run_scenarios(("shape-one", "shape-two"), output)
+
+    assert calls == ["shape-one", "shape-two"]
+    assert capsys.readouterr().out.splitlines() == [
+        "Starting shape-one (1/2)", "Completed shape-one (1/2)",
+        "Starting shape-two (2/2)", "Completed shape-two (2/2)",
+    ]
+    assert json.loads(output.read_text(encoding="utf-8")) == [
+        {"scenario": "shape-one"}, {"scenario": "shape-two"}]

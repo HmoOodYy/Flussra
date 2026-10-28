@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -36,11 +37,16 @@ SCENARIOS = ("representative_csv", "monthly_daily_csv", "monthly_daily_xlsx", "r
 BASE_CURRENT_SCENARIOS = ("current_daily_csv", "current_daily_xlsx", "current_daily_issue_csv")
 CAPABILITY_SCENARIOS = ("current_target_mapping_csv", "current_identity_csv", "current_date_column_csv",
                         "current_filename_dates_csv", "current_sheet_dates_xlsx", "current_repeated_rows_csv")
-CURRENT_SCENARIOS = (*BASE_CURRENT_SCENARIOS, *CAPABILITY_SCENARIOS)
+ACCEPTANCE_SCENARIOS = ("current_completed_repeat_csv", "current_partial_overlap_csv",
+                        "current_canonical_byte_boundary_csv")
+CURRENT_SCENARIOS = (*BASE_CURRENT_SCENARIOS, *CAPABILITY_SCENARIOS, *ACCEPTANCE_SCENARIOS)
 # Drivers in the period Branch, Pay Item definitions, period days, Company Drivers outside that Branch.
 CURRENT_DIMENSIONS = {"current_target_mapping_csv": (150, 10, 31, 0), "current_identity_csv": (150, 4, 31, 1500),
                       "current_date_column_csv": (150, 6, 31, 0), "current_filename_dates_csv": (150, 6, 31, 0),
-                      "current_sheet_dates_xlsx": (150, 6, 31, 0), "current_repeated_rows_csv": (150, 3, 31, 0)}
+                      "current_sheet_dates_xlsx": (150, 6, 31, 0), "current_repeated_rows_csv": (150, 3, 31, 0),
+                      "current_completed_repeat_csv": (150, 14, 31, 0),
+                      "current_partial_overlap_csv": (150, 6, 31, 0),
+                      "current_canonical_byte_boundary_csv": (150, 1, 1, 0)}
 # One day is deliberately absent so the Date review reports missing coverage.
 DATE_AUTHORITIES = {"current_date_column_csv": "column", "current_filename_dates_csv": "filename",
                     "current_sheet_dates_xlsx": "sheet"}
@@ -54,8 +60,9 @@ IDENTITY_FINDINGS = {"name_variation": "IMPORT_DRIVER_NAME_DISCREPANCY", "unknow
 REPEATS = 3
 CATEGORY_COUNT = 120
 CATEGORY_HEADER = "Category"
-NOT_COVERED = ("Compatible current-head reuse is not exercised: no public route completes an Import or promotes a "
-               "reusable rule head, and the tests only create one with raw SQL writes.")
+NOT_COVERED = ("Successful Import completion/application and active rule-head promotion remain unimplemented; "
+               "the completed-repeat workload uses a controlled test-style Completed receipt fixture; "
+               "current-head reuse remains unexercised.")
 
 
 def scenario_dimensions(scene):
@@ -178,6 +185,53 @@ def _csv_bytes(header, rows):
     return buffer.getvalue().encode("utf-8")
 
 
+def canonical_boundary_payloads(fixture):
+    """Build accepted/over-limit CSVs from production canonical-byte measurements."""
+    from app.imports.canonical import extract_canonical_file
+    from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
+    from app.product_policy import DEFAULT_PRODUCT_POLICY
+
+    target_bytes = DEFAULT_PRODUCT_POLICY.max_import_canonical_file_bytes
+    drivers = fixture["drivers"]
+    if not drivers:
+        raise ValueError("The canonical-boundary workload needs at least one Driver row.")
+    max_cell_chars = DEFAULT_IMPORT_RESOURCE_POLICY.max_cell_text_bytes
+    probe_policy = replace(DEFAULT_PRODUCT_POLICY, max_import_canonical_file_bytes=target_bytes + 1)
+
+    def payload_with_padding(total_chars):
+        per_row, remainder = divmod(total_chars, len(drivers))
+        if per_row + (remainder > 0) > max_cell_chars:
+            raise ValueError("Canonical boundary cannot fit within the per-cell text limit.")
+        rows = []
+        for index, driver in enumerate(drivers):
+            padding = per_row + (index < remainder)
+            rows.append([driver["drivernumber"], "1", "x" * padding])
+        return _csv_bytes(["DriverNumber", "Q1", "Notes"], rows)
+
+    def canonical_count(total_chars):
+        data = payload_with_padding(total_chars)
+        extracted = extract_canonical_file(data, "2026-01-01.csv", product_policy=probe_policy)
+        return extracted["canonical_byte_count"]
+
+    baseline_chars = len(drivers)
+    baseline_count = canonical_count(baseline_chars)
+    padding_chars = baseline_chars + (target_bytes - baseline_count)
+    maximum_chars = len(drivers) * max_cell_chars
+    if target_bytes <= baseline_count or padding_chars + 1 > maximum_chars:
+        raise ValueError("Canonical boundary cannot fit within the per-cell text limit.")
+    exact = payload_with_padding(padding_chars)
+    exact_count = canonical_count(padding_chars)
+    if exact_count != target_bytes:
+        raise ValueError(
+            f"Could not construct exact canonical boundary: expected {target_bytes}, got {exact_count}.")
+    over = payload_with_padding(padding_chars + 1)
+    over_count = canonical_count(padding_chars + 1)
+    if over_count != target_bytes + 1:
+        raise ValueError(f"One additional padding byte changed canonical size to {over_count}, not {target_bytes + 1}.")
+    return exact, over, {"limit_bytes": target_bytes, "accepted_canonical_bytes": exact_count,
+                         "rejected_canonical_bytes": over_count, "padding_characters": padding_chars}
+
+
 def _xlsx_bytes(name, header, rows):
     from openpyxl import Workbook
     book = Workbook(write_only=True)
@@ -222,6 +276,24 @@ def capability_files(scene, fixture):
         return [(f"driver-log-{number:02d}.xlsx", _xlsx_bytes(written_date(day), ["DriverNumber", *codes], (
             [driver["drivernumber"], *[1] * len(codes)] for driver in drivers)))
             for number, day in enumerate(covered, 1)]
+    if scene == "current_partial_overlap_csv":
+        if len(codes) != 6:
+            raise ValueError("The partial-overlap workload requires six target definitions.")
+        files = []
+        for day_index, day in enumerate(days):
+            available = [codes[0], *(codes[1:3] if day_index % 2 == 0 else codes[3:6])]
+            files.append((f"{day.isoformat()}.csv", _csv_bytes(
+                ["DriverNumber", *available],
+                ([driver["drivernumber"], *["1"] * len(available)] for driver in drivers))))
+        return files
+    if scene == "current_canonical_byte_boundary_csv":
+        if len(codes) != 1:
+            raise ValueError("The canonical-boundary workload requires one target definition.")
+        exact, _over, _evidence = canonical_boundary_payloads(fixture)
+        return [(f"{days[0].isoformat()}.csv", exact)]
+    if scene == "current_completed_repeat_csv":
+        return [(f"{day.isoformat()}.csv", _csv_bytes(["DriverNumber", *codes], (
+            [driver["drivernumber"], *["1"] * len(codes)] for driver in drivers))) for day in days]
     return [(f"{day.isoformat()}.csv", _csv_bytes(["DriverNumber", CATEGORY_HEADER, *codes], (
         [driver["drivernumber"], category_label(repeated_category(index, day_index[day], repeat)),
          *map(str, repeated_quantities(repeat, len(codes)))]
@@ -229,7 +301,7 @@ def capability_files(scene, fixture):
 
 
 def source_files(scene, fixture):
-    if scene in CAPABILITY_SCENARIOS:
+    if scene in CAPABILITY_SCENARIOS or scene in ACCEPTANCE_SCENARIOS:
         return capability_files(scene, fixture)
     definitions, drivers, days = fixture["definitions"], fixture["drivers"], fixture["days"]
     def csv_bytes(selected_definitions, selected_days, *, date_column):
@@ -296,6 +368,18 @@ class Phases:
         self.values[name] = self.values.get(name, 0) + time.perf_counter() - started
         self.calls[name] = self.calls.get(name, 0) + 1
 
+    def _wrap_async(self, module, name, label=None):
+        original = getattr(module, name)
+        phase = label or name
+        async def measured(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return await original(*args, **kwargs)
+            finally:
+                self._record(phase, started)
+        self.originals.append((module, name, original))
+        setattr(module, name, measured)
+
     def install(self):
         from app.imports import batch_service
         for name in ("_inspect_batch", "_materialize_batch", "build_batch_preview", "prepare_preview"):
@@ -308,6 +392,17 @@ class Phases:
                     self._record(_name, started)
             self.originals.append((batch_service, name, original))
             setattr(batch_service, name, measured)
+        self._wrap_async(batch_service, "_completed_receipt_snapshot", "completed_receipt_snapshot")
+        from app.imports import preview_model
+        original_match = preview_model.matching_completed_receipts
+        def measured_match(*args, **kwargs):
+            started = time.perf_counter()
+            try:
+                return original_match(*args, **kwargs)
+            finally:
+                self._record("matching_completed_receipts", started)
+        self.originals.append((preview_model, "matching_completed_receipts", original_match))
+        preview_model.matching_completed_receipts = measured_match
         from app.imports import preview_store
         original_copy = preview_store._copy_records
         async def measured_copy(db, table, columns, records):
@@ -494,6 +589,258 @@ async def source_counts(engine, tenant, period_id):
             {"cid": tenant.company_id, "pid": period_id})).mappings().one())
 
 
+async def canonical_workload_snapshot(engine, tenant, period_id):
+    """Capture canonical payroll, source evidence and active heads around a preview-only path."""
+    from sqlalchemy import text
+
+    async with engine.connect() as db:
+        lines = [dict(row) for row in (await db.execute(text("""
+            SELECT DraftLineID, DriverAssignmentID, DriverID, WorkDate, PayrollPeriodDefinitionID,
+                   Quantity, SourceType, SourceID, Status, AddedByUserID
+            FROM payroll.PayrollDraftLines
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid ORDER BY DraftLineID
+        """), {"cid": tenant.company_id, "pid": period_id})).mappings()]
+        evidence = [dict(row) for row in (await db.execute(text("""
+            SELECT PayrollPeriodAuditEvidenceEventID, EvidenceDomain, ActionCode, SourceEntityType,
+                   SourceEntityID, DriverID, WorkDate, PayItemID, BeforeStateJson, AfterStateJson,
+                   ActorUserID, CorrelationID, SourceRevision
+            FROM payroll.PayrollPeriodAuditEvidenceEvents
+            WHERE CompanyID=:cid AND PayrollPeriodID=:pid AND EvidenceDomain='SOURCE'
+            ORDER BY PayrollPeriodAuditEvidenceEventID
+        """), {"cid": tenant.company_id, "pid": period_id})).mappings()]
+        heads = [dict(row) for row in (await db.execute(text("""
+            SELECT BranchID, PayDefinitionID, RuleVersionID, Revision
+            FROM import.PayrollWorkRuleHeads WHERE CompanyID=:cid ORDER BY BranchID, PayDefinitionID
+        """), {"cid": tenant.company_id})).mappings()]
+    return {"draft_lines": lines, "evidence": evidence, "rule_heads": heads}
+
+
+async def import_staging_snapshot(engine, tenant):
+    """Count Import staging rows so rejected admission cannot leave partial records."""
+    from sqlalchemy import text
+
+    async with engine.connect() as db:
+        row = (await db.execute(text("""SELECT
+            (SELECT count(*) FROM import.Imports WHERE CompanyID=:cid) AS imports,
+            (SELECT count(*) FROM import.FileSources WHERE CompanyID=:cid) AS files,
+            (SELECT count(*) FROM import.FileCanonicalData WHERE CompanyID=:cid) AS canonical_files,
+            (SELECT count(*) FROM import.PayrollWorkRecords WHERE CompanyID=:cid) AS source_records,
+            (SELECT count(*) FROM import.PayrollWorkPreviewGroups WHERE CompanyID=:cid) AS preview_groups
+        """), {"cid": tenant.company_id})).mappings().one()
+    return dict(row)
+
+
+def renamed_repeat_files(files, days):
+    """Keep all payloads but vary filename date spelling for the completed-repeat case."""
+    if len(files) != len(days):
+        raise ValueError("Completed-repeat file count must match period days.")
+    renamed = [(f"{written_date(day)}.csv", payload) for (_name, payload), day in zip(files, days, strict=True)]
+    if len({name for name, _payload in renamed}) != len(renamed):
+        raise ValueError("Written date names must be unique within the repeat upload.")
+    return renamed
+
+
+def filename_date_selection(_unit):
+    """Let the A08 interpreter resolve written-month names against period days."""
+    return {"kind": "filename"}
+
+
+async def measure_completed_repeat(*, client, engine, tenant, period, fixture, baseline_import_id, original_files,
+                                   ordinary_path, phases, preview_once, resources):
+    """Measure completed-receipt matching after a real Manual edit, without an apply route."""
+    from sqlalchemy import text
+
+    baseline_id = baseline_import_id
+    fixture_started = time.perf_counter()
+    async with engine.begin() as db:
+        stored = await db.execute(text("""
+            SELECT w.ReviewSummary->'semantic_input_receipt' AS receipt
+            FROM import.PayrollWorkImports w
+            WHERE w.ImportID=:iid AND w.CompanyID=:cid
+        """), {"iid": baseline_id, "cid": tenant.company_id})
+        receipt = stored.scalar_one()
+        assert receipt["version"] == 1 and len(receipt["targets"]) == len(fixture["definitions"])
+        await db.execute(text("""UPDATE import.Imports SET Status='Completed', Revision=Revision+1,
+            CompletedByUserID=:uid, CompletedAtUtc=NOW(), UpdatedByUserID=:uid, UpdatedAtUtc=NOW()
+            WHERE ImportID=:iid AND CompanyID=:cid"""),
+            {"uid": tenant.owner, "iid": baseline_id, "cid": tenant.company_id})
+
+    driver = fixture["drivers"][0]
+    day = fixture["days"][0]
+    definition = fixture["definitions"][0]
+    phases.reset()
+    manual_started = time.perf_counter()
+    manual = await client.post(f"/payroll/periods/{period['payroll_period_id']}/lines",
+        headers=tenant.admin,
+        json={"driver_assignment_id": driver["driverassignmentid"], "work_date": day.isoformat(),
+              "payroll_period_definition_id": definition.payroll_period_definition_id,
+              "quantity": "99", "source_type": "Manual"})
+    manual_seconds = time.perf_counter() - manual_started
+    assert manual.status_code == 201, manual.text
+    before_repeat = await canonical_workload_snapshot(engine, tenant, period["payroll_period_id"])
+    fixture_seconds = time.perf_counter() - fixture_started
+
+    repeat_files = renamed_repeat_files(original_files, fixture["days"])
+    upload, ingress = await timed_request(client, ordinary_path, tenant.admin,
+        lambda: client.post(f"/payroll/periods/{period['payroll_period_id']}/imports",
+            files=[("file", (name, data, "application/octet-stream")) for name, data in repeat_files],
+            headers={**tenant.admin, "Idempotency-Key": str(uuid4())}), phases)
+    import_id = upload["import_id"]
+    assert len(upload["layouts"]) == 1
+
+    units = []
+    for source_file in upload["files"]:
+        for unit in source_file["units"]:
+            units.append({"source_unit_id": unit["source_unit_id"], "selected": True,
+                          "date_source": filename_date_selection(unit)})
+    size, send = json_request(client, "PUT", f"/payroll/imports/{import_id}/interpretation",
+                              {"expected_revision": upload["revision"], "units": units}, tenant.admin)
+    upload, interpretation = await timed_request(client, ordinary_path, tenant.admin, send, phases)
+    interpretation["request_body_bytes"] = size
+    interpretation["units"] = len(units)
+
+    headers_by_layout = []
+    for layout in upload["layouts"]:
+        headers = []
+        offset = 0
+        while True:
+            inspected = await client.get(f"/payroll/imports/{import_id}", params={
+                "header_layout_id": layout["layout_id"], "header_offset": offset, "header_limit": 25},
+                headers=tenant.admin)
+            assert inspected.status_code == 200, inspected.text
+            page = inspected.json()["header_page"]
+            headers.extend(item["label"] for item in page["items"])
+            if page["next_offset"] is None:
+                break
+            offset = page["next_offset"]
+        headers_by_layout.append(headers)
+    definition_ids = {item.code: item.payroll_period_definition_id for item in fixture["definitions"]}
+    shared, ignored, targets = mapping_requests(
+        "current_completed_repeat_csv", upload, headers_by_layout, definition_ids, fixture["definitions"])
+    size, send = json_request(client, "PUT", f"/payroll/imports/{import_id}/mapping", {
+        "expected_revision": upload["revision"], "shared_columns": shared,
+        "ignored_columns": ignored, "targets": targets}, tenant.admin)
+    upload, mapping = await timed_request(client, ordinary_path, tenant.admin, send, phases)
+    mapping.update({"request_body_bytes": size, "targets": len(targets),
+                    "max_request_bytes": resources["max_mapping_request_bytes"]})
+    assert size <= resources["max_mapping_request_bytes"]
+
+    preview, preview_metrics = await preview_once(import_id, upload["revision"])
+    refreshed, refresh_metrics = await preview_once(import_id, preview["revision"])
+    require_timers(preview_metrics, "completed_receipt_snapshot", "matching_completed_receipts")
+    require_timers(refresh_metrics, "completed_receipt_snapshot", "matching_completed_receipts")
+    notice = refreshed["preview"]["summary"]["repeat_notice"]
+    target_count = len(fixture["definitions"])
+    assert notice["state"] == "Complete" and notice["matched_target_count"] == target_count
+    assert notice["supplied_target_count"] == target_count
+
+    expected_groups = len(fixture["drivers"]) * len(fixture["days"])
+    total = expected_groups * target_count
+    offset = 0
+    pages = []
+    no_op_count = 0
+    edited_value = None
+    edited_page = None
+    while offset < expected_groups:
+        page_started = time.perf_counter()
+        page, response_bytes = await read_rows(client, tenant.admin, import_id, refreshed,
+            limit=resources["row_page_max"], offset=offset)
+        page_seconds = time.perf_counter() - page_started
+        assert page["filtered_count"] == expected_groups
+        assert len(page["items"]) == min(resources["row_page_max"], expected_groups - offset)
+        for group in page["items"]:
+            for definition in fixture["definitions"]:
+                key = str(definition.payroll_period_definition_id)
+                value = group["values"][key]
+                assert value["candidate_count"] == 1 and len(value["candidates"]) == 1, value
+                candidate = value["candidates"][0]
+                assert candidate["outcome"] == "AlreadyImported" and candidate["action"] == "NoOp", candidate
+                assert candidate["quantity"] == "1" and candidate["repeat_input_sha256"], candidate
+                no_op_count += 1
+                if (group["driver"]["driver_number"] == driver["drivernumber"]
+                        and group["work_date"] == day.isoformat()
+                        and definition.payroll_period_definition_id == fixture["definitions"][0].payroll_period_definition_id):
+                    edited_value = candidate
+                    edited_page = {"source_record_count": group["source_record_count"],
+                                   "item_count": len(page["items"])}
+        pages.append({"offset": offset, "items": len(page["items"]), "seconds": page_seconds,
+                      "response_bytes": response_bytes})
+        offset += len(page["items"])
+    assert no_op_count == total == 65_100, no_op_count
+    assert edited_value is not None and edited_page is not None
+    assert edited_value["current_quantity"] == "99" and edited_value["current_source_exists"] is True
+    assert edited_value["current_provenance"]["source_type"] == "Manual"
+    after_repeat = await canonical_workload_snapshot(engine, tenant, period["payroll_period_id"])
+    assert after_repeat == before_repeat
+    return {"controlled_completed_fixture_seconds": fixture_seconds,
+            "manual_edit_seconds": manual_seconds, "manual_edit_status": manual.status_code,
+            "incoming_upload_seconds": ingress["request_seconds"], "incoming_interpretation": interpretation,
+            "incoming_mapping": mapping, "repeat_preview": preview_metrics, "repeat_refresh": refresh_metrics,
+            "repeat_notice": {"state": notice["state"], "matched_target_count": notice["matched_target_count"],
+                              "supplied_target_count": notice["supplied_target_count"]},
+            "groups": expected_groups, "targets": target_count, "candidate_no_ops": no_op_count,
+            "candidate_page_count": len(pages), "candidate_pages": pages,
+            "manual_candidate": {"incoming_quantity": edited_value["quantity"],
+                                 "current_quantity": edited_value["current_quantity"],
+                                 "current_source_type": edited_value["current_provenance"]["source_type"]},
+            "source_evidence_events": len(before_repeat["evidence"]),
+            "canonical_evidence_and_heads_unchanged": True}
+
+
+async def measure_partial_overlap(*, client, tenant, fixture, import_id, preview, resources):
+    """Check target candidate totals across all rows for alternating compatible layouts."""
+    expected_groups = len(fixture["drivers"]) * len(fixture["days"])
+    target_counts = Counter()
+    groups_seen = 0
+    page_metrics = []
+    day_indexes = {day.isoformat(): index for index, day in enumerate(fixture["days"])}
+    offset = 0
+    while offset < expected_groups:
+        started = time.perf_counter()
+        page, response_bytes = await read_rows(client, tenant.admin, import_id, preview,
+            limit=resources["row_page_max"], offset=offset)
+        elapsed = time.perf_counter() - started
+        assert page["filtered_count"] == expected_groups
+        assert page["items"]
+        for group in page["items"]:
+            groups_seen += 1
+            day_index = day_indexes[group["work_date"]]
+            for definition_index, definition in enumerate(fixture["definitions"]):
+                target_id = str(definition.payroll_period_definition_id)
+                present = (definition_index == 0
+                           or (day_index % 2 == 0 and definition_index in (1, 2))
+                           or (day_index % 2 == 1 and definition_index in (3, 4, 5)))
+                value = group["values"].get(target_id)
+                if not present:
+                    assert value is None, (group["work_date"], target_id, value)
+                    continue
+                assert value is not None and value["candidate_count"] == 1, (group, target_id)
+                candidates = value["candidates"]
+                assert len(candidates) == 1 and candidates[0]["quantity"] == "1", (group, target_id)
+                assert candidates[0]["outcome"] == "New", candidates[0]
+                target_counts[target_id] += 1
+        page_metrics.append({"offset": offset, "items": len(page["items"]), "seconds": elapsed,
+                             "response_bytes": response_bytes})
+        offset += len(page["items"])
+    assert groups_seen == expected_groups
+    expected_per_target = {
+        str(definition.payroll_period_definition_id): (expected_groups if index == 0 else
+            len(fixture["drivers"]) * sum(day_index % 2 == (0 if index in (1, 2) else 1)
+                                          for day_index in range(len(fixture["days"]))))
+        for index, definition in enumerate(fixture["definitions"])
+    }
+    assert dict(target_counts) == expected_per_target, (target_counts, expected_per_target)
+    expected_candidates = sum(expected_per_target.values())
+    assert preview["preview"]["counts"]["new"] == expected_candidates
+    assert preview["preview"]["counts"]["errors"] == 0
+    date_review = preview["preview"]["summary"]["date_review"]
+    assert date_review["recognized_day_count"] == len(fixture["days"])
+    return {"physical_layouts": 2, "combined_columns": 7, "per_file_physical_columns": [4, 5],
+            "driver_day_groups": groups_seen, "candidates": expected_candidates,
+            "per_target_candidates": expected_per_target, "recognized_days": date_review["recognized_day_count"],
+            "candidate_pages": page_metrics}
+
+
 def mapping_requests(scene, upload, headers_by_layout, definition_ids, definitions):
     """The full-snapshot mapping body: shared columns, explicit ignores and per-target inputs."""
     if scene == "current_target_mapping_csv":
@@ -527,6 +874,9 @@ def mapping_requests(scene, upload, headers_by_layout, definition_ids, definitio
                 continue
             target_rules[header] = {"target": f"Definition:{definition_ids[header]}",
                 "transform": "Direct", "inputs": [{"header": header}], "expected_head_revision": 0}
+    if scene == "current_canonical_byte_boundary_csv":
+        # The padded headed Notes column is intentionally ignored only after canonical admission.
+        return shared_columns, [{"header": "Notes"}], list(target_rules.values())
     return shared_columns, [], list(target_rules.values())
 
 
@@ -619,7 +969,13 @@ async def measure(scene, dsn, *, profile_cleanup=False):
         fixture = await seed_period(client, engine, dsn, drivers=dimensions[0], definitions=dimensions[1],
             days=dimensions[2], outside_drivers=dimensions[3], distinct_names=scene == "current_identity_csv")
         tenant, period = fixture["tenant"], fixture["period"]
-        files = source_files(scene, fixture)
+        canonical_boundary = None
+        if scene == "current_canonical_byte_boundary_csv":
+            exact, over, canonical_boundary = canonical_boundary_payloads(fixture)
+            files = [(f"{fixture['days'][0].isoformat()}.csv", exact)]
+        else:
+            exact = over = None
+            files = source_files(scene, fixture)
         policy_metadata = None
         if current:
             response = await client.get(
@@ -719,12 +1075,18 @@ async def measure(scene, dsn, *, profile_cleanup=False):
             unit_count = sum(len(file["units"]) for file in upload["files"])
             if current:
                 assert header_structure and header_structure["available"] is True
-                first_inspection = upload["files"][0]["units"][0]["inspection"]
-                expected_columns = first_inspection["headed_column_count"]
-                assert header_structure["combined_column_count"] == expected_columns
                 assert len(header_structure["headed_column_counts"]) == unit_count
-                assert {item["count"] for item in header_structure["headed_column_counts"]} == {expected_columns}
-                assert len(upload["layouts"]) == 1
+                physical_counts = {item["count"] for item in header_structure["headed_column_counts"]}
+                if scene == "current_partial_overlap_csv":
+                    assert header_structure["combined_column_count"] == 7
+                    assert physical_counts == {4, 5}
+                    assert len(upload["layouts"]) == 2
+                else:
+                    first_inspection = upload["files"][0]["units"][0]["inspection"]
+                    expected_columns = first_inspection["headed_column_count"]
+                    assert header_structure["combined_column_count"] == expected_columns
+                    assert physical_counts == {expected_columns}
+                    assert len(upload["layouts"]) == 1
                 assert header_structure["combined_column_count"] <= policy_metadata["product_policy"]["max_import_combined_columns"]
             authority = DATE_AUTHORITIES.get(scene)
             interpretation = None
@@ -898,6 +1260,43 @@ async def measure(scene, dsn, *, profile_cleanup=False):
             refreshed, refresh = await preview_once(iid, preview["revision"])
             for key in ("mapping_fingerprint", "content_fingerprint", "plan_fingerprint", "counts"):
                 assert refreshed["preview"][key] == preview["preview"][key], key
+            scenario_checks = {}
+            if scene == "current_partial_overlap_csv":
+                scenario_checks["partial_column_overlap"] = await measure_partial_overlap(
+                    client=client, tenant=tenant, fixture=fixture, import_id=iid,
+                    preview=refreshed, resources=resources)
+            elif scene == "current_canonical_byte_boundary_csv":
+                assert canonical_boundary is not None and over is not None
+                assert policy_metadata["product_policy"]["max_import_canonical_file_bytes"] == canonical_boundary["limit_bytes"]
+                staging_before_rejection = await import_staging_snapshot(engine, tenant)
+                canonical_before_rejection = await canonical_workload_snapshot(
+                    engine, tenant, period["payroll_period_id"])
+                rejected_started = time.perf_counter()
+                rejected = await client.post(
+                    f"/payroll/periods/{period['payroll_period_id']}/imports",
+                    files=[("file", ("accepted-boundary.csv", exact, "application/octet-stream")),
+                           ("file", ("one-byte-over.csv", over, "application/octet-stream"))],
+                    headers={**tenant.admin, "Idempotency-Key": str(uuid4())})
+                rejected_seconds = time.perf_counter() - rejected_started
+                assert rejected.status_code == 422, rejected.text
+                failure = rejected.json()["detail"]
+                assert failure["code"] == "IMPORT_CANONICAL_FILE_TOO_LARGE", failure
+                staging_after_rejection = await import_staging_snapshot(engine, tenant)
+                canonical_after_rejection = await canonical_workload_snapshot(
+                    engine, tenant, period["payroll_period_id"])
+                assert staging_after_rejection == staging_before_rejection
+                assert canonical_after_rejection == canonical_before_rejection
+                scenario_checks["canonical_boundary"] = {
+                    **canonical_boundary, "effective_product_limit_bytes": policy_metadata["product_policy"][
+                        "max_import_canonical_file_bytes"],
+                    "accepted_preview_counts": refreshed["preview"]["counts"],
+                    "accepted_preview_seconds": initial["request_seconds"],
+                    "accepted_refresh_seconds": refresh["request_seconds"],
+                    "valid_plus_over_limit_batch_status": rejected.status_code,
+                    "valid_plus_over_limit_batch_error": failure["code"],
+                    "rejected_request_seconds": rejected_seconds,
+                    "staging_unchanged_on_rejection": True,
+                    "payroll_evidence_and_heads_unchanged_on_rejection": True}
             if current:
                 for metrics in (initial, refresh):
                     require_timers(metrics, "date_preparation", "date_interpretation", "identity_requested_keys",
@@ -938,6 +1337,9 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                                for row in canonical_files)
                     assert all(row["canonical_bytes"] <= policy_metadata["product_policy"]["max_import_canonical_file_bytes"]
                                for row in canonical_files)
+                    if scene == "current_canonical_byte_boundary_csv":
+                        assert [row["canonical_bytes"] for row in canonical_files] == [
+                            canonical_boundary["accepted_canonical_bytes"]]
                 identity_matches = {}
                 if scene == "current_identity_csv":
                     identity_matches = {(row[0], row[1]): row[2] for row in (await db.execute(text("""
@@ -947,7 +1349,8 @@ async def measure(scene, dsn, *, profile_cleanup=False):
             if current:
                 source_counts_after = await source_counts(engine, tenant, period["payroll_period_id"])
                 assert source_counts_after == source_counts_before, (source_counts_before, source_counts_after)
-                assert source_counts_after["draft_lines"] == 0 and source_counts_after["rule_heads"] == 0
+                assert source_counts_after["draft_lines"] == 0
+                assert source_counts_after["rule_heads"] == source_counts_before["rule_heads"]
             query = {"expected_revision": refreshed["revision"], "plan_fingerprint": refreshed["preview"]["plan_fingerprint"]}
             response_sizes = {}
             for name in ("rows", "issues", "source-records"):
@@ -1003,6 +1406,13 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 checks["date_review"]["row_interpretation_reasons"] = reasons
                 checks["date_review"]["date_interpretation_calls"] = {"preview": initial["phase_calls"]["date_interpretation"],
                                                                       "refresh": refresh["phase_calls"]["date_interpretation"]}
+            # All baseline pages and checks must use the editable preview's exact
+            # revision before the controlled fixture seals it as Completed.
+            if scene == "current_completed_repeat_csv":
+                scenario_checks["completed_repeat"] = await measure_completed_repeat(
+                    client=client, engine=engine, tenant=tenant, period=period, fixture=fixture,
+                    baseline_import_id=iid, original_files=files, ordinary_path=ordinary_path,
+                    phases=phases, preview_once=preview_once, resources=resources)
             force_status(tenant, period["payroll_period_id"], "Locked")
             sql_writes.clear()
             started = time.perf_counter()
@@ -1036,6 +1446,7 @@ async def measure(scene, dsn, *, profile_cleanup=False):
                 "capability_checks": checks if current else None,
                 "database_temp_before": database_temp_before, "database_temp_after": database_temp_after,
                 "cleanup_plans": cleanup_plans,
+                "acceptance_checks": scenario_checks,
                 "temporary_files_left": sorted(str(path) for path in set(Path(tempfile.gettempdir()).iterdir()) - temporary_before),
                 "effective_policy": policy_metadata,
                 "coverage": scenario_coverage(scene) if current else None}
@@ -1048,15 +1459,32 @@ async def measure(scene, dsn, *, profile_cleanup=False):
 
 
 def scenario_coverage(scene):
-    """What this workload exercises; later work (semantic repeats, final contract acceptance) stays false."""
+    """What this workload exercises; final application and deployment acceptance stay false."""
     return {"legal_policy_shape": True, "canonical_extraction_and_admission": True,
             "canonical_byte_measurement": True, "combined_column_enforcement": True,
             "per_target_mapping_direct_and_sum": scene == "current_target_mapping_csv",
             "driver_identity_discovery": scene == "current_identity_csv",
             "date_authority_inference_and_review": scene in DATE_AUTHORITIES,
             "repeated_rows_and_categories": scene == "current_repeated_rows_csv",
-            "semantic_repeat_recognition": False, "final_revised_contract_acceptance": False,
+            "completed_input_repeat_after_manual_edit": scene == "current_completed_repeat_csv",
+            "partial_column_overlap": scene == "current_partial_overlap_csv",
+            "canonical_byte_boundary_admission": scene == "current_canonical_byte_boundary_csv",
+            "semantic_repeat_recognition": scene == "current_completed_repeat_csv",
+            "final_revised_contract_acceptance": False,
             "not_covered": NOT_COVERED}
+
+
+def run_scenarios(scenes, output):
+    """Run each isolated workload and preserve both live progress and JSON artifacts."""
+    results = []
+    for index, scene in enumerate(scenes, start=1):
+        path = output.with_name(output.stem + "-" + scene + ".json")
+        print(f"Starting {scene} ({index}/{len(scenes)})", flush=True)
+        subprocess.run([sys.executable, "-m", "scripts.benchmark_import_files", "--scenario", scene,
+                        "--output", str(path)], check=True, env=os.environ.copy())
+        results.append(json.loads(path.read_text(encoding="utf-8")))
+        print(f"Completed {scene} ({index}/{len(scenes)})", flush=True)
+    output.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
 
 def main():
@@ -1071,21 +1499,9 @@ def main():
         parser.error("Use --profile-cleanup with one explicit scenario.")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.scenario == "all":
-        results = []
-        for scene in SCENARIOS:
-            path = args.output.with_name(args.output.stem + "-" + scene + ".json")
-            subprocess.run([sys.executable, "-m", "scripts.benchmark_import_files", "--scenario", scene,
-                            "--output", str(path)], check=True, env=os.environ.copy())
-            results.append(json.loads(path.read_text(encoding="utf-8")))
-        args.output.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        run_scenarios(SCENARIOS, args.output)
     elif args.scenario == "current":
-        results = []
-        for scene in CURRENT_SCENARIOS:
-            path = args.output.with_name(args.output.stem + "-" + scene + ".json")
-            subprocess.run([sys.executable, "-m", "scripts.benchmark_import_files", "--scenario", scene,
-                            "--output", str(path)], check=True, env=os.environ.copy())
-            results.append(json.loads(path.read_text(encoding="utf-8")))
-        args.output.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        run_scenarios(CURRENT_SCENARIOS, args.output)
     else:
         with private_database() as dsn:
             result = asyncio.run(measure(args.scenario, dsn, profile_cleanup=args.profile_cleanup))
