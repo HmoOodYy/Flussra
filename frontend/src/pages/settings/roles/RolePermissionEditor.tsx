@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type * as React from 'react';
 import { friendlyPermLabel } from '../../../lib/permissionLabels';
 import type { CompanyRole, Permission } from '../../../types/admin';
-import { PERM_DEPS, getRiskTier, groupPermissionsByDomain } from './rolePermissionModel';
+import { PERM_DEPS, getRiskTier, groupPermissionsByDomain, isUserVisibleParentMissing } from './rolePermissionModel';
 import type { PermsAction, PermsState, RiskTier } from './rolePermissionModel';
 import type { UsersModalAction } from './rolesPageState';
 import { AlertIcon, CheckIcon, CheckboxCheckedReadOnly, LockSmallIcon, ShieldCheckIcon, ShieldIcon, SpinnerIcon, UsersSmallIcon, WarnIcon } from './RoleIcons';
@@ -233,7 +233,7 @@ export function RolePermissionEditor({
                     {perms.map(perm => {
                       const checked   = permsSt.codes.has(perm.permission_code);
                       const parent    = PERM_DEPS[perm.permission_code];
-                      const parentOff = parent ? !permsSt.codes.has(parent) : false;
+                      const parentOff = isUserVisibleParentMissing(parent, permsSt.codes);
                       return (
                         <div
                           key={perm.permission_code}

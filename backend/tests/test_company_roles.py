@@ -747,6 +747,30 @@ class TestPermissionDependencyNormalization:
         assert "payroll.view" in codes
 
     @pytest.mark.asyncio
+    async def test_employees_manage_auto_adds_employees_view(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep employees.manage")
+        codes = await self._set_perms(client, auth_token, rid, ["employees.manage"])
+        assert codes == {"employees.manage", "employees.view"}
+
+    @pytest.mark.asyncio
+    async def test_employees_view_alone_needs_no_parent(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep employees.view alone")
+        codes = await self._set_perms(client, auth_token, rid, ["employees.view"])
+        assert codes == {"employees.view"}
+
+    @pytest.mark.asyncio
+    async def test_ledger_audit_view_auto_adds_ledger_view(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep ledger.audit.view")
+        codes = await self._set_perms(client, auth_token, rid, ["ledger.audit.view"])
+        assert codes == {"ledger.audit.view", "ledger.view"}
+
+    @pytest.mark.asyncio
+    async def test_ledger_view_alone_does_not_grant_audit_history(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep ledger.view alone")
+        codes = await self._set_perms(client, auth_token, rid, ["ledger.view"])
+        assert codes == {"ledger.view"}
+
+    @pytest.mark.asyncio
     async def test_payroll_view_alone_needs_no_parent(self, client, auth_token):
         """payroll.view has no parent — saving it alone must not inject anything extra."""
         rid = await self._make_role(client, auth_token, "Dep payroll.view alone")
@@ -877,6 +901,30 @@ class TestPermissionsListFiltering:
         assert "review.decide" in codes, (
             "review.decide must be visible in the default permissions list"
         )
+
+    @pytest.mark.asyncio
+    async def test_default_list_includes_enforced_employee_and_ledger_codes(self, client, auth_token):
+        """Workforce and finalized-payroll permissions are enforced by routes, so the
+        role editor and the per-user picker must be able to grant them."""
+        resp = await client.get("/admin/permissions", headers=auth_headers(auth_token))
+        assert resp.status_code == 200
+        by_code = {p["permission_code"]: p["module_code"] for p in resp.json()}
+        assert by_code.get("employees.view") == "employees"
+        assert by_code.get("employees.manage") == "employees"
+        assert by_code.get("ledger.view") == "ledger"
+        assert by_code.get("ledger.audit.view") == "ledger"
+
+    @pytest.mark.asyncio
+    async def test_default_list_only_offers_assignable_modules(self, client, auth_token):
+        ui = (await client.get("/admin/permissions", headers=auth_headers(auth_token))).json()
+        full = (await client.get(
+            "/admin/permissions?ui_only=false", headers=auth_headers(auth_token),
+        )).json()
+        assert {p["permission_code"] for p in ui} <= {p["permission_code"] for p in full}
+        assert {p["module_code"] for p in ui} <= {
+            "company", "roles", "users", "payroll", "payitems", "payrates", "drivers", "dispatch",
+            "reports", "settings", "payroll_setup", "review", "employees", "ledger",
+        }
 
     @pytest.mark.asyncio
     async def test_ui_only_false_includes_legacy(self, client, auth_token):

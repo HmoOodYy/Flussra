@@ -4,6 +4,8 @@
  * apiClient, no CSS, no side effects.
  */
 
+import { HIDDEN_PERM_CODES } from '../settings/roles/rolePermissionModel.ts';
+
 // ─── Permission metadata (mirrors RolesPage) ─────────────────────────────────
 
 export const MODULE_LABELS: Record<string, string> = {
@@ -12,11 +14,13 @@ export const MODULE_LABELS: Record<string, string> = {
   users:         'Members',
   payroll:       'Payroll',
   payroll_setup: 'Payroll Setup Policy',
+  review:        'Review',
   payitems:      'Pay Items',
   payrates:      'Pay Rates',
   drivers:       'Drivers',
-  dispatch:      'Dispatch / Operations',
+  employees:     'Employees',
   reports:       'Reports',
+  ledger:        'Finalized Payroll',
   settings:      'Settings',
 };
 export const MODULE_ORDER = Object.keys(MODULE_LABELS);
@@ -28,6 +32,13 @@ export const MODULE_ORDER = Object.keys(MODULE_LABELS);
 export const MODULE_NOTES: Record<string, string> = {
   payroll_setup: 'Effective only for members with an All-Branches role assignment.',
 };
+
+// Codes no backend route checks (see HIDDEN_PERM_CODES in the Roles model). They are never
+// offered here, but a member that already holds one keeps it: the picker's selected set
+// starts from the member's saved overrides and is submitted whole.
+export function isHiddenPermission(code: string): boolean {
+  return HIDDEN_PERM_CODES.has(code);
+}
 
 export const PERM_DEPS: Record<string, string> = {
   'company.edit':     'company.view',
@@ -48,6 +59,8 @@ export const PERM_DEPS: Record<string, string> = {
   'drivers.edit':     'drivers.view',
   'dispatch.edit':    'dispatch.view',
   'settings.manage':  'settings.view',
+  'employees.manage': 'employees.view',
+  'ledger.audit.view': 'ledger.view',
   // UI administration dependency only: the Payroll Setup pages require payroll_setup.view to be usable.
   // The backend checks each endpoint's explicit code and does NOT imply view from manage/publish/assign.
   'payroll_setup.manage':  'payroll_setup.view',
@@ -67,6 +80,7 @@ export function groupPerms<T extends { permission_code: string; module_code: str
 ): Array<{ module: string; label: string; perms: T[]; note?: string }> {
   const map = new Map<string, T[]>();
   for (const p of perms) {
+    if (isHiddenPermission(p.permission_code)) continue;
     if (!map.has(p.module_code)) map.set(p.module_code, []);
     map.get(p.module_code)!.push(p);
   }

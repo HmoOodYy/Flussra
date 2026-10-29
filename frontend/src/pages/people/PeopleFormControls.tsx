@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import type { Branch } from '../../types/core';
 import type { CompanyRole, Permission } from '../../types/admin';
 import { friendlyPermLabel } from '../../lib/permissionLabels';
-import { PERM_DEPS, groupPerms } from './peoplePermissionModel';
+import { PERM_DEPS, groupPerms, isHiddenPermission } from './peoplePermissionModel';
 import styles from './PeoplePage.module.css';
 
 // ─── PermissionPicker ─────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ export function PermissionPicker({ allPerms, rolePerms, extraPerms, onToggle }: 
             const inRole = rolePerms.has(code);
             const inExtra = extraPerms.has(code);
             const parentCode = PERM_DEPS[code];
-            const parentOff = parentCode && !rolePerms.has(parentCode) && !extraPerms.has(parentCode);
+            const parentOff = parentCode && !isHiddenPermission(parentCode) && !rolePerms.has(parentCode) && !extraPerms.has(parentCode);
             return (
               <label key={code} className={`${styles.permRow}${inRole ? ` ${styles.permRowRole}` : ''}${parentOff && !inRole ? ` ${styles.permRowDim}` : ''}`}>
                 <input
@@ -43,7 +43,7 @@ export function PermissionPicker({ allPerms, rolePerms, extraPerms, onToggle }: 
                 <div>
                   <span className={styles.permName}>{perm.permission_name}</span>
                   {inRole && <span className={styles.permFromRole}> · included by role</span>}
-                  {parentCode && !inRole && !inExtra && (
+                  {parentCode && !isHiddenPermission(parentCode) && !inRole && !inExtra && (
                   <span className={styles.permDep}> · requires {allPerms.find(p => p.permission_code === parentCode)?.permission_name ?? friendlyPermLabel(parentCode)}</span>
                 )}
                 </div>
