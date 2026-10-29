@@ -17,7 +17,7 @@ def head_database(schema_databases):
 
 def test_fresh_schema_has_the_company_status_catalog_shape(head_database):
     _, dsn = head_database
-    assert _version(dsn) == "0094"
+    assert _version(dsn) == "0095"
     assert {"payrollstatuskeyaliases", "payrollstatuskeybranchlimits"} <= _tables(dsn)
     assert {"companyid", "normalizedkeyname", "allowancecategory"} <= _columns(dsn, "payrollstatuskeys")
     assert {"branchid", "limitusesperperiodenabled", "limitusesperperiod", "limitusesperdriver",

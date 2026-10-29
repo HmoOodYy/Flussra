@@ -87,7 +87,7 @@ export const WEEKDAYS: readonly { bit: number; short: string; full: string }[] =
 ];
 
 /**
- * Ascending bit indices set in `mask`. Decodes without limiting — the 2-day
+ * Ascending bit indices set in `mask`. Decodes without limiting — the 3-day
  * UI guidance lives in `canAddDayOff`/`MAX_NORMAL_DAYS_OFF` below and in
  * `validateDraftForm`; the backend (INVALID_NORMAL_DAYS_OFF) remains the
  * only real enforcement point.
@@ -127,10 +127,10 @@ export function daysOffLabel(mask: number): string {
 }
 
 /**
- * Frontend guidance only (disables the "add a day off" control once two are
+ * Frontend guidance only (disables the "add a day off" control once three are
  * selected) — the backend is the enforcement point (INVALID_NORMAL_DAYS_OFF).
  */
-export const MAX_NORMAL_DAYS_OFF = 2;
+export const MAX_NORMAL_DAYS_OFF = 3;
 
 export function canAddDayOff(mask: number): boolean {
   return maskToDays(mask).length < MAX_NORMAL_DAYS_OFF;

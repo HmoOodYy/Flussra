@@ -353,7 +353,7 @@ def _seed_0087_rows(cursor, kind: str) -> None:
 
 def test_fresh_upgrade_reaches_head_with_the_driver_owned_shape(head_database, cur):
     cur.execute("SELECT version_num FROM public.alembic_version")
-    assert cur.fetchone() == ("0094",)
+    assert cur.fetchone() == ("0095",)
 
     def columns(table: str) -> set[str]:
         cur.execute("""
