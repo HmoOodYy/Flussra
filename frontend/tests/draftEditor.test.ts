@@ -227,39 +227,40 @@ test('C. non-Custom frequencies always send custom_interval_days: null, even wit
   }
 });
 
-// ── D. Unit A: at most 2 days off is now guidance-enforced by validateDraftForm ──
+// ── D. Unit A: at most 3 days off is now guidance-enforced by validateDraftForm ──
 //
 // daysToMask/toggleDay themselves still build/toggle masks with any number
-// of days (a prefilled source with >2 days, which should not exist, is
+// of days (a prefilled source with >3 days, which should not exist, is
 // still represented as-is, never silently changed) — only
 // validateDraftForm's own guidance check now rejects saving with more than
-// MAX_NORMAL_DAYS_OFF (2) days off, mirroring the backend's
+// MAX_NORMAL_DAYS_OFF (3) days off, mirroring the backend's
 // INVALID_NORMAL_DAYS_OFF, which remains the real enforcement point.
 
-test('D. daysToMask/toggleDay still build/toggle a mask with more than two days (no mask-construction limit)', () => {
+test('D. daysToMask/toggleDay still build/toggle a mask with more than three days (no mask-construction limit)', () => {
   const mask = daysToMask([0, 1, 2, 3, 6]);
   let toggled = 0;
   for (const day of [0, 1, 2, 3, 6]) {
     toggled = toggleDay(toggled, day);
   }
   assert.equal(mask, toggled);
-  // validateDraftForm now flags this as guidance (more than 2 days off) —
+  // validateDraftForm now flags this as guidance (more than 3 days off) —
   // the mask itself is unchanged, just rejected for saving.
   const form = makeForm({ normal_days_off_mask: mask });
-  assert.equal(validateDraftForm(form), 'Choose at most two normal days off.');
+  assert.equal(validateDraftForm(form), 'Choose at most three normal days off.');
 });
 
-test('D. validateDraftForm: 0/1/2 days off pass; 3+ days off are guidance-rejected; 128/-1 stay structurally invalid', () => {
+test('D. validateDraftForm: 0/1/2/3 days off pass; 4+ days off are guidance-rejected; 128/-1 stay structurally invalid', () => {
   assert.equal(validateDraftForm(makeForm({ normal_days_off_mask: 0 })), null);
   assert.equal(validateDraftForm(makeForm({ normal_days_off_mask: daysToMask([0]) })), null);
   assert.equal(validateDraftForm(makeForm({ normal_days_off_mask: daysToMask([0, 6]) })), null);
+  assert.equal(validateDraftForm(makeForm({ normal_days_off_mask: daysToMask([0, 1, 6]) })), null);
   assert.equal(
-    validateDraftForm(makeForm({ normal_days_off_mask: daysToMask([0, 1, 6]) })),
-    'Choose at most two normal days off.',
+    validateDraftForm(makeForm({ normal_days_off_mask: daysToMask([0, 1, 2, 6]) })),
+    'Choose at most three normal days off.',
   );
   assert.equal(
     validateDraftForm(makeForm({ normal_days_off_mask: 127 })),
-    'Choose at most two normal days off.',
+    'Choose at most three normal days off.',
   );
   assert.equal(validateDraftForm(makeForm({ normal_days_off_mask: 128 })), 'Invalid days-off selection.');
   assert.equal(validateDraftForm(makeForm({ normal_days_off_mask: -1 })), 'Invalid days-off selection.');
