@@ -236,7 +236,8 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
         "&header_offset=0&header_limit=1", headers=tenant.admin,
     )
     assert header_page.status_code == 200, header_page.text
-    assert header_page.json()["header_page"]["items"] == [{"source_column": 1, "label": long_header}]
+    assert header_page.json()["header_page"]["items"] == [{"source_column": 1, "label": long_header,
+                                                            "normalized_label": long_header.strip().casefold()}]
     assert header_page.json()["header_page"]["next_offset"] == 1
 
     first_targets = await p3c_client.get(
@@ -328,6 +329,10 @@ async def test_ordered_csv_batch_shares_layout_and_preserves_physical_row_owners
     assert len(source_rows.json()["items"]) == 1
     assert source_rows.json()["next_offset"] == 1
     assert source_rows.json()["items"][0]["cell_count"] == 3
+    date_interpretation = source_rows.json()["items"][0]["date_interpretation"]
+    assert date_interpretation["status"] == "resolved"
+    assert date_interpretation["resolved_date"] in {first_date.isoformat(), second_date.isoformat()}
+    assert date_interpretation["explanation"] == "Used the explicit date as written."
     assert source_rows.json()["items"][0]["cell_limit"] == 2
     assert len(source_rows.json()["items"][0]["cells"]) == 2
     assert source_rows.json()["items"][0]["values_count"] == 1
@@ -519,8 +524,18 @@ async def test_category_filter_sums_included_rows_and_keeps_exclusions_out_of_dr
     assert uploaded.status_code == 200, uploaded.text
     created = uploaded.json()
     mapped = await map_import_columns(p3c_client, tenant, created, {
-        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}", "4": "Filter"})
     assert mapped.status_code == 200, mapped.text
+    async with p3c_engine.connect() as db:
+        pending_filter_rule = await db.scalar(text("""
+            SELECT v.RulePayload FROM import.PayrollWorkPendingRules p
+            JOIN import.PayrollWorkRuleVersions v ON v.RuleVersionID=p.RuleVersionID
+                AND v.CompanyID=p.CompanyID AND v.BranchID=p.BranchID
+                AND v.PayDefinitionID=p.PayDefinitionID
+            WHERE p.ImportID=:iid AND p.CompanyID=:cid
+        """), {"iid": created["import_id"], "cid": tenant.company_id})
+    assert pending_filter_rule["shared_columns"]["Filter"] == {"header": "category"}
+    assert "row_handling" not in pending_filter_rule
     revision = mapped.json()["revision"]
 
     settings = p3c_app.state.settings

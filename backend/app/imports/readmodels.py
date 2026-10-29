@@ -81,6 +81,7 @@ def project_source_record(item: dict, cell_offset: int, cell_limit: int) -> dict
     for issue in projected["issues"]:
         _page_operand_details(issue, "value", page_columns)
     projected["row_handling"] = context.get("row_handling")
+    projected["date_interpretation"] = context.get("date_interpretation")
     projected["category"] = context.get("category")
     projected["category_decision"] = context.get("category_decision")
     projected["proposed_exclusion"] = context.get("proposed_exclusion")

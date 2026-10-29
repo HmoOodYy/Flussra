@@ -538,6 +538,8 @@ async def metadata(db: AsyncConnection, cid: int, iid: int, *, target_offset: in
                            "next_offset": (header_offset + len(header_cells)
                                            if header_offset + len(header_cells) < len(headers) else None),
                            "items": [{"source_column": header_offset + index + 1, "label": value,
+                                      "normalized_label": by_column.get(header_offset + index + 1, {}).get(
+                                          "normalized_label", ""),
                                       **{key: by_column[header_offset + index + 1][key]
                                          for key in ("occurrence_ordinal", "occurrence_count", "occurrence_id",
                                                      "duplicate_signature")

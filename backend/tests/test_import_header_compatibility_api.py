@@ -116,6 +116,30 @@ async def test_partial_overlap_reports_combined_max_multiplicity_and_duplicate_p
     assert items[1]["duplicate_signature"] == items[2]["duplicate_signature"]
 
 
+async def test_header_page_exposes_server_normalized_label_for_unique_and_duplicate_headers(
+    p3c_client, p3c_engine, tenant,
+):
+    period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
+    response = await _upload(p3c_client, tenant, period, [
+        ("unicode-a.csv", "Straße,Hours,Hours\n001,1,2\n".encode()),
+        ("unicode-b.csv", "STRASSE,Hours,Bonus\n001,3,4\n".encode()),
+    ])
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["layouts"]) == 2
+    pages = []
+    for layout in body["layouts"]:
+        page = await p3c_client.get(
+            f"/payroll/imports/{body['import_id']}?header_layout_id={layout['layout_id']}&header_limit=3",
+            headers=tenant.admin)
+        assert page.status_code == 200, page.text
+        pages.append(page.json()["header_page"]["items"])
+    assert pages[0][0]["normalized_label"] == "strasse"
+    assert pages[1][0]["normalized_label"] == "strasse"
+    assert pages[0][1]["normalized_label"] == pages[0][2]["normalized_label"] == "hours"
+    assert pages[0][1]["duplicate_signature"] == pages[0][2]["duplicate_signature"]
+
+
 async def test_mixed_csv_xlsx_counts_headed_hidden_columns_but_not_headerless_or_styled_extent(
     p3c_client, p3c_engine, tenant,
 ):

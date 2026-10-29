@@ -333,7 +333,8 @@ async def test_import_metadata_uses_effective_target_header_and_response_bounds(
     assert default_page.status_code == 200, default_page.text
     assert default_page.json()["mapping_target_page"]["limit"] == 1
     assert default_page.json()["header_page"]["limit"] == 1
-    assert default_page.json()["header_page"]["items"][0] == {"source_column": 1, "label": "Driver Number"}
+    assert default_page.json()["header_page"]["items"][0] == {
+        "source_column": 1, "label": "Driver Number", "normalized_label": "driver number"}
     assert default_page.json()["layouts"][0]["inspection"]["header_cells"] == ["Drive"]
     assert raised_page.status_code == 200, raised_page.text
     assert raised_page.json()["mapping_target_page"]["limit"] == 2

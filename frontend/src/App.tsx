@@ -35,6 +35,7 @@ import {
 
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
 const PeriodsListPage = lazy(() => import('./pages/payroll/PeriodsListPage').then((module) => ({ default: module.PeriodsListPage })));
+const PayrollImportPage = lazy(() => import('./pages/payroll/imports/PayrollImportPage').then((module) => ({ default: module.PayrollImportPage })));
 const PayrollEntryPage = lazy(() => import('./pages/payroll/entry/PayrollEntryPage').then((module) => ({ default: module.PayrollEntryPage })));
 const LedgerPage = lazy(() => import('./pages/payroll/LedgerPage').then((module) => ({ default: module.LedgerPage })));
 const BranchPayrollSchedulePage = lazy(() => import('./pages/payroll/schedule/BranchPayrollSchedulePage').then((module) => ({ default: module.BranchPayrollSchedulePage })));
@@ -139,6 +140,14 @@ export default function App() {
             <Route
               path="/payroll/periods/:periodId"
               element={<Gate check={canViewCurrentPayroll}><PayrollEntryPage /></Gate>}
+            />
+            <Route
+              path="/payroll/periods/:periodId/imports"
+              element={<Gate check={canViewCurrentPayroll}><PayrollImportPage /></Gate>}
+            />
+            <Route
+              path="/payroll/periods/:periodId/imports/:importId"
+              element={<Gate check={canViewCurrentPayroll}><PayrollImportPage /></Gate>}
             />
             <Route
               path="/payroll/ledger"
