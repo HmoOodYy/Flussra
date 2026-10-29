@@ -17,11 +17,15 @@ $ErrorActionPreference = "Stop"
 
 # Resolve project root relative to this script file
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$PYTHON = Join-Path $ROOT "backend\.venv\Scripts\python.exe"
+$PYTHON = if ($env:FLUSSRA_PYTHON) {
+    $env:FLUSSRA_PYTHON
+} else {
+    Join-Path $ROOT "backend\.venv\Scripts\python.exe"
+}
 $SETUP_SCRIPT = Join-Path $ROOT "scripts\setup_backend.ps1"
 
-if (-not (Test-Path $PYTHON)) {
-    Write-Host "Python venv not found at: $PYTHON`nRun $SETUP_SCRIPT first." -ForegroundColor Red
+if (-not (Test-Path -LiteralPath $PYTHON -PathType Leaf)) {
+    Write-Host "Python runtime not found at: $PYTHON`nRun $SETUP_SCRIPT or set FLUSSRA_PYTHON to an existing Python 3.12+ environment." -ForegroundColor Red
     exit 1
 }
 
