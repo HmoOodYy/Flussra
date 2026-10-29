@@ -24,6 +24,7 @@ import { buildAutoPreviewKey, useAutoPreview } from '../../../lib/useAutoPreview
 import { useBoundaryChoices } from '../../../lib/useBoundaryChoices';
 import { isChoicesCurrent } from '../../../lib/payrollBoundaryView';
 import { isDraftComplete, draftScheduleKey } from './draftEditor';
+import { PayRuleImpactNotice } from './PayRuleImpactNotice';
 import { buildImpactRequest, buildPublishRequest, canPublishFromPreview } from './publishPreview';
 import type { PreviewInputs, StoredPreview } from './publishPreview';
 import type { DraftResponse, ScheduleResponse } from '../../../types/payrollSetup';
@@ -267,6 +268,7 @@ export function PublishPanel({
               </details>
             </>
           )}
+          <PayRuleImpactNotice rules={storedPreview.response.affected_pay_rules} />
         </div>
       )}
 

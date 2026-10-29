@@ -24,6 +24,9 @@ export const COMPENSATION_ERROR_MESSAGES: Record<string, string> = {
   SCHEDULE_VALUES_IMMUTABLE: 'The amounts of this rate can no longer be changed.',
   SCHEDULE_INVALID_TRANSITION: 'This rate is not in a state where that action is possible.',
   SCHEDULE_NOT_FOUND: 'This rate no longer exists. Reload the page.',
+  RATE_SCHEDULE_SELF_APPROVAL_DISALLOWED:
+    'Your company does not allow you to approve a pay rate change that you created or last edited. '
+    + 'Ask another user with pay rate approval access to approve it.',
 };
 
 const PERMISSION_MESSAGE = "You do not have permission to change this Driver's pay rates.";

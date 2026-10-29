@@ -140,6 +140,22 @@ class ConflictResponse(BaseModel):
     reason: str
 
 
+class AffectedPayRuleResponse(BaseModel):
+    """A Driver Minimum/Maximum pay rule that stops fitting the new calendar (no amounts)."""
+    driver_id: int
+    driver_name: str
+    driver_number: str | None
+    branch_id: int
+    branch_name: str
+    rule_id: int
+    rule_type: str
+    calendar_frequency: str
+    calendar_custom_interval_days: int | None
+    calendar_anchor_start_date: date
+    effective_from: date
+    effective_to: date | None
+
+
 class PublicationImpactResponse(BaseModel):
     setup_id: int
     affected_branch_ids: list[int]
@@ -152,6 +168,7 @@ class PublicationImpactResponse(BaseModel):
     next_version_boundary: date | None
     conflicts: list[ConflictResponse]
     allowed: bool
+    affected_pay_rules: list[AffectedPayRuleResponse] = Field(default_factory=list)
 
 
 class ReassignmentImpactResponse(BaseModel):
@@ -163,6 +180,7 @@ class ReassignmentImpactResponse(BaseModel):
     effective_date: date
     conflicts: list[ConflictResponse]
     allowed: bool
+    affected_pay_rules: list[AffectedPayRuleResponse] = Field(default_factory=list)
 
 
 class AssignmentResponse(BaseModel):

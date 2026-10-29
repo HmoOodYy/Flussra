@@ -235,7 +235,7 @@ async def post_inline_publication_impact(
     )
     impact = await payroll_policy._policy_impact(
         company_id, setup_id, body.effective_from_date, schedule, db,
-        replaces_version_id=body.replaces_version_id,
+        replaces_version_id=body.replaces_version_id, include_pay_rules=True,
     )
     return {
         **impact,
