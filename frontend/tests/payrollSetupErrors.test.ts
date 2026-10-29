@@ -165,7 +165,7 @@ test('G4. FRIENDLY_POLICY_MESSAGES has exactly the 29 documented codes', () => {
     FRIENDLY_POLICY_MESSAGES.DEFAULT_SETUP_NOT_PUBLISHED,
     'Publish a payroll schedule before setting this policy as the default.',
   );
-  assert.equal(FRIENDLY_POLICY_MESSAGES.INVALID_NORMAL_DAYS_OFF, 'Choose at most two normal days off.');
+  assert.equal(FRIENDLY_POLICY_MESSAGES.INVALID_NORMAL_DAYS_OFF, 'Choose at most three normal days off.');
 });
 
 test('G5. FRIENDLY_POLICY_MESSAGES.INVALID_SETUP_CODE (Unit A: optional Integration code)', () => {
