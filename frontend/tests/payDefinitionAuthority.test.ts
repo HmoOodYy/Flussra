@@ -201,6 +201,14 @@ test('company setup.manage: configures every Branch and the all-branch operation
   assert.equal(canConfigureAllBranchPayDefinitions(user), true);
 });
 
+test('company settings.manage alone does not configure all Branches (the backend bulk check is payitems.edit or setup.manage)', () => {
+  const user = makeUser({
+    branches: [makeBranch({ scope: 'AllCompanyBranches', branch_id: null })],
+    authority: makeAuthority({ company_permissions: ['settings.manage'] }),
+  });
+  assert.equal(canConfigureAllBranchPayDefinitions(user), false);
+});
+
 test('setup.manage in flat active_permissions alone is never authority', () => {
   const user = makeUser({ active_permissions: ['setup.manage'] });
   assert.equal(canConfigureBranchPayDefinitions(user, 10), false);
