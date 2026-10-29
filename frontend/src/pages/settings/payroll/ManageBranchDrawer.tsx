@@ -34,6 +34,7 @@ import {
   canReassignFromPreview,
 } from './branchAssignmentPreview';
 import type { ReassignInputs, StoredReassignPreview } from './branchAssignmentPreview';
+import { PayRuleImpactNotice } from './PayRuleImpactNotice';
 import type { AssignmentResponse, BranchPolicySummaryResponse, SetupResponse } from '../../../types/payrollSetup';
 
 type ManageBranchDrawerProps = {
@@ -375,6 +376,7 @@ export function ManageBranchDrawer({
                       </details>
                     </>
                   )}
+                  <PayRuleImpactNotice rules={storedReassignPreview.response.affected_pay_rules} />
                 </div>
               )}
 

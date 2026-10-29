@@ -80,6 +80,7 @@ from app.review.schemas import (
     ReviewPayrollSnapshotMinMax,
     ReviewPayrollSnapshotMinMaxRule,
 )
+from app.self_approval import company_allows_self_approval
 
 _REVIEW_READ_PERMISSIONS = ["payroll.view", "payroll.entry", "payroll.finalize", "review.decide"]
 
@@ -914,12 +915,7 @@ async def decide_review_item(
     # Reads AllowSelfApproval from core.Companies; defaults to TRUE if the column is absent
     # (safety guard for environments not yet migrated to 0004).
     if data.decision != "Comment" and row.get("requestedbyuserid") == user_id:
-        policy_row = await db.execute(
-            text("SELECT allowselfapproval FROM core.companies WHERE companyid = :cid"),
-            {"cid": company_id},
-        )
-        allow_self = policy_row.scalar_one_or_none()
-        if allow_self is False:
+        if not await company_allows_self_approval(company_id, db):
             raise HTTPException(
                 status_code=422,
                 detail=(

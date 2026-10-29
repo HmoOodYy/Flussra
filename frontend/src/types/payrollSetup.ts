@@ -152,6 +152,25 @@ export interface ConflictResponse {
   reason: string;
 }
 
+/**
+ * A Driver minimum/maximum pay rule that would stop fitting the new calendar. Carries no
+ * amounts; the rule keeps the calendar it was set for until it is ended and set again.
+ */
+export interface AffectedPayRuleResponse {
+  driver_id: number;
+  driver_name: string;
+  driver_number: string | null;
+  branch_id: number;
+  branch_name: string;
+  rule_id: number;
+  rule_type: string; // 'MinimumPay' | 'MaximumPay'
+  calendar_frequency: string;
+  calendar_custom_interval_days: number | null;
+  calendar_anchor_start_date: string; // ISO date (YYYY-MM-DD)
+  effective_from: string; // ISO date (YYYY-MM-DD)
+  effective_to: string | null; // ISO date (YYYY-MM-DD)
+}
+
 export interface PublicationImpactResponse {
   setup_id: number;
   affected_branch_ids: number[];
@@ -164,6 +183,7 @@ export interface PublicationImpactResponse {
   next_version_boundary: string | null; // ISO date (YYYY-MM-DD)
   conflicts: ConflictResponse[];
   allowed: boolean;
+  affected_pay_rules: AffectedPayRuleResponse[]; // warning only; never blocks the change
 }
 
 export interface ReassignmentImpactResponse {
@@ -175,6 +195,7 @@ export interface ReassignmentImpactResponse {
   effective_date: string; // ISO date (YYYY-MM-DD)
   conflicts: ConflictResponse[];
   allowed: boolean;
+  affected_pay_rules: AffectedPayRuleResponse[]; // warning only; never blocks the change
 }
 
 export interface AssignmentResponse {

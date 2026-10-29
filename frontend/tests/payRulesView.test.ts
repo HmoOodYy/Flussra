@@ -78,12 +78,20 @@ test('every schedule code and the calendar-unavailable code have a message', () 
   for (const code of [
     'SCHEDULE_CHANGED', 'SCHEDULE_WINDOW_OVERLAP', 'SCHEDULE_NOT_PENDING', 'SCHEDULE_INCOMPLETE',
     'SCHEDULE_IMMUTABLE', 'SCHEDULE_VALUES_IMMUTABLE', 'SCHEDULE_INVALID_TRANSITION', 'SCHEDULE_NOT_FOUND',
-    'PAY_RULE_CALENDAR_UNAVAILABLE',
+    'PAY_RULE_CALENDAR_UNAVAILABLE', 'RATE_SCHEDULE_SELF_APPROVAL_DISALLOWED',
   ]) {
     assert.ok(COMPENSATION_ERROR_MESSAGES[code], code);
     assert.equal(compensationErrorMessage(apiFailure(409, { code, message: 'raw' })),
       COMPENSATION_ERROR_MESSAGES[code]);
   }
+});
+
+test('a self-approval refusal tells the user to ask someone else, even as a 403', () => {
+  const message = compensationErrorMessage(apiFailure(403, {
+    code: 'RATE_SCHEDULE_SELF_APPROVAL_DISALLOWED', message: 'raw',
+  }));
+  assert.equal(message, COMPENSATION_ERROR_MESSAGES.RATE_SCHEDULE_SELF_APPROVAL_DISALLOWED);
+  assert.match(message, /Ask another user/);
 });
 
 test('unknown codes keep the server message; plain 403 and validation errors stay readable', () => {

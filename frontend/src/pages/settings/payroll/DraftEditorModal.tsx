@@ -54,6 +54,7 @@ import {
   type InlinePreviewInputs,
   type PreviewInputs,
 } from './publishPreview';
+import { PayRuleImpactNotice } from './PayRuleImpactNotice';
 import type { VersionResponse } from '../../../types/payrollSetup';
 import { startingPointLabel } from './policyDetailView';
 
@@ -589,6 +590,7 @@ export function DraftEditorModal({
                         }}
                       />
                     )}
+                    <PayRuleImpactNotice rules={storedPreview.response.affected_pay_rules} />
                   </div>
                 )}
               </div>

@@ -16,6 +16,7 @@ from .chronology import DaysOffLimitError, Schedule, validate_normal_days_off_ma
 from .errors import PolicyError
 from .locks import lock_branches, lock_company, lock_setups
 from .onboarding import ensure_onboarding_window
+from .pay_rule_impact import SchedulePhase, affected_pay_rules
 from .security import require_policy_permission
 from .validation import (
     next_version_boundary,
@@ -957,7 +958,7 @@ async def preview_policy_impact(
     await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
     return await _policy_impact(
         company_id, setup_id, effective_from_date, successor, db,
-        replaces_version_id=replaces_version_id,
+        replaces_version_id=replaces_version_id, include_pay_rules=True,
     )
 
 
@@ -965,8 +966,13 @@ async def _policy_impact(
     company_id: int, setup_id: int,
     effective_from_date: date, successor: Schedule,
     db: AsyncConnection, *, replaces_version_id: int | None = None,
+    include_pay_rules: bool = False,
 ) -> dict:
-    """Read-only preflight; commit operations always validate again under locks."""
+    """Read-only preflight; commit operations always validate again under locks.
+
+    ``include_pay_rules`` adds the Driver Minimum/Maximum pay rules the new calendar would
+    stop fitting; it is a warning only and never part of ``conflicts`` or ``allowed``.
+    """
     await _setup(db, company_id, setup_id, active=True)
     current_at_date = await terminal_version(db, setup_id, effective_from_date)
     prior_version = await terminal_version(
@@ -1018,6 +1024,15 @@ async def _policy_impact(
                 conflicts.append({"branch_id": assignment["branchid"], "code": exc.code,
                                   "reason": str(exc)})
                 break
+    pay_rules = []
+    if include_pay_rules:
+        pay_rules = await affected_pay_rules(company_id, [
+            SchedulePhase(
+                int(row["branchid"]), max(row["effectivefromdate"], effective_from_date),
+                min((d for d in (row["effectivetodate"], next_date) if d is not None),
+                    default=None),
+            ) for row in assignments
+        ], successor, db)
     return {
         "setup_id": setup_id, "affected_branch_ids": branch_ids,
         "effective_date": effective_from_date,
@@ -1034,6 +1049,7 @@ async def _policy_impact(
         },
         "next_version_boundary": next_date,
         "conflicts": conflicts, "allowed": not conflicts,
+        "affected_pay_rules": pay_rules,
     }
 
 
@@ -1045,14 +1061,19 @@ async def preview_reassignment_impact(
     await require_policy_permission(company_id, user_id, "payroll_setup.view", db)
     return await _reassignment_impact(
         company_id, branch_id, destination_setup_id, effective_from_date, db,
+        include_pay_rules=True,
     )
 
 
 async def _reassignment_impact(
     company_id: int, branch_id: int, destination_setup_id: int,
-    effective_from_date: date, db: AsyncConnection,
+    effective_from_date: date, db: AsyncConnection, *, include_pay_rules: bool = False,
 ) -> dict:
-    """Read-only impact evidence; reassignment repeats this under ordered locks."""
+    """Read-only impact evidence; reassignment repeats this under ordered locks.
+
+    ``include_pay_rules`` adds the Driver Minimum/Maximum pay rules the destination calendar
+    would stop fitting; it is a warning only and never part of ``conflicts`` or ``allowed``.
+    """
     await _branch(db, company_id, branch_id)
     await _setup(db, company_id, destination_setup_id, active=True)
     source = await _one(db, """
@@ -1111,6 +1132,11 @@ async def _reassignment_impact(
                     )
         except PolicyError as exc:
             conflicts.append({"code": exc.code, "reason": str(exc)})
+    pay_rules = []
+    if include_pay_rules and source is not None and successor_version is not None:
+        pay_rules = await affected_pay_rules(company_id, [
+            SchedulePhase(branch_id, effective_from_date, source["effectivetodate"]),
+        ], version_schedule(successor_version), db)
     return {
         "branch_id": branch_id,
         "source_setup_id": source["payrollsetupid"] if source else None,
@@ -1122,6 +1148,7 @@ async def _reassignment_impact(
         "effective_date": effective_from_date,
         "conflicts": conflicts,
         "allowed": not conflicts,
+        "affected_pay_rules": pay_rules,
     }
 
 

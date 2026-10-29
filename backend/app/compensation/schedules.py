@@ -53,6 +53,7 @@ from app.compensation.schemas import (
     ScheduleVoid,
 )
 from app.payroll.guards import require_no_finalized_payroll
+from app.self_approval import company_allows_self_approval
 from app.workforce.ops import decision_instant
 
 _SCHEDULE_COLUMNS = """
@@ -118,6 +119,22 @@ def _require_pending(row: dict, action: str) -> None:
         raise compensation_error(
             "SCHEDULE_NOT_PENDING",
             f"Only Pending schedules can be {action}. Current status: {row['status']}.", 409)
+
+
+async def _require_independent_approver(
+    company_id: int, user_id: int, row: dict, db: AsyncConnection,
+) -> None:
+    """When the Company disallows self-approval, the approver cannot be the person who
+    prepared the Pending schedule: its creator, or whoever last edited its dates, notes or
+    values (``updatedbyuserid`` is stamped by every Pending edit)."""
+    if user_id not in (row["created_by_user_id"], row["updated_by_user_id"]):
+        return
+    if await company_allows_self_approval(company_id, db):
+        return
+    raise compensation_error(
+        "RATE_SCHEDULE_SELF_APPROVAL_DISALLOWED",
+        "This company does not allow you to approve a pay rate change you created or "
+        "last edited. Ask another user with pay rate approval access to approve it.", 403)
 
 
 def _require_voidable(row: dict) -> None:
@@ -382,6 +399,7 @@ async def approve(
     row = await _load_schedule_row(company_id, schedule_id, db, for_update=True)
     _require_same_schedule(row, pre)
     _require_pending(row, "approved")
+    await _require_independent_approver(company_id, user_id, row, db)
     await _authorable_rate_definition(company_id, row["rate_definition_id"], db)
 
     values = await _load_values(schedule_id, row["rate_definition_id"], db)

@@ -132,7 +132,9 @@ export function CompanyEditDialog({
                 <div className={styles.toggleInfo}>
                   <span className={styles.toggleLabel}>Allow Self-Approval</span>
                   <span className={styles.toggleDesc}>
-                    When off, the user who submitted a review item cannot also approve it.
+                    When off, people cannot approve their own work. This covers payroll reviews (the
+                    person who submitted one cannot decide it) and pay rate changes (the person who
+                    created or last edited a pending rate cannot approve it).
                   </span>
                 </div>
                 <label className={styles.switch}>
