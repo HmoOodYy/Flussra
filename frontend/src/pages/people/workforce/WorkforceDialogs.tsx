@@ -129,7 +129,10 @@ export function EmployeeEditDialog({ detail, branches, onClose, onDone }: {
               </select>
             </Field>
             {form.employmentStatus === 'Terminated' && (
-              <Field label="Termination date"><input className={styles.inp} type="date" value={form.terminationDate} onChange={(e) => set({ terminationDate: e.target.value })} /></Field>
+              <>
+                <Field label="Termination date"><input className={styles.inp} type="date" value={form.terminationDate} onChange={(e) => set({ terminationDate: e.target.value })} /></Field>
+                <p className={styles.helpTxt}>{TERMINATION_ACCESS_NOTICE}</p>
+              </>
             )}
             <Field label="Branch">
               <select className={styles.inp} value={form.branchId ?? ''} onChange={(e) => set({ branchId: e.target.value ? parseInt(e.target.value) : null })}>
@@ -205,6 +208,8 @@ export function DriverDialog({ detail, mode, onClose, onDone }: {
 
 // ─── Terminate ───────────────────────────────────────────────────────────────
 
+const TERMINATION_ACCESS_NOTICE = "This person's sign-in and access end as soon as the termination is saved.";
+
 export function TerminateDialog({ detail, onClose, onDone }: {
   detail: EmployeeDetail; onClose(): void; onDone: Done;
 }) {
@@ -234,6 +239,7 @@ export function TerminateDialog({ detail, onClose, onDone }: {
           <div>
             <p><strong>Terminate {detail.full_name}?</strong></p>
             <p>Employment ends and the Driver's assignments close at the end of the termination day in each Branch's own time zone. A scheduled transfer taking effect after that is cancelled.</p>
+            <p>{TERMINATION_ACCESS_NOTICE}</p>
           </div>
         </div>
         <Field label="Termination date *"><input className={styles.inp} type="date" value={date} onChange={(e) => { setDate(e.target.value); setError(null); }} required /></Field>
