@@ -198,14 +198,15 @@ test('scheduleSummary: no days off -> "days off: None"', () => {
 
 // ── MAX_NORMAL_DAYS_OFF / canAddDayOff (frontend guidance only) ────────────
 
-test('MAX_NORMAL_DAYS_OFF is 2', () => {
-  assert.equal(MAX_NORMAL_DAYS_OFF, 2);
+test('MAX_NORMAL_DAYS_OFF is 3', () => {
+  assert.equal(MAX_NORMAL_DAYS_OFF, 3);
 });
 
 test('canAddDayOff: true below the max, false at or above it', () => {
   assert.equal(canAddDayOff(0), true);
   assert.equal(canAddDayOff(daysToMask([0])), true);
-  assert.equal(canAddDayOff(daysToMask([0, 6])), false);
+  assert.equal(canAddDayOff(daysToMask([0, 6])), true);
+  assert.equal(canAddDayOff(daysToMask([0, 3, 6])), false);
   assert.equal(canAddDayOff(127), false);
 });
 

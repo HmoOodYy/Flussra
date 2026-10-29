@@ -72,7 +72,7 @@ export const FRIENDLY_POLICY_MESSAGES: Record<string, string> = {
   REPLACEMENT_NOT_TERMINAL:
     'Another change already starts on this date. Confirm that you want to replace it.',
   VERSION_COVERAGE_GAP: 'A branch following this policy would have no payroll schedule before this date.',
-  INVALID_NORMAL_DAYS_OFF: 'Choose at most two normal days off.',
+  INVALID_NORMAL_DAYS_OFF: 'Choose at most three normal days off.',
   INVALID_SCHEDULE: 'The payroll schedule is incomplete or not valid.',
   INVALID_EFFECTIVE_DATE: "The change can't start before the schedule's first payroll period.",
   SETUP_NOT_ACTIVE: 'This payroll policy is archived.',

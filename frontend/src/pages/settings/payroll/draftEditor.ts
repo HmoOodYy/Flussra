@@ -11,9 +11,9 @@
  * backend/app/payroll_setup/policy.py Schedule): frequency
  * Week|Biweek|Month|Custom, an ISO anchor date, a positive integer interval
  * required only for Custom, and a 0..127 day-off mask. `validateDraftForm`
- * additionally rejects more than MAX_NORMAL_DAYS_OFF (2) days off as UI
+ * additionally rejects more than MAX_NORMAL_DAYS_OFF (3) days off as UI
  * guidance only — the backend (INVALID_NORMAL_DAYS_OFF) is the only real
- * enforcement point, and a mask with more than 2 bits set (e.g. one copied
+ * enforcement point, and a mask with more than 3 bits set (e.g. one copied
  * from an old draft/schedule) is still shown as-is, never silently changed.
  * No other client-invented constraint.
  */
@@ -197,7 +197,7 @@ function validateSharedForm(form: DraftForm): string | null {
     return 'Invalid days-off selection.';
   }
   if (maskToDays(form.normal_days_off_mask).length > MAX_NORMAL_DAYS_OFF) {
-    return 'Choose at most two normal days off.';
+    return 'Choose at most three normal days off.';
   }
   const anchorError = dateFieldError('First payroll period start', form.anchor_start_date);
   if (anchorError) return anchorError;
