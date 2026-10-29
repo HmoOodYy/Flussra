@@ -1,7 +1,7 @@
 """Admin permission catalogue, company-role permissions, and user overrides."""
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.admin import audit, security
@@ -12,9 +12,12 @@ from app.admin.schemas import (
     UserPermissionOverridesUpdate,
 )
 
+# Modules whose permissions are offered by the role editor and the per-user
+# extra-permission picker (``ui_only=True``).
 _UI_MODULE_CODES = (
     'company', 'roles', 'users', 'payroll', 'payitems',
     'payrates', 'drivers', 'dispatch', 'reports', 'settings', 'payroll_setup',
+    'review', 'employees', 'ledger',
 )
 
 
@@ -40,6 +43,8 @@ _PERM_DEPS: dict[str, str] = {
     'drivers.edit':     'drivers.view',
     'dispatch.edit':    'dispatch.view',
     'settings.manage':  'settings.view',
+    'employees.manage': 'employees.view',
+    'ledger.audit.view': 'ledger.view',
 }
 
 
@@ -57,11 +62,10 @@ async def list_permissions(
             text("""
                 SELECT permissionid, permissioncode, permissionname, modulecode, notes
                 FROM   sec.permissions
-                WHERE  modulecode IN ('company','roles','users','payroll','payitems',
-                                      'payrates','drivers','dispatch','reports','settings',
-                                      'payroll_setup','review')
+                WHERE  modulecode IN :ui_modules
                 ORDER  BY modulecode, permissioncode
-            """),
+            """).bindparams(bindparam("ui_modules", expanding=True)),
+            {"ui_modules": list(_UI_MODULE_CODES)},
         )
     else:
         result = await db.execute(
