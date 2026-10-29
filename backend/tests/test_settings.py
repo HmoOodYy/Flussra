@@ -17,9 +17,11 @@ TestCreateBranch        — POST /settings/branches (create, auto-code, conflict
 TestUpdateBranch        — PATCH /settings/branches/{id} (partial update, default guard, conflicts)
 TestSetDefaultBranch    — POST /settings/branches/{id}/set-default (promotion, idempotent, 422)
 TestSettingsAudit       — audit-log rollback: company update and branch create roll back on audit failure
+TestSettingsAdminAuthority — company-wide settings.manage or setup.manage administers settings; branch scope and other permissions do not
 """
 import re
 from unittest.mock import patch
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -965,3 +967,142 @@ class TestSettingsAudit:
             )
         ).json()["notes"]
         assert after == before
+
+
+# ---------------------------------------------------------------------------
+# TestSettingsAdminAuthority
+# ---------------------------------------------------------------------------
+
+async def _login_as_role_holder(
+    client: httpx.AsyncClient,
+    admin_token: str,
+    *,
+    permissions: list[str],
+    scope_type: str,
+    branch_id: int | None = None,
+) -> str:
+    """Create a one-off role with exactly *permissions*, a user holding only that
+    role at *scope_type*, and return that user's access token."""
+    suffix = uuid4().hex[:10]
+    role = await client.post(
+        "/admin/company-roles", json={"role_name": f"Settings Authority {suffix}"},
+        headers=auth(admin_token),
+    )
+    assert role.status_code == 201, role.text
+    role_id = role.json()["company_role_id"]
+    granted = await client.put(
+        f"/admin/company-roles/{role_id}/permissions",
+        json={"permission_codes": permissions}, headers=auth(admin_token),
+    )
+    assert granted.status_code == 200, granted.text
+
+    username = f"settings_authority_{suffix}"
+    created = await client.post(
+        "/admin/users",
+        json={
+            "username": username, "display_name": "Settings Authority",
+            "password": "TestPass1234!", "is_active": True, "can_login": True,
+            "must_change_password": False, "is_staged": False,
+            "role_assignment": {
+                "company_role_id": role_id, "scope_type": scope_type, "branch_id": branch_id,
+            },
+        },
+        headers=auth(admin_token),
+    )
+    assert created.status_code == 201, created.text
+
+    login = await client.post(
+        "/auth/login",
+        json={"username": username, "password": "TestPass1234!", "company_code": "DEMO"},
+    )
+    assert login.status_code == 200, login.text
+    return login.json()["access_token"]
+
+
+class TestSettingsAdminAuthority:
+    """Company settings administration accepts company-wide settings.manage or
+    setup.manage. A Company Owner in a real database holds settings.manage and
+    never the legacy setup.manage code."""
+
+    async def test_company_wide_settings_manage_without_setup_manage_can_administer_settings(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        owned_branch_id: int,
+    ):
+        token = await _login_as_role_holder(
+            client, auth_token, permissions=["settings.manage"], scope_type="AllCompanyBranches",
+        )
+
+        company = (await client.get("/settings/company", headers=auth(token))).json()
+        patched_company = await client.patch(
+            "/settings/company", json={"company_name": company["company_name"]},
+            headers=auth(token),
+        )
+        assert patched_company.status_code == 200, patched_company.text
+
+        patched_branch = await client.patch(
+            f"/settings/branches/{owned_branch_id}", json={"city": "Giza"}, headers=auth(token),
+        )
+        assert patched_branch.status_code == 200, patched_branch.text
+        assert patched_branch.json()["city"] == "Giza"
+
+        created_key = await client.post(
+            "/settings/status-keys",
+            json={"key_name": f"Authority {uuid4().hex[:10]}", "category": "Vacation"},
+            headers=auth(token),
+        )
+        assert created_key.status_code == 201, created_key.text
+
+        currencies = await client.get("/settings/currencies", headers=auth(token))
+        assert currencies.status_code == 200, currencies.text
+
+    async def test_branch_scoped_settings_manage_cannot_administer_settings(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        hq_branch_id: int,
+        owned_branch_id: int,
+    ):
+        token = await _login_as_role_holder(
+            client, auth_token, permissions=["settings.manage"],
+            scope_type="SpecificBranch", branch_id=hq_branch_id,
+        )
+
+        attempts = [
+            await client.patch(
+                "/settings/company", json={"company_name": "Not Allowed"}, headers=auth(token)),
+            await client.patch(
+                f"/settings/branches/{owned_branch_id}", json={"city": "Nowhere"},
+                headers=auth(token)),
+            await client.post(
+                "/settings/status-keys",
+                json={"key_name": f"Refused {uuid4().hex[:10]}", "category": "Vacation"},
+                headers=auth(token)),
+            await client.get("/settings/currencies", headers=auth(token)),
+        ]
+        assert [r.status_code for r in attempts] == [403, 403, 403, 403]
+
+    async def test_company_wide_user_with_neither_admin_permission_cannot_administer_settings(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        owned_branch_id: int,
+    ):
+        token = await _login_as_role_holder(
+            client, auth_token, permissions=["users.view"], scope_type="AllCompanyBranches",
+        )
+
+        attempts = [
+            await client.patch(
+                "/settings/company", json={"company_name": "Not Allowed"}, headers=auth(token)),
+            await client.patch(
+                f"/settings/branches/{owned_branch_id}", json={"city": "Nowhere"},
+                headers=auth(token)),
+            await client.post(
+                "/settings/status-keys",
+                json={"key_name": f"Refused {uuid4().hex[:10]}", "category": "Vacation"},
+                headers=auth(token)),
+            await client.get("/settings/currencies", headers=auth(token)),
+        ]
+        assert [r.status_code for r in attempts] == [403, 403, 403, 403]

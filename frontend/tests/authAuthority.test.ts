@@ -272,11 +272,33 @@ test('canEditPayRates: driver and ODA users are denied despite a matching branch
   assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { scope: 'SpecificBranch', role_code: 'DRIVER' }), 10), false);
 });
 
-// ── canManageSettingsAdmin: canonical company-scoped setup.manage only ──────
+// ── canManageSettingsAdmin: canonical company-scoped settings.manage or setup.manage ──
 
 test('canManageSettingsAdmin: company-wide setup.manage authorizes', () => {
   const user = companyUser('setup.manage');
   assert.equal(canManageSettingsAdmin(user), true);
+});
+
+test('canManageSettingsAdmin: company-wide settings.manage without setup.manage authorizes', () => {
+  const user = companyUser('settings.manage');
+  assert.equal(canManageSettingsAdmin(user), true);
+});
+
+test('canManageSettingsAdmin: branch-scoped settings.manage does not authorize company settings', () => {
+  const user = scopedUser('settings.manage', 10);
+  assert.equal(canManageSettingsAdmin(user), false);
+});
+
+test('canManageSettingsAdmin: a Driver holding settings.manage only for a Branch is denied', () => {
+  const user = makeUser({
+    self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['settings.manage'] }] }),
+  });
+  assert.equal(canManageSettingsAdmin(user), false);
+});
+
+test('canManageSettingsAdmin: company permissions unrelated to settings administration do not authorize', () => {
+  assert.equal(canManageSettingsAdmin(companyUser('users.view')), false);
 });
 
 test('canManageSettingsAdmin: branch-scoped setup.manage does not authorize company settings', () => {

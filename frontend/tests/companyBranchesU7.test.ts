@@ -167,6 +167,16 @@ test('D. capabilities: company-wide setup.manage WITHOUT branches.create -> canC
   assert.equal(canAccessCompanyBranches(user), true);
 });
 
+test('D. capabilities: company-wide settings.manage (no setup.manage) + branches.create -> full access with no limited-access notice', () => {
+  const user = companyWideUser(['settings.manage', 'branches.create']);
+  const caps = companyBranchesCapabilities(user);
+  assert.equal(caps.canAdmin, true);
+  assert.equal(caps.canCreate, true);
+  assert.equal(caps.canSetDefaultOnCreate, true);
+  assert.equal(canAccessCompanyBranches(user), true);
+  assert.equal(accessNotice(caps), null);
+});
+
 test('E. capabilities: company payroll_setup.view(+manage+publish) alone -> canCreate false, canOnboard false, canAccessCompanyBranches false', () => {
   const user = companyWideUser(['payroll_setup.view', 'payroll_setup.manage', 'payroll_setup.publish']);
   const caps = companyBranchesCapabilities(user);

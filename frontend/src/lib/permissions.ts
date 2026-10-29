@@ -281,19 +281,21 @@ export function canDeleteRoles(user: UserProfile): boolean {
 }
 
 /**
- * Full settings admin (company, branches, payroll setup, pay items).
- * Canonical company-scoped setup.manage — mirrors the backend's
- * _ensure_company_admin, not flat or coarse frontend projections.
+ * Settings admin (company, branches, status keys, pay items).
+ * Company-scoped settings.manage or setup.manage (the shared company admin
+ * fallback) — mirrors the backend's ensure_company_admin, not flat or coarse
+ * frontend projections.
  */
 export function canManageSettingsAdmin(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'setup.manage');
+  return _hasCompanyAdminFallback(user);
 }
 
 /**
  * True when the user should be able to reach the Pay Items page.
  *
  * Two paths:
- *   1. Full settings admin — canonical company-scoped setup.manage
+ *   1. Full settings admin — canonical company-scoped settings.manage or
+ *      setup.manage
  *      (canManageSettingsAdmin).
  *   2. Any user with payitems.edit somewhere — needed to browse and request
  *      items — or setup.manage for at least one Branch, which the backend accepts
@@ -372,7 +374,7 @@ export function canCreateBranches(user: UserProfile): boolean {
 }
 
 /**
- * Company & Branches page access: settings admin (setup.manage) or branch
+ * Company & Branches page access: settings admin (settings.manage or setup.manage) or branch
  * creator. Entering the page does not grant edit actions; those keep
  * canManageSettingsAdmin.
  */
@@ -504,10 +506,17 @@ export function canConfigureBranchPayDefinitions(
   );
 }
 
-/** Apply a PayDefinition's applicability across several Branches at once. */
+/**
+ * Apply a PayDefinition's applicability across several Branches at once.
+ * Mirrors the backend bulk branch-config permission: company-wide payitems.edit
+ * OR company-wide setup.manage. settings.manage alone is not enough.
+ */
 export function canConfigureAllBranchPayDefinitions(
   user: UserProfile | null | undefined,
 ): boolean {
   if (!user) return false;
-  return canGovernPayDefinitionsCompanyWide(user) || canManageSettingsAdmin(user);
+  return (
+    canGovernPayDefinitionsCompanyWide(user) ||
+    hasAuthorityPermission(user.authority, 'setup.manage', null)
+  );
 }
