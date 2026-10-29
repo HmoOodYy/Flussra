@@ -23,10 +23,28 @@ $PYTHON = if ($env:FLUSSRA_PYTHON) {
     Join-Path $ROOT "backend\.venv\Scripts\python.exe"
 }
 $SETUP_SCRIPT = Join-Path $ROOT "scripts\setup_backend.ps1"
+$ENV_FILE = $null
+if ($env:FLUSSRA_ENV_FILE) {
+    if (-not (Test-Path -LiteralPath $env:FLUSSRA_ENV_FILE -PathType Leaf)) {
+        Write-Host "Backend environment file not found at: $env:FLUSSRA_ENV_FILE" -ForegroundColor Red
+        exit 1
+    }
+    $ENV_FILE = (Resolve-Path -LiteralPath $env:FLUSSRA_ENV_FILE).Path
+}
 
 if (-not (Test-Path -LiteralPath $PYTHON -PathType Leaf)) {
     Write-Host "Python runtime not found at: $PYTHON`nRun $SETUP_SCRIPT or set FLUSSRA_PYTHON to an existing Python 3.12+ environment." -ForegroundColor Red
     exit 1
+}
+
+function Invoke-BackendPython {
+    param([string[]]$PythonArgs)
+
+    if ($ENV_FILE) {
+        & $PYTHON -c "import runpy, sys; from dotenv import load_dotenv; load_dotenv(sys.argv[1], override=False); module_args = sys.argv[2:]; sys.argv = module_args[1:]; runpy.run_module(module_args[1], run_name='__main__')" $ENV_FILE @PythonArgs
+    } else {
+        & $PYTHON @PythonArgs
+    }
 }
 
 Write-Host ""
@@ -38,7 +56,7 @@ Write-Host ""
 # ── Step 1: Apply migrations ──────────────────────────────────────────────
 Write-Host "[1/2] Applying Alembic migrations..." -ForegroundColor Yellow
 Set-Location $ROOT
-& $PYTHON -m alembic upgrade head
+Invoke-BackendPython -PythonArgs @("-m", "alembic", "upgrade", "head")
 if ($LASTEXITCODE -ne 0) {
     throw ("alembic upgrade head failed. Exit code: {0}. Fix migrations before starting the backend." -f $LASTEXITCODE)
 }
@@ -50,4 +68,4 @@ Write-Host "[2/2] Starting uvicorn on http://0.0.0.0:8000 ..." -ForegroundColor 
 Write-Host "      Press Ctrl+C to stop." -ForegroundColor DarkGray
 Write-Host ""
 Set-Location (Join-Path $ROOT "backend")
-& $PYTHON -m uvicorn app.main:create_app --factory --reload --host 0.0.0.0 --port 8000
+Invoke-BackendPython -PythonArgs @("-m", "uvicorn", "app.main:create_app", "--factory", "--reload", "--host", "0.0.0.0", "--port", "8000")
