@@ -18,17 +18,17 @@ export const BUSINESS_GROUP_DEFS: readonly BusinessGroupDef[] = [
   {
     id: 'org-admin',
     label: 'Organization Administration',
-    codes: ['company.view', 'company.edit', 'branches.view', 'branches.create', 'branches.edit', 'users.view', 'users.create', 'users.edit', 'users.deactivate', 'roles.view', 'roles.create', 'roles.edit', 'roles.delete'],
+    codes: ['branches.create', 'users.view', 'users.create', 'users.edit', 'users.deactivate', 'roles.view', 'roles.create', 'roles.edit', 'roles.delete'],
   },
   {
     id: 'payroll-ops',
     label: 'Payroll Operations',
-    codes: ['payroll.view', 'payroll.period.create', 'payroll.entry', 'payroll.approve', 'review.decide', 'payroll.finalize'],
+    codes: ['payroll.view', 'payroll.period.create', 'payroll.entry', 'review.decide', 'payroll.finalize'],
   },
   {
     id: 'payroll-config',
     label: 'Payroll Configuration',
-    codes: ['settings.view', 'settings.manage', 'setup.manage', 'payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
+    codes: ['settings.manage', 'setup.manage', 'payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
   },
   {
     id: 'payroll-setup',
@@ -39,17 +39,26 @@ export const BUSINESS_GROUP_DEFS: readonly BusinessGroupDef[] = [
   {
     id: 'workforce',
     label: 'Workforce',
-    codes: ['drivers.view', 'drivers.create', 'drivers.edit'],
+    codes: ['drivers.view', 'drivers.edit', 'employees.view', 'employees.manage'],
   },
   {
     id: 'reporting',
     label: 'Reporting',
-    codes: ['reports.view'],
+    codes: ['reports.view', 'ledger.view', 'ledger.audit.view'],
   },
 ];
 
-// Permissions excluded from the UI — preserved unchanged on every save via permsSt.codes
-export const HIDDEN_PERM_CODES = new Set(['dispatch.view', 'dispatch.edit']);
+// Permissions excluded from the UI — preserved unchanged on every save via permsSt.codes.
+// None of these is checked by any backend route or policy, so ticking them would grant nothing;
+// the codes stay in the catalogue and any role that already holds one keeps it.
+export const HIDDEN_PERM_CODES: ReadonlySet<string> = new Set([
+  'company.view', 'company.edit',
+  'branches.view', 'branches.edit',
+  'dispatch.view', 'dispatch.edit',
+  'drivers.create',
+  'payroll.approve', 'payroll.edit',
+  'settings.view',
+]);
 
 // Risk tiers — visual only, no enforcement
 export type RiskTier = 'readonly' | 'write' | 'approval' | 'critical';
@@ -84,6 +93,8 @@ export const PERM_DEPS: Record<string, string> = {
   'drivers.edit':          'drivers.view',
   'dispatch.edit':         'dispatch.view',
   'settings.manage':       'settings.view',
+  'employees.manage':      'employees.view',
+  'ledger.audit.view':     'ledger.view',
   // UI administration dependency only: the Payroll Setup pages require payroll_setup.view to be usable.
   // The backend checks each endpoint's explicit code and does NOT imply view from manage/publish/assign.
   'payroll_setup.manage':  'payroll_setup.view',
@@ -91,10 +102,12 @@ export const PERM_DEPS: Record<string, string> = {
   'payroll_setup.assign':  'payroll_setup.view',
 };
 
-// Parent → children that depend on it (only visible codes are toggled — hidden dispatch.* are safe)
+// Parent → children that depend on it. Hidden children are included on purpose: the backend
+// re-adds a missing parent on save, so unticking a visible parent must also drop the hidden
+// child that would otherwise silently bring it back. Hidden codes with no visible parent
+// toggle are never touched.
 export const PERM_DEPENDENTS: Record<string, string[]> = {};
 for (const [child, parent] of Object.entries(PERM_DEPS)) {
-  if (HIDDEN_PERM_CODES.has(child)) continue; // dispatch cascade never triggered from visible UI
   if (!PERM_DEPENDENTS[parent]) PERM_DEPENDENTS[parent] = [];
   PERM_DEPENDENTS[parent].push(child);
 }
@@ -163,11 +176,18 @@ export function permsReducer(s: PermsState, a: PermsAction): PermsState {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// A parent that is hidden cannot be ticked by the user, so a missing hidden parent is not a
+// blocker to show ("requires …"); enabling the child adds it automatically.
+export function isUserVisibleParentMissing(parent: string | undefined, codes: ReadonlySet<string>): boolean {
+  return parent !== undefined && !HIDDEN_PERM_CODES.has(parent) && !codes.has(parent);
+}
+
 export function groupPermissionsByDomain<T extends { permission_code: string }>(perms: T[]): [BusinessGroupDef, T[]][] {
   const byCode = new Map(perms.map(p => [p.permission_code, p]));
   return BUSINESS_GROUP_DEFS
     .map(group => {
       const grouped = group.codes
+        .filter(code => !HIDDEN_PERM_CODES.has(code))
         .map(code => byCode.get(code))
         .filter((p): p is T => p !== undefined);
       return [group, grouped] as [BusinessGroupDef, T[]];

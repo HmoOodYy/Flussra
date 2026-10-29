@@ -53,12 +53,14 @@ export function isDriverUser(user: UserProfile): boolean {
 
 // ── Page-level visibility guards ──────────────────────────────────────────────
 
+// Exactly the codes the backend accepts for payroll reads (GET /payroll/current,
+// /payroll/current-workflow, /payroll/periods, /review/items ...). payroll.edit is not checked
+// by any route, and payroll.period.create alone is refused by every read the page makes
+// (it only unlocks period creation, which needs payroll.view in practice).
 const PAYROLL_READ = [
   'payroll.view',
-  'payroll.edit',           // production seed code (migration 0015)
-  'payroll.entry',          // legacy/test-only code (conftest.py / ensure_dev_admin.py)
+  'payroll.entry',
   'payroll.finalize',
-  'payroll.period.create',  // dedicated create permission (migration 0030)
 ] as const;
 
 const PAYRATES_ACCESS = [
@@ -68,7 +70,7 @@ const PAYRATES_ACCESS = [
   'setup.manage',
 ] as const;
 
-/** Current Payroll page: any payroll read/write permission. */
+/** Current Payroll page: any permission the backend accepts for payroll reads. */
 export function canViewCurrentPayroll(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAnyAuthorityPermission(user, PAYROLL_READ);
 }

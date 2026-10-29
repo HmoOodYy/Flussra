@@ -684,6 +684,22 @@ class TestPermissionOverrides:
         assert "payroll.edit" in codes
         assert "payroll.view" in codes  # auto-added
 
+    async def test_set_overrides_employees_manage_and_ledger_audit_add_view_parents(
+        self, client: httpx.AsyncClient, auth_token: str
+    ):
+        user = await _create_test_user(
+            client, auth_token, username="test_pov_wf_ledger", display_name="POV Workforce Ledger"
+        )
+        resp = await client.put(
+            f"/admin/users/{user['user_id']}/permission-overrides",
+            json={"permission_codes": ["employees.manage", "ledger.audit.view"]},
+            headers=_hdr(auth_token),
+        )
+        assert resp.status_code == 200
+        assert set(resp.json()) == {
+            "employees.manage", "employees.view", "ledger.audit.view", "ledger.view",
+        }
+
     async def test_set_overrides_replaces_existing(
         self, client: httpx.AsyncClient, auth_token: str
     ):
