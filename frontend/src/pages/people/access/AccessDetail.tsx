@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom';
+import { OWN_ACCESS_NOTICE } from '../../../lib/accessSafetyErrors';
 import { friendlyPermLabel } from '../../../lib/permissionLabels';
 import type { Permission, UserAdmin } from '../../../types/admin';
 import { avatarInitials, fmtDate, fmtDateTime, scopeLabel } from '../peoplePresentation';
@@ -9,6 +10,8 @@ export interface AccessDetailProps {
   user: UserAdmin;
   allPerms: Permission[];
   amOwner: boolean;
+  /** The signed-in person's own account: their role and extra permissions are changed by someone else. */
+  isSelf: boolean;
   can: { edit: boolean; toggle: boolean; changeRole: boolean; provision: boolean; link: boolean; openWorkforce: boolean };
   canViewPayRates: boolean;
   onEdit(): void; onToggleActive(): void; onResetPw(): void; onChangeRole(): void;
@@ -16,7 +19,7 @@ export interface AccessDetailProps {
 }
 
 /** One User's account: login state, role and scope, overrides and Employee link. Not an Employee record. */
-export function AccessDetail({ user, allPerms, amOwner, can, canViewPayRates, onEdit, onToggleActive, onResetPw, onChangeRole, onEditExtraPerms, onOwnerTransfer, onProvision, onLink, onUnlink }: AccessDetailProps) {
+export function AccessDetail({ user, allPerms, amOwner, isSelf, can, canViewPayRates, onEdit, onToggleActive, onResetPw, onChangeRole, onEditExtraPerms, onOwnerTransfer, onProvision, onLink, onUnlink }: AccessDetailProps) {
   const permByCode = new Map(allPerms.map(p => [p.permission_code, p]));
   const status = accessStatus(user);
   const facts = accessFacts(user);
@@ -50,7 +53,7 @@ export function AccessDetail({ user, allPerms, amOwner, can, canViewPayRates, on
             )}
             {can.edit && <button className={styles.actBtn} onClick={onResetPw}>Reset Password</button>}
             {user.is_staged && can.provision && <button className={`${styles.actBtn} ${styles.actBtnDriver}`} onClick={onProvision}>Provision account</button>}
-            {can.changeRole && !isOwner && !user.is_staged && <button className={styles.actBtn} onClick={onChangeRole}>Change Role</button>}
+            {can.changeRole && !isOwner && !isSelf && !user.is_staged && <button className={styles.actBtn} onClick={onChangeRole}>Change Role</button>}
             {canOwnerTransfer && <button className={`${styles.actBtn} ${styles.actBtnOwner}`} onClick={onOwnerTransfer}>Transfer Ownership</button>}
           </div>
         </div>
@@ -111,6 +114,7 @@ export function AccessDetail({ user, allPerms, amOwner, can, canViewPayRates, on
               Company Owner has full access to all permissions. Role, scope, and extra permissions cannot be changed here. Use Transfer Ownership to hand over authority.
             </div>
           )}
+          {isSelf && !isOwner && <p className={styles.helpTxt}>{OWN_ACCESS_NOTICE}</p>}
           <div className={styles.grid2}>
             <span className={styles.fl}>Role</span>
             <span>{user.company_role_name ?? <span className={styles.noRole}>No role assigned</span>}</span>
@@ -126,7 +130,7 @@ export function AccessDetail({ user, allPerms, amOwner, can, canViewPayRates, on
           <section className={styles.sec}>
             <div className={styles.secTitleRow}>
               <h3 className={styles.secTitle}>Extra Permissions</h3>
-              {can.edit && <button className={styles.secEditBtn} onClick={onEditExtraPerms}>Edit</button>}
+              {can.edit && !isSelf && <button className={styles.secEditBtn} onClick={onEditExtraPerms}>Edit</button>}
             </div>
             {user.extra_permission_codes.length === 0 ? (
               <p className={styles.emptySecMsg}>No extra permissions. Role permissions apply.</p>

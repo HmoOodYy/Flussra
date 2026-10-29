@@ -12,6 +12,7 @@ _ADMIN_AUDIT_REASONS: dict[str, str] = {
     "USER_EMPLOYEE_UNLINKED":           "User unlinked from Employee",
     "USER_PROVISIONED":                 "Staged User provisioned",
     "USER_STAGED":                      "User staged after final role revocation",
+    "USER_ACCESS_ENDED_BY_TERMINATION": "User sign-in and access ended by Employee termination",
     "ROLE_ASSIGNED":                   "Role assigned to user",
     "ROLE_REVOKED":                    "Role assignment revoked",
     "COMPANY_ROLE_ASSIGNED":           "Company role assigned to user",

@@ -38,6 +38,8 @@ interface RolePermissionEditorProps {
   dispatchPerms: Dispatch<PermsAction>;
   dispatchUsers: Dispatch<UsersModalAction>;
   readOnly: boolean;
+  /** The signed-in person holds this role, so someone else must change its permissions. */
+  holdsRole: boolean;
   canEdit: boolean;
   saveError: string;
   setSaveError: Dispatch<SetStateAction<string>>;
@@ -55,6 +57,7 @@ export function RolePermissionEditor({
   dispatchPerms,
   dispatchUsers,
   readOnly,
+  holdsRole,
   canEdit,
   saveError,
   setSaveError,
@@ -198,7 +201,9 @@ export function RolePermissionEditor({
                 )}
                 {readOnly && (
                   <div style={{ padding: '0.5rem 0.25rem 0.75rem', fontSize: '0.8rem', color: '#6b7280', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                    <LockSmallIcon /> You have view-only access. Editing permissions requires <code>roles.edit</code>.
+                    <LockSmallIcon /> {holdsRole
+                      ? <>You hold this role. Someone else needs to change its permissions.</>
+                      : <>You have view-only access. Editing permissions requires <code>roles.edit</code>.</>}
                   </div>
                 )}
                 {!permsSt.loading && !permsSt.error && groupedDomains.map(([group, perms]) => {

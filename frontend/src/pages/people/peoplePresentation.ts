@@ -1,12 +1,17 @@
+import { accessSafetyMessage } from '../../lib/accessSafetyErrors.ts';
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 export function apiError(err: unknown): string {
+  const safety = accessSafetyMessage(err);
+  if (safety) return safety;
   const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   if (typeof d === 'string' && d.trim()) return d;
   if (Array.isArray(d))
     return d.map((i: unknown) =>
       i && typeof i === 'object' && 'msg' in i ? String((i as { msg: unknown }).msg) : null
     ).filter(Boolean).join(' ');
+  if (d && typeof d === 'object' && 'message' in d) return String((d as { message: unknown }).message);
   return 'An unexpected error occurred.';
 }
 

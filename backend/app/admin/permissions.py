@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.admin import audit, security
+from app.admin import access_safety, audit, security
 from app.admin.schemas import (
     CompanyRolePermissions,
     CompanyRolePermissionsUpdate,
@@ -175,6 +175,8 @@ async def set_company_role_permissions(
             ),
         )
 
+    await access_safety.ensure_not_editing_held_role(company_id, caller_id, company_role_id, db)
+
     new_codes: set[str] = {c.strip() for c in data.permission_codes if c.strip()}
     if role["rolecode"] == "DRIVER" and new_codes:
         raise HTTPException(status_code=422, detail="The DRIVER role cannot receive generic permissions in P2b.")
@@ -209,6 +211,9 @@ async def set_company_role_permissions(
         {"rid": company_role_id},
     )
     old_codes = [r["permissioncode"] for r in cur_r.mappings().all()]
+
+    # Only codes being added need the caller to hold them; codes the role already had are kept.
+    await access_safety.ensure_can_grant(company_id, caller_id, new_codes - set(old_codes), db)
 
     # Replace: delete all, then insert new set
     await db.execute(
@@ -291,18 +296,20 @@ async def set_user_permission_overrides(
     # Permission overrides are person-specific — only users.edit (not roles.edit)
     # can mutate individual member permissions.
     await security.ensure_any_permission(company_id, caller_id, db, "users.edit", *security.ADMIN_FALLBACKS)
+    access_safety.forbid_self_access_change(caller_id, target_user_id)
 
     # Confirm target user exists + get their company role for COMPANY_OWNER guard
     u_r = await db.execute(
         text("""
-            SELECT u.userid
+            SELECT u.userid, u.employeeid
             FROM   sec.users u
             WHERE  u.userid    = :uid
               AND  u.companyid = :cid
         """),
         {"uid": target_user_id, "cid": company_id},
     )
-    if not u_r.fetchone():
+    target = u_r.mappings().first()
+    if target is None:
         raise HTTPException(status_code=404, detail="User not found.")
 
     # Block Company Owner — already has all permissions
@@ -379,6 +386,12 @@ async def set_user_permission_overrides(
         {"uid": target_user_id, "cid": company_id},
     )
     old_codes = [r["permissioncode"] for r in old_r.mappings().all()]
+
+    # Removing extra permissions is always allowed; adding one needs the caller to hold it.
+    added_codes = new_codes - set(old_codes)
+    if added_codes:
+        await access_safety.ensure_employee_not_terminated(company_id, target["employeeid"], db)
+    await access_safety.ensure_can_grant(company_id, caller_id, added_codes, db)
 
     # Soft-delete all existing active overrides
     await db.execute(

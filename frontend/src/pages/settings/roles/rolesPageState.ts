@@ -1,3 +1,4 @@
+import { accessSafetyMessage } from '../../../lib/accessSafetyErrors.ts';
 import type { CompanyRole, CompanyRoleUser } from '../../../types/admin';
 
 export type RolesState = { roles: CompanyRole[]; loading: boolean; error: string };
@@ -49,6 +50,8 @@ export function usersModalReducer(s: UsersModalState, a: UsersModalAction): User
 }
 
 export function apiError(err: unknown): string {
+  const safety = accessSafetyMessage(err);
+  if (safety) return safety;
   const d = (err as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   if (typeof d === 'string' && d.trim()) return d;
   if (Array.isArray(d)) return d.map((i: unknown) => (i as { msg?: string })?.msg ?? '').filter(Boolean).join(' ');
