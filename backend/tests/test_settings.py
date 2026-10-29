@@ -20,8 +20,8 @@ TestSettingsAudit       — audit-log rollback: company update and branch create
 TestSettingsAdminAuthority — company-wide settings.manage or setup.manage administers settings; branch scope and other permissions do not
 """
 import re
-from uuid import uuid4
 from unittest.mock import patch
+from uuid import uuid4
 
 import httpx
 import pytest
