@@ -304,7 +304,7 @@ async def test_admin_owner_has_full_permissions(client):
     perms = set(r.json()["user"]["active_permissions"])
     # These are seeded by migration 0015 and must all be present for an owner
     for expected in ("users.view", "users.edit", "roles.view", "roles.edit",
-                     "settings.manage", "setup.manage"):
+                     "settings.manage"):
         assert expected in perms, (
             f"COMPANY_OWNER missing expected permission '{expected}'. "
             f"Check _load_active_permissions Path A in auth/service.py."

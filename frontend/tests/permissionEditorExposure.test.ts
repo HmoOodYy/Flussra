@@ -58,7 +58,7 @@ const ALL_CODES = [
   ...LEDGER_CODES,
   'branches.create', 'users.view', 'users.edit', 'roles.view', 'roles.edit',
   'payroll.view', 'payroll.entry', 'payroll.finalize', 'payroll.period.create', 'review.decide',
-  'settings.manage', 'setup.manage', 'payitems.view', 'payrates.view',
+  'settings.manage', 'payitems.view', 'payrates.view',
   'drivers.view', 'drivers.edit', 'reports.view',
 ];
 const CATALOG = ALL_CODES.map(perm);

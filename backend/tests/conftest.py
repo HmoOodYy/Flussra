@@ -181,8 +181,7 @@ _SEED_STMTS = [
         ('payroll.finalize',       'Finalize Payroll',         'payroll'),
         ('employees.view',         'View Employees',           'employees'),
         ('employees.manage',       'Manage Employees',         'employees'),
-        ('review.decide',          'Decide on Review Items',   'review'),
-        ('setup.manage',           'Manage Settings',          'settings')
+        ('review.decide',          'Decide on Review Items',   'review')
     ON CONFLICT (permissioncode) DO NOTHING
     """,
     # ── Company-scoped roles (migration 0014/0016 new system) ─────────────────

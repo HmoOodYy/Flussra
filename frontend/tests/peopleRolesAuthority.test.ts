@@ -84,9 +84,9 @@ test('canViewAccess: a company-wide users.view grant authorizes even with empty 
   assert.equal(canViewAccess(companyUser('users.view')), true);
 });
 
-test('canViewAccess: company settings.manage/setup.manage authorize as admin fallback', () => {
-  assert.equal(canViewAccess(companyUser('settings.manage')), true);
-  assert.equal(canViewAccess(companyUser('setup.manage')), true);
+test('canViewAccess: settings.manage and the retired setup.manage do not authorize', () => {
+  assert.equal(canViewAccess(companyUser('settings.manage')), false);
+  assert.equal(canViewAccess(companyUser('setup.manage')), false);
 });
 
 test('canViewAccess: a mixed Driver branch row + valid company users.view grant is authorized', () => {
@@ -103,8 +103,10 @@ test('canCreatePeople: a company-wide users.create grant authorizes with empty a
   assert.equal(canCreatePeople(companyUser('users.create')), true);
 });
 
-test('canCreatePeople: company admin fallback authorizes', () => {
-  assert.equal(canCreatePeople(companyUser('setup.manage')), true);
+test('canCreatePeople: settings.manage and the retired setup.manage do not authorize', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canCreatePeople(companyUser(code)), false, code);
+  }
 });
 
 // ── canEditPeople ────────────────────────────────────────────────────────────
@@ -140,8 +142,10 @@ test('canTogglePeopleActive: company users.edit also authorizes toggle', () => {
   assert.equal(canTogglePeopleActive(companyUser('users.edit')), true);
 });
 
-test('canTogglePeopleActive: company admin fallback authorizes toggle', () => {
-  assert.equal(canTogglePeopleActive(companyUser('settings.manage')), true);
+test('canTogglePeopleActive: settings.manage and the retired setup.manage do not authorize', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canTogglePeopleActive(companyUser(code)), false, code);
+  }
 });
 
 // ── canAssignPeopleRole (company-role assignment helper) ───────────────────
@@ -158,8 +162,10 @@ test('canAssignPeopleRole: company users.edit also authorizes assignment', () =>
   assert.equal(canAssignPeopleRole(companyUser('users.edit')), true);
 });
 
-test('canAssignPeopleRole: company admin fallback authorizes assignment', () => {
-  assert.equal(canAssignPeopleRole(companyUser('setup.manage')), true);
+test('canAssignPeopleRole: settings.manage and the retired setup.manage do not authorize', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canAssignPeopleRole(companyUser(code)), false, code);
+  }
 });
 
 test('canAssignPeopleRole: mixed Driver branch row + valid company roles.edit grant is authorized', () => {
@@ -209,8 +215,10 @@ test('canManageRoles: company roles.view authorizes; branch-only roles.view does
   assert.equal(canManageRoles(branchOnlyUser('roles.view')), false);
 });
 
-test('canManageRoles: company admin fallback authorizes without roles.view', () => {
-  assert.equal(canManageRoles(companyUser('settings.manage')), true);
+test('canManageRoles: settings.manage and the retired setup.manage do not authorize', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canManageRoles(companyUser(code)), false, code);
+  }
 });
 
 test('canCreateRoles: company roles.create authorizes; branch-only roles.create does not', () => {
@@ -223,8 +231,10 @@ test('canCreateRoles: does not authorize on roles.view or roles.edit alone', () 
   assert.equal(canCreateRoles(companyUser('roles.edit')), false);
 });
 
-test('canCreateRoles: company admin fallback authorizes', () => {
-  assert.equal(canCreateRoles(companyUser('setup.manage')), true);
+test('canCreateRoles: settings.manage and the retired setup.manage do not authorize', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canCreateRoles(companyUser(code)), false, code);
+  }
 });
 
 test('canEditRoles: company roles.edit authorizes; branch-only roles.edit does not', () => {
@@ -237,8 +247,10 @@ test('canEditRoles: does not authorize on roles.view or roles.delete alone', () 
   assert.equal(canEditRoles(companyUser('roles.delete')), false);
 });
 
-test('canEditRoles: company admin fallback authorizes', () => {
-  assert.equal(canEditRoles(companyUser('settings.manage')), true);
+test('canEditRoles: settings.manage and the retired setup.manage do not authorize', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canEditRoles(companyUser(code)), false, code);
+  }
 });
 
 test('canDeleteRoles: company roles.delete authorizes; branch-only roles.delete does not', () => {
@@ -251,8 +263,10 @@ test('canDeleteRoles: does not authorize on roles.view or roles.edit alone', () 
   assert.equal(canDeleteRoles(companyUser('roles.edit')), false);
 });
 
-test('canDeleteRoles: company admin fallback authorizes', () => {
-  assert.equal(canDeleteRoles(companyUser('setup.manage')), true);
+test('canDeleteRoles: settings.manage and the retired setup.manage do not authorize', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canDeleteRoles(companyUser(code)), false, code);
+  }
 });
 
 // ── Cross-check: role helpers stay independent of each other ───────────────
@@ -271,8 +285,12 @@ test('canViewSettings: branch-only settings.manage in active_permissions is deni
   assert.equal(canViewSettings(user), false);
 });
 
-test('canViewSettings: company setup.manage authorizes with empty active_permissions', () => {
-  assert.equal(canViewSettings(companyUser('setup.manage')), true);
+test('canViewSettings: company settings.manage authorizes with empty active_permissions', () => {
+  assert.equal(canViewSettings(companyUser('settings.manage')), true);
+});
+
+test('canViewSettings: the retired company setup.manage does not authorize', () => {
+  assert.equal(canViewSettings(companyUser('setup.manage')), false);
 });
 
 test('canViewSettings: mixed Driver branch row + company roles.view is authorized', () => {

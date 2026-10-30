@@ -200,7 +200,7 @@ async def test_the_company_owner_can_assign_any_role(client, auth_token):
     assert response.status_code in (200, 201), response.text
 
 
-async def test_the_settings_manage_fallback_does_not_lift_the_role_ceiling(client, auth_token):
+async def test_settings_manage_alone_cannot_assign_a_company_role(client, auth_token):
     actor = await manager(client, auth_token, ["settings.manage"])
     target = await target_user(client, auth_token)
     beyond = await role_with(client, auth_token, ["payroll.view", "payroll.approve"])
@@ -211,7 +211,7 @@ async def test_the_settings_manage_fallback_does_not_lift_the_role_ceiling(clien
     )
 
     assert response.status_code == 403
-    assert refusal_code(response) == "GRANT_CEILING_EXCEEDED"
+    assert "users.edit" in response.json()["detail"]
 
 
 async def test_creating_or_provisioning_a_user_with_a_role_needs_every_permission_in_it(client, auth_token):

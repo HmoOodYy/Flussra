@@ -49,7 +49,7 @@ async def list_driver_pay_rules(
     status_code=201,
     summary="Create a new driver pay rule (MinimumPay or MaximumPay)",
     responses={
-        403: {"description": "No setup.manage permission"},
+        403: {"description": "No payrates.edit permission"},
         404: {"description": "Driver not found"},
         422: {"description": "Overlapping rule or invalid amount"},
     },
@@ -94,7 +94,7 @@ async def get_driver_pay_rule(
     response_model=DriverPayRuleSummary,
     summary="End (close) an Active driver pay rule",
     responses={
-        403: {"description": "No setup.manage permission"},
+        403: {"description": "No payrates.edit permission"},
         404: {"description": "Rule not found"},
         422: {"description": "Rule not Active, or effective_to before finalized period"},
     },
@@ -119,7 +119,7 @@ async def end_driver_pay_rule(
     response_model=DriverPayRuleSummary,
     summary="Update notes on a driver pay rule (notes-only)",
     responses={
-        403: {"description": "No setup.manage permission"},
+        403: {"description": "No payrates.edit permission"},
         404: {"description": "Rule not found"},
         422: {"description": "Rule is Voided"},
     },
@@ -144,7 +144,7 @@ async def update_driver_pay_rule(
     response_model=DriverPayRuleSummary,
     summary="Void a driver pay rule (only if no finalized period governed it)",
     responses={
-        403: {"description": "No setup.manage permission"},
+        403: {"description": "No payrates.edit permission"},
         404: {"description": "Rule not found"},
         422: {"description": "Rule already Voided, or finalized period exists in range"},
     },

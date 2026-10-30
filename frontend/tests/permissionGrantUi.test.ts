@@ -69,8 +69,7 @@ const CATALOG: CatalogPermission[] = [
   { permission_code: 'payroll.finalize', permission_name: 'Finalize Payroll', module_code: 'payroll' },
   // payroll-config / settings+payitems+payrates modules
   { permission_code: 'settings.view', permission_name: 'View Settings', module_code: 'settings' },
-  { permission_code: 'settings.manage', permission_name: 'Manage Settings', module_code: 'settings' },
-  { permission_code: 'setup.manage', permission_name: 'Manage Setup', module_code: 'settings' },
+  { permission_code: 'settings.manage', permission_name: 'Manage Company Settings', module_code: 'settings' },
   { permission_code: 'payitems.view', permission_name: 'View Pay Items', module_code: 'payitems' },
   { permission_code: 'payitems.edit', permission_name: 'Edit Pay Items', module_code: 'payitems' },
   { permission_code: 'payrates.view', permission_name: 'View Pay Rates', module_code: 'payrates' },
@@ -112,9 +111,9 @@ test('Roles groupPermissionsByDomain: payroll-setup group has correct id/label/n
   assert.deepEqual(perms.map(p => p.permission_code), PAYROLL_SETUP_CODES);
 });
 
-// ── B. Roles: group placement and setup.manage stays in payroll-config ──────
+// ── B. Roles: group placement; settings.manage has its own company-settings group ──────
 
-test('Roles groupPermissionsByDomain: payroll-setup immediately follows payroll-config; setup.manage stays put', () => {
+test('Roles groupPermissionsByDomain: payroll-setup immediately follows payroll-config; settings.manage sits in company-settings', () => {
   const grouped = groupPermissionsByDomain(CATALOG);
   const ids = grouped.map(([g]) => g.id);
   const configIdx = ids.indexOf('payroll-config');
@@ -123,10 +122,19 @@ test('Roles groupPermissionsByDomain: payroll-setup immediately follows payroll-
   assert.equal(setupIdx, configIdx + 1);
 
   const [, configPerms] = grouped.find(([g]) => g.id === 'payroll-config')!;
-  assert.ok(configPerms.some(p => p.permission_code === 'setup.manage'));
+  assert.ok(!configPerms.some(p => p.permission_code === 'settings.manage'));
+  assert.deepEqual(configPerms.map(p => p.permission_code), ['payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit']);
+
+  const [companySettings, companySettingsPerms] = grouped.find(([g]) => g.id === 'company-settings')!;
+  assert.equal(companySettings.label, 'Company Settings');
+  assert.equal(companySettings.note, 'Company profile, currency, branches and statuses. Does not include managing members, roles, pay items or pay rates.');
+  assert.deepEqual(companySettingsPerms.map(p => p.permission_code), ['settings.manage']);
 
   const [, setupPerms] = grouped.find(([g]) => g.id === 'payroll-setup')!;
-  assert.ok(!setupPerms.some(p => p.permission_code === 'setup.manage'));
+  assert.ok(!setupPerms.some(p => p.permission_code === 'settings.manage'));
+  for (const [, perms] of grouped) {
+    assert.ok(!perms.some(p => p.permission_code === 'setup.manage'));
+  }
 
   for (const [g, perms] of grouped) {
     if (g.id === 'payroll-setup') continue;
@@ -254,13 +262,17 @@ const PRE_U2_ROLES_GROUPS: Record<string, { label: string; codes: string[] }> = 
     label: 'Organization Administration',
     codes: ['branches.create', 'users.view', 'users.create', 'users.edit', 'users.deactivate', 'roles.view', 'roles.create', 'roles.edit', 'roles.delete'],
   },
+  'company-settings': {
+    label: 'Company Settings',
+    codes: ['settings.manage'],
+  },
   'payroll-ops': {
     label: 'Payroll Operations',
     codes: ['payroll.view', 'payroll.period.create', 'payroll.entry', 'review.decide', 'payroll.finalize'],
   },
   'payroll-config': {
     label: 'Payroll Configuration',
-    codes: ['settings.manage', 'setup.manage', 'payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
+    codes: ['payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
   },
   'workforce': {
     label: 'Workforce',
@@ -273,7 +285,7 @@ const PRE_U2_ROLES_GROUPS: Record<string, { label: string; codes: string[] }> = 
 };
 
 test('Roles BUSINESS_GROUP_DEFS: pre-existing groups unchanged, full id order correct', () => {
-  assert.deepEqual(BUSINESS_GROUP_DEFS.map(g => g.id), ['org-admin', 'payroll-ops', 'payroll-config', 'payroll-setup', 'workforce', 'reporting']);
+  assert.deepEqual(BUSINESS_GROUP_DEFS.map(g => g.id), ['org-admin', 'company-settings', 'payroll-ops', 'payroll-config', 'payroll-setup', 'workforce', 'reporting']);
   for (const [id, expected] of Object.entries(PRE_U2_ROLES_GROUPS)) {
     const g = BUSINESS_GROUP_DEFS.find(x => x.id === id);
     assert.ok(g, `group ${id} must still exist`);

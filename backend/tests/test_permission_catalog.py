@@ -8,15 +8,15 @@ Covers:
   • payroll.entry        — Enter Payroll Data           (modulecode='payroll')
   • payroll.period.create — Open/Create Payroll Period  (modulecode='payroll')
   • review.decide        — Approve/Reject Review Items  (modulecode='review')
-  • Legacy codes not removed: setup.manage, settings.manage,
-    payroll.approve_rate
+  • Legacy codes not removed: settings.manage, payroll.approve_rate
+  • setup.manage is retired and absent from the catalogue
 
 Also verifies:
   • Company Owner passes payroll.entry and review.decide backend checks
   • A custom role granted only payroll.entry can read payroll (entry ∈ _PAYROLL_READ_PERMS)
   • A custom role granted only review.decide can read review items
   • dispatch permissions untouched
-  • settings.manage / setup.manage fallback behaviour unchanged
+  • settings.manage is catalogued as "Manage Company Settings"
 """
 import httpx
 import pytest
@@ -253,16 +253,26 @@ class TestLegacyPermissionsNotRemoved:
         codes = {p["permission_code"] for p in resp.json()}
 
         legacy = [
-            "setup.manage",
             "settings.manage",
             "payroll.approve_rate",
         ]
         assert "drivers.manage" not in codes
+        assert "setup.manage" not in codes
         for code in legacy:
             assert code in codes, (
                 f"Legacy permission {code!r} must not be removed — "
                 "it may still be used by existing role assignments or backend fallbacks."
             )
+
+    async def test_settings_manage_is_named_for_company_settings(
+        self, client: httpx.AsyncClient, auth_token: str
+    ):
+        resp = await client.get(
+            "/admin/permissions?ui_only=false", headers=_hdr(auth_token)
+        )
+        assert resp.status_code == 200
+        names = {p["permission_code"]: p["permission_name"] for p in resp.json()}
+        assert names["settings.manage"] == "Manage Company Settings"
 
     async def test_dispatch_permissions_untouched(
         self, client: httpx.AsyncClient, auth_token: str

@@ -12,9 +12,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from app.access.permissions import check_any_permission, check_permission
 
 _DEFINITION_EDIT = "payitems.edit"
-_DEFINITION_READ = ["payitems.view", "payitems.edit", "settings.manage", "setup.manage"]
-RATE_EDIT = ["payrates.edit", "settings.manage", "setup.manage"]
-RATE_READ = ["payrates.view", "payrates.edit", "settings.manage", "setup.manage"]
+_DEFINITION_READ = ["payitems.view", "payitems.edit"]
+RATE_EDIT = ["payrates.edit"]
+RATE_READ = ["payrates.view", "payrates.edit"]
 
 
 async def require_definition_branch_edit(

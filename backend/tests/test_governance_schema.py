@@ -19,7 +19,7 @@ def current_database(schema_databases):
 
 def test_fresh_schema_has_governance_tables_and_guards(current_database):
     _, dsn = current_database
-    assert _version(dsn) == "0095"
+    assert _version(dsn) == "0096"
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         cursor.execute("""
             SELECT table_name FROM information_schema.tables

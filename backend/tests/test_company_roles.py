@@ -927,18 +927,18 @@ class TestPermissionsListFiltering:
         }
 
     @pytest.mark.asyncio
-    async def test_ui_only_false_includes_legacy(self, client, auth_token):
-        """ui_only=false should expose legacy codes beyond the default set."""
+    async def test_ui_only_false_lists_the_whole_catalogue_without_setup_manage(self, client, auth_token):
+        """ui_only=false lists every catalogued code; the retired setup.manage is not one."""
+        default = await client.get("/admin/permissions", headers=auth_headers(auth_token))
         resp = await client.get(
             "/admin/permissions?ui_only=false",
             headers=auth_headers(auth_token),
         )
         assert resp.status_code == 200
         codes = {p["permission_code"] for p in resp.json()}
-        # At least one truly-legacy code (not in default list) should appear
-        assert any(c in codes for c in ("setup.manage",)), (
-            "Expected at least one legacy code with ui_only=false"
-        )
+        assert {p["permission_code"] for p in default.json()} <= codes
+        assert "settings.manage" in codes
+        assert "setup.manage" not in codes
 
 
 # =============================================================================
@@ -1000,12 +1000,12 @@ class TestActivPermissionsInMe:
         assert len(perms) > 0
 
     @pytest.mark.asyncio
-    async def test_admin_has_setup_manage_permission(self, client, auth_token):
+    async def test_admin_has_settings_manage_permission(self, client, auth_token):
         """The seeded admin has a company role with all permissions seeded."""
         resp = await client.get("/auth/me", headers=auth_headers(auth_token))
         perms = resp.json()["active_permissions"]
-        # Should have at least the legacy code and the new settings code
-        assert "setup.manage" in perms or "settings.manage" in perms
+        assert "settings.manage" in perms
+        assert "setup.manage" not in perms
 
     @pytest.mark.asyncio
     async def test_login_response_includes_active_permissions(self, client):
@@ -1052,7 +1052,7 @@ class TestPermissionFunctionNewPath:
 
     @pytest.mark.asyncio
     async def test_branch_user_blocked_from_admin_endpoints(self, client, branch_user_token):
-        """branch_user has no setup.manage permission -- should get 403."""
+        """branch_user has no users.view permission -- should get 403."""
         resp = await client.get("/admin/users", headers=auth_headers(branch_user_token))
         assert resp.status_code == 403
 

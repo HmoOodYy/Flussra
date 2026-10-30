@@ -78,7 +78,7 @@ async def assign_company_role(
     - Revokes any existing active company-role assignment for the user.
     - Inserts a new userbranchroles row with CompanyRoleID set.
     """
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit")
     access_safety.forbid_self_access_change(caller_id, target_user_id)
 
     # Confirm target user exists
@@ -209,7 +209,7 @@ async def revoke_company_role_assignment(
     Revoke a company-role assignment (soft delete).
     Company Owner assignments cannot be revoked here — use transfer endpoint.
     """
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit")
     access_safety.forbid_self_access_change(caller_id, target_user_id)
 
     user_result = await db.execute(

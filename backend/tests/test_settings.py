@@ -17,13 +17,14 @@ TestCreateBranch        — POST /settings/branches (create, auto-code, conflict
 TestUpdateBranch        — PATCH /settings/branches/{id} (partial update, default guard, conflicts)
 TestSetDefaultBranch    — POST /settings/branches/{id}/set-default (promotion, idempotent, 422)
 TestSettingsAudit       — audit-log rollback: company update and branch create roll back on audit failure
-TestSettingsAdminAuthority — company-wide settings.manage or setup.manage administers settings; branch scope and other permissions do not
+TestSettingsAdminAuthority — company-wide settings.manage administers settings and nothing else; branch scope, other permissions and the retired setup.manage do not
 """
 import re
 from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
+import psycopg2
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
@@ -983,6 +984,21 @@ async def _login_as_role_holder(
 ) -> str:
     """Create a one-off role with exactly *permissions*, a user holding only that
     role at *scope_type*, and return that user's access token."""
+    token, _ = await _role_holder(
+        client, admin_token, permissions=permissions, scope_type=scope_type, branch_id=branch_id,
+    )
+    return token
+
+
+async def _role_holder(
+    client: httpx.AsyncClient,
+    admin_token: str,
+    *,
+    permissions: list[str],
+    scope_type: str,
+    branch_id: int | None = None,
+) -> tuple[str, int]:
+    """Like _login_as_role_holder, also returning the one-off role's id."""
     suffix = uuid4().hex[:10]
     role = await client.post(
         "/admin/company-roles", json={"role_name": f"Settings Authority {suffix}"},
@@ -1016,15 +1032,28 @@ async def _login_as_role_holder(
         json={"username": username, "password": "TestPass1234!", "company_code": "DEMO"},
     )
     assert login.status_code == 200, login.text
-    return login.json()["access_token"]
+    return login.json()["access_token"], role_id
+
+
+_NON_SETTINGS_READS = [
+    "/admin/users",
+    "/admin/company-roles",
+    "/admin/permissions",
+    "/admin/employee-link-candidates",
+    "/compensation/pay-definitions",
+]
+
+
+async def _statuses(client: httpx.AsyncClient, token: str, paths: list[str]) -> list[int]:
+    return [(await client.get(path, headers=auth(token))).status_code for path in paths]
 
 
 class TestSettingsAdminAuthority:
-    """Company settings administration accepts company-wide settings.manage or
-    setup.manage. A Company Owner in a real database holds settings.manage and
-    never the legacy setup.manage code."""
+    """Company settings administration requires company-wide settings.manage, and
+    settings.manage authorizes nothing outside company settings. The retired
+    setup.manage code authorizes nothing at all."""
 
-    async def test_company_wide_settings_manage_without_setup_manage_can_administer_settings(
+    async def test_company_wide_settings_manage_can_administer_company_settings(
         self,
         client: httpx.AsyncClient,
         auth_token: str,
@@ -1057,6 +1086,87 @@ class TestSettingsAdminAuthority:
         currencies = await client.get("/settings/currencies", headers=auth(token))
         assert currencies.status_code == 200, currencies.text
 
+        created_column = await client.post(
+            "/settings/status-rate-columns",
+            json={"column_name": f"Authority {uuid4().hex[:10]}"},
+            headers=auth(token),
+        )
+        assert created_column.status_code in (200, 201), created_column.text
+
+    async def test_settings_manage_alone_cannot_manage_users_roles_rates_or_pay_items(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+    ):
+        token = await _login_as_role_holder(
+            client, auth_token, permissions=["settings.manage"], scope_type="AllCompanyBranches",
+        )
+
+        assert await _statuses(client, token, _NON_SETTINGS_READS) == [403] * len(_NON_SETTINGS_READS)
+        created_role = await client.post(
+            "/admin/company-roles", json={"role_name": "Not Allowed"}, headers=auth(token),
+        )
+        assert created_role.status_code == 403
+        created_user = await client.post(
+            "/admin/users",
+            json={
+                "username": f"refused_{uuid4().hex[:10]}", "display_name": "Refused",
+                "password": "TestPass1234!", "is_active": True, "can_login": False,
+                "must_change_password": False, "is_staged": True,
+            },
+            headers=auth(token),
+        )
+        assert created_user.status_code == 403
+
+    def test_pay_rate_and_pay_item_guards_do_not_accept_the_company_settings_code(self):
+        from app.compensation.guards import _DEFINITION_READ, RATE_EDIT, RATE_READ
+
+        for codes in (RATE_EDIT, RATE_READ, _DEFINITION_READ):
+            assert "settings.manage" not in codes
+            assert "setup.manage" not in codes
+
+    async def test_setup_manage_grants_nothing(
+        self,
+        client: httpx.AsyncClient,
+        auth_token: str,
+        pg_instance,
+        owned_branch_id: int,
+    ):
+        token, role_id = await _role_holder(
+            client, auth_token, permissions=["users.view"], scope_type="AllCompanyBranches",
+        )
+        # The role editor cannot grant a code outside the catalogue; a database that still
+        # holds a legacy setup.manage row must nevertheless gain nothing from it.
+        conn = psycopg2.connect(client_encoding="utf-8", **pg_instance.dsn())
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO sec.companyrolepermissions (companyroleid, permissioncode) "
+                    "VALUES (%s, 'setup.manage') ON CONFLICT DO NOTHING", (role_id,),
+                )
+                cur.execute(
+                    "DELETE FROM sec.companyrolepermissions "
+                    "WHERE companyroleid = %s AND permissioncode = 'users.view'", (role_id,),
+                )
+        finally:
+            conn.close()
+
+        settings_attempts = [
+            await client.patch(
+                "/settings/company", json={"company_name": "Not Allowed"}, headers=auth(token)),
+            await client.patch(
+                f"/settings/branches/{owned_branch_id}", json={"city": "Nowhere"},
+                headers=auth(token)),
+            await client.post(
+                "/settings/status-keys",
+                json={"key_name": f"Refused {uuid4().hex[:10]}", "category": "Vacation"},
+                headers=auth(token)),
+            await client.get("/settings/currencies", headers=auth(token)),
+        ]
+        assert [r.status_code for r in settings_attempts] == [403] * 4
+        assert await _statuses(client, token, _NON_SETTINGS_READS) == [403] * len(_NON_SETTINGS_READS)
+
     async def test_branch_scoped_settings_manage_cannot_administer_settings(
         self,
         client: httpx.AsyncClient,
@@ -1083,7 +1193,7 @@ class TestSettingsAdminAuthority:
         ]
         assert [r.status_code for r in attempts] == [403, 403, 403, 403]
 
-    async def test_company_wide_user_with_neither_admin_permission_cannot_administer_settings(
+    async def test_company_wide_user_without_settings_manage_cannot_administer_settings(
         self,
         client: httpx.AsyncClient,
         auth_token: str,

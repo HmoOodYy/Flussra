@@ -66,13 +66,13 @@ async def create_user(
     data: UserCreate,
     db: AsyncConnection,
 ) -> UserAdmin:
-    await security.ensure_any_permission(company_id, caller_id, db, "users.create", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.create")
 
     if data.is_staged:
         if data.can_login or data.role_assignment is not None:
             raise HTTPException(status_code=422, detail="Staged creation requires CanLogin=false and no role assignment.")
     else:
-        await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
+        await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit")
         if data.role_assignment is None:
             raise HTTPException(status_code=422, detail="Provisioned User creation requires a CompanyRole/Scope assignment.")
 
@@ -128,7 +128,7 @@ async def create_user(
 async def link_user_employee(
     target_user_id: int, company_id: int, caller_id: int, employee_id: int, db: AsyncConnection,
 ) -> UserAdmin:
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit")
     user_result = await db.execute(
         text("SELECT EmployeeID FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
         {"uid": target_user_id, "cid": company_id},
@@ -159,7 +159,7 @@ async def link_user_employee(
 async def unlink_user_employee(
     target_user_id: int, company_id: int, caller_id: int, db: AsyncConnection,
 ) -> UserAdmin:
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit")
     result = await db.execute(
         text("SELECT EmployeeID FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
         {"uid": target_user_id, "cid": company_id},
@@ -209,7 +209,7 @@ async def unlink_user_employee(
 async def provision_user(
     target_user_id: int, company_id: int, caller_id: int, data: UserProvision, db: AsyncConnection,
 ) -> UserAdmin:
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit")
     result = await db.execute(
         text("SELECT EmployeeID, IsStaged, CanLogin FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),
         {"uid": target_user_id, "cid": company_id},
@@ -256,7 +256,7 @@ async def update_user(
 ) -> UserAdmin:
     # ── Field-sensitive permission check ────────────────────────────────────
     # Profile / login fields (display_name, email, phone, can_login,
-    # must_change_password) require users.edit or admin fallbacks.
+    # must_change_password) require users.edit.
     # The is_active toggle additionally allows users.deactivate.
     # Mixed payloads: if any profile/login field is present, users.edit is
     # required — users.deactivate alone is not sufficient.
@@ -270,12 +270,12 @@ async def update_user(
     _has_active_field = data.is_active is not None
 
     if _has_profile_fields:
-        # users.edit required; fallbacks accepted; is_active may also be present
-        await security.ensure_any_permission(company_id, caller_id, db, "users.edit", *security.ADMIN_FALLBACKS)
+        # users.edit required; is_active may also be present
+        await security.ensure_any_permission(company_id, caller_id, db, "users.edit")
     elif _has_active_field:
         # Pure activate/deactivate — users.deactivate is sufficient
         await security.ensure_any_permission(
-            company_id, caller_id, db, "users.deactivate", "users.edit", *security.ADMIN_FALLBACKS
+            company_id, caller_id, db, "users.deactivate", "users.edit"
         )
     else:
         # Empty payload — enforce scope but no write permission needed
@@ -378,7 +378,7 @@ async def reset_password(
     data: UserPasswordReset,
     db: AsyncConnection,
 ) -> UserAdmin:
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit")
 
     # Lock row — also confirms user belongs to this company
     result = await db.execute(

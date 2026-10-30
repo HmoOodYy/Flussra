@@ -55,7 +55,7 @@ async def list_permissions(
     *,
     ui_only: bool = True,
 ) -> list[Permission]:
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", "users.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", "users.view")
 
     if ui_only:
         result = await db.execute(
@@ -93,7 +93,7 @@ async def get_company_role_permissions(
     caller_id: int,
     db: AsyncConnection,
 ) -> CompanyRolePermissions:
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.view")
 
     # Verify role belongs to this company and get role metadata
     chk = await db.execute(
@@ -148,7 +148,7 @@ async def set_company_role_permissions(
     removed — the request is rejected rather than silently enforced, so the
     caller knows exactly what happened.
     """
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.edit")
 
     # Fetch + lock role
     result = await db.execute(
@@ -254,7 +254,7 @@ async def get_user_permission_overrides(
     db: AsyncConnection,
 ) -> list[str]:
     """Return active ALLOW override permission codes for one user."""
-    await security.ensure_any_permission(company_id, caller_id, db, "users.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.view")
     chk = await db.execute(
         text("SELECT 1 FROM sec.users WHERE userid = :uid AND companyid = :cid"),
         {"uid": target_user_id, "cid": company_id},
@@ -295,7 +295,7 @@ async def set_user_permission_overrides(
     """
     # Permission overrides are person-specific — only users.edit (not roles.edit)
     # can mutate individual member permissions.
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit")
     access_safety.forbid_self_access_change(caller_id, target_user_id)
 
     # Confirm target user exists + get their company role for COMPANY_OWNER guard

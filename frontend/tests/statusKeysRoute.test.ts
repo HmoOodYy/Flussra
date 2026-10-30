@@ -103,34 +103,34 @@ test('AppShell.tsx: usePageTitle maps /settings/status-keys to "Status Keys"', (
 
 // ── C. Authority ────────────────────────────────────────────────────────────
 
-test('canManageSettingsAdmin: company-wide setup.manage grants access (positive control)', () => {
+test('canManageSettingsAdmin: company-wide settings.manage grants access (positive control)', () => {
   const user = makeUser({
     branches: [makeBranch({ branch_id: null, scope: 'AllCompanyBranches' })],
-    authority: makeAuthority({ company_permissions: ['setup.manage'] }),
+    authority: makeAuthority({ company_permissions: ['settings.manage'] }),
   });
   assert.equal(canManageSettingsAdmin(user), true);
 });
 
-test('canManageSettingsAdmin: DRIVER SpecificBranch user without company setup.manage is denied', () => {
+test('canManageSettingsAdmin: DRIVER SpecificBranch user without company settings.manage is denied', () => {
   const user = makeUser({
     branches: [makeBranch({ branch_id: 10, scope: 'SpecificBranch', role_code: 'DRIVER', role_name: 'Driver' })],
-    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['setup.manage'] }] }),
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['settings.manage'] }] }),
   });
   assert.equal(canManageSettingsAdmin(user), false);
 });
 
-test('canManageSettingsAdmin: DRIVER/Self user with branch_permissions incl. setup.manage is denied', () => {
+test('canManageSettingsAdmin: DRIVER/Self user with branch_permissions incl. settings.manage is denied', () => {
   const user = makeUser({
     self_assignments: [{ role_code: 'DRIVER', role_name: 'Driver', scope: 'Self' }],
-    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['setup.manage'] }] }),
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['settings.manage'] }] }),
   });
   assert.equal(canManageSettingsAdmin(user), false);
 });
 
-test('canManageSettingsAdmin: SpecificBranch user with branch-scoped setup.manage is denied', () => {
+test('canManageSettingsAdmin: SpecificBranch user with branch-scoped settings.manage is denied', () => {
   const user = makeUser({
     branches: [makeBranch({ branch_id: 10, scope: 'SpecificBranch' })],
-    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['setup.manage'] }] }),
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['settings.manage'] }] }),
   });
   assert.equal(canManageSettingsAdmin(user), false);
 });

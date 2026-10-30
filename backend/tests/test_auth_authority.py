@@ -115,7 +115,8 @@ async def test_all_company_branches_grants_company_permissions_and_no_branch_ent
     authority = r.json()["user"]["authority"]
     assert isinstance(authority["company_permissions"], list)
     assert "payroll.entry" in authority["company_permissions"]
-    assert "setup.manage" in authority["company_permissions"]
+    assert "settings.manage" in authority["company_permissions"]
+    assert "setup.manage" not in authority["company_permissions"]
     assert authority["branch_permissions"] == []
 
 

@@ -115,10 +115,13 @@ def test_inventory_permissions_exist_in_catalog(apply_schema):
 
 def test_inventory_records_match_tricky_route_authority():
     expected = {
-        "GET /admin/company-roles/{role_id}/permissions": ("ANY_OF", ("roles.view", "settings.manage", "setup.manage")),
-        "GET /admin/users/{user_id}/permission-overrides": ("ANY_OF", ("users.view", "settings.manage", "setup.manage")),
-        "PUT /admin/users/{user_id}/permission-overrides": ("ANY_OF", ("users.edit", "settings.manage", "setup.manage")),
-        "POST /admin/users/{user_id}/company-role-assignments": ("ANY_OF", ("users.edit", "roles.edit", "settings.manage", "setup.manage")),
+        "GET /admin/company-roles/{role_id}/permissions": ("PERMISSION", ("roles.view",)),
+        "POST /admin/company-roles": ("PERMISSION", ("roles.create",)),
+        "DELETE /admin/company-roles/{role_id}": ("PERMISSION", ("roles.delete",)),
+        "GET /admin/users/{user_id}/permission-overrides": ("PERMISSION", ("users.view",)),
+        "PUT /admin/users/{user_id}/permission-overrides": ("PERMISSION", ("users.edit",)),
+        "POST /admin/users/{user_id}/company-role-assignments": ("ANY_OF", ("users.edit", "roles.edit")),
+        "PATCH /settings/company": ("PERMISSION", ("settings.manage",)),
         "GET /core/branches": ("NONE", ()),
         "GET /core/driver-assignments": ("PERMISSION", ("drivers.view",)),
         "GET /driver-transfers": ("ANY_OF", ("drivers.view", "drivers.edit")),
@@ -139,6 +142,39 @@ def test_inventory_records_match_tricky_route_authority():
     assert branch_list.special_policy == "app.access.branch_access.check_branch_access"
     assert branch_list.none_reason
     assert branch_list.driver_self == "DENY"
+
+
+COMPANY_SETTINGS_ROUTES = {
+    "PATCH /settings/branches/{branch_id}",
+    "POST /settings/branches/{branch_id}/set-default",
+    "PUT /settings/branches/{branch_id}/status-keys/{key_id}/limits",
+    "POST /settings/status-keys",
+    "PATCH /settings/status-keys/{key_id}",
+    "DELETE /settings/status-keys/{key_id}",
+    "POST /settings/status-rate-columns",
+    "PATCH /settings/status-rate-columns/{column_id}",
+    "DELETE /settings/status-rate-columns/{column_id}",
+    "GET /settings/currencies",
+    "PATCH /settings/company",
+}
+
+
+def test_settings_manage_authorizes_only_company_settings_routes():
+    holders = {
+        route for route, item in ROUTE_AUTHORIZATION.items()
+        if "settings.manage" in item.permission_codes
+    }
+    assert holders == COMPANY_SETTINGS_ROUTES
+    for route in COMPANY_SETTINGS_ROUTES:
+        assert ROUTE_AUTHORIZATION[route].permission_codes == ("settings.manage",)
+
+
+def test_setup_manage_authorizes_no_route():
+    holders = [
+        route for route, item in ROUTE_AUTHORIZATION.items()
+        if "setup.manage" in item.permission_codes
+    ]
+    assert holders == []
 
 
 def test_inventory_rejects_special_policy_without_explicit_identifier():
