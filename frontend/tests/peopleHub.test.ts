@@ -81,9 +81,10 @@ test('/people redirects to the first authorized child: Workforce, then Access, t
   assert.equal(target(operator({ branch: ['payroll.view'] })), null);
 });
 
-test('a company admin fallback opens every child', () => {
-  const owner = operator({ company: ['settings.manage'] });
-  assert.deepEqual(visiblePeopleChildren(peopleCapabilities(owner)).map((c) => c.key), ['access', 'transfers']);
+test('company settings authority opens no child: settings.manage is not people authority', () => {
+  const settingsManager = operator({ company: ['settings.manage'] });
+  assert.deepEqual(visiblePeopleChildren(peopleCapabilities(settingsManager)).map((c) => c.key), []);
+  assert.equal(canViewPeopleHub(settingsManager), false);
 });
 
 test('a Driver (Self) user never enters the hub', () => {

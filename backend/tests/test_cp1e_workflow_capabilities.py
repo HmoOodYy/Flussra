@@ -917,9 +917,9 @@ class TestPermissionsAndSecurity:
         self, session_client, auth_token, paytest_branch_id,
     ):
         """D06: User with branch access but NO payroll.view/entry/finalize → 403."""
-        # Role with setup.manage only — no payroll read permissions
+        # Role with settings.manage only — no payroll read permissions
         role_id = await _create_role_with_perms(
-            session_client, auth_token, f"SetupOnly{_sec_uid()}", ["setup.manage"],
+            session_client, auth_token, f"SettingsOnly{_sec_uid()}", ["settings.manage"],
         )
         uname = _sec_uid()
         user = await _create_user(session_client, auth_token, uname)
@@ -933,12 +933,12 @@ class TestPermissionsAndSecurity:
         )
 
     @pytest.mark.asyncio
-    async def test_d07_setup_manage_only_denied(
+    async def test_d07_settings_manage_only_denied(
         self, session_client, auth_token, paytest_branch_id,
     ):
-        """D07: setup.manage-only (AllCompanyBranches) → 403; setup.manage alone does not grant payroll workflow read."""
+        """D07: settings.manage-only (AllCompanyBranches) → 403; settings.manage alone does not grant payroll workflow read."""
         role_id = await _create_role_with_perms(
-            session_client, auth_token, f"SetupMgr{_sec_uid()}", ["setup.manage"],
+            session_client, auth_token, f"SettingsMgr{_sec_uid()}", ["settings.manage"],
         )
         uname = _sec_uid()
         user = await _create_user(session_client, auth_token, uname)
@@ -948,7 +948,7 @@ class TestPermissionsAndSecurity:
 
         r = await session_client.get("/payroll/current-workflow", headers=_auth(tok))
         assert r.status_code == 403, (
-            f"setup.manage-only must be denied workflow; got {r.status_code}: {r.text}"
+            f"settings.manage-only must be denied workflow; got {r.status_code}: {r.text}"
         )
 
     @pytest.mark.asyncio

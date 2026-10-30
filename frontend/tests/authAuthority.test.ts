@@ -11,6 +11,7 @@ import {
   canDecideReview,
   canEditTransfers,
   canEditPayRates,
+  canViewPayRates,
   canManageSettingsAdmin,
   canViewPayrollReports,
   canPreviewCalculation,
@@ -122,7 +123,7 @@ test('hasAuthorityPermission: unknown permission code returns false everywhere',
 
 test('toUserProfile: passes authority through onto UserProfile', () => {
   const authority = makeAuthority({
-    company_permissions: ['setup.manage'],
+    company_permissions: ['settings.manage'],
     branch_permissions: [{ branch_id: 10, permissions: ['payroll.view'] }],
   });
   const info = makeUserInfoResponse({ authority });
@@ -235,11 +236,11 @@ test('canEditTransfers: company-wide drivers.edit authorizes any concrete branch
   assert.equal(canEditTransfers(user, 999), true);
 });
 
-test('canEditTransfers: settings.manage/setup.manage grants do not serve as a fallback', () => {
+test('canEditTransfers: settings.manage grants do not serve as a fallback', () => {
   const user = makeUser({
-    active_permissions: ['settings.manage', 'setup.manage'],
+    active_permissions: ['settings.manage'],
     branches: [makeBranch({ branch_id: 10 })],
-    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['settings.manage', 'setup.manage'] }] }),
+    authority: makeAuthority({ branch_permissions: [{ branch_id: 10, permissions: ['settings.manage'] }] }),
   });
   assert.equal(canEditTransfers(user, 10), false);
 });
@@ -255,16 +256,25 @@ test('canEditPayRates: branch-scoped payrates.edit denies the wrong branch and a
   assert.equal(canEditPayRates(user, 10), true);
 });
 
-test('canEditPayRates: branch-scoped settings.manage also authorizes its own branch', () => {
+test('canEditPayRates: branch-scoped settings.manage does not authorize pay rate edits', () => {
   const user = scopedUser('settings.manage', 10);
-  assert.equal(canEditPayRates(user, 10), true);
+  assert.equal(canEditPayRates(user, 10), false);
   assert.equal(canEditPayRates(user, 20), false);
 });
 
-test('canEditPayRates: company-wide setup.manage authorizes any concrete branch', () => {
-  const user = companyUser('setup.manage');
-  assert.equal(canEditPayRates(user, 10), true);
-  assert.equal(canEditPayRates(user, 999), true);
+test('canEditPayRates: company-wide settings.manage or setup.manage does not authorize any branch', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    const user = companyUser(code);
+    assert.equal(canEditPayRates(user, 10), false, code);
+    assert.equal(canEditPayRates(user, 999), false, code);
+  }
+});
+
+test('canViewPayRates: settings.manage and setup.manage do not open the Pay Rates page', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    assert.equal(canViewPayRates(companyUser(code)), false, code);
+  }
+  assert.equal(canViewPayRates(companyUser('payrates.view')), true);
 });
 
 test('canEditPayRates: driver and ODA users are denied despite a matching branch grant', () => {
@@ -272,14 +282,14 @@ test('canEditPayRates: driver and ODA users are denied despite a matching branch
   assert.equal(canEditPayRates(scopedUser('payrates.edit', 10, { scope: 'SpecificBranch', role_code: 'DRIVER' }), 10), false);
 });
 
-// ── canManageSettingsAdmin: canonical company-scoped settings.manage or setup.manage ──
+// ── canManageSettingsAdmin: canonical company-scoped settings.manage only ──
 
-test('canManageSettingsAdmin: company-wide setup.manage authorizes', () => {
+test('canManageSettingsAdmin: the retired company-wide setup.manage does not authorize', () => {
   const user = companyUser('setup.manage');
-  assert.equal(canManageSettingsAdmin(user), true);
+  assert.equal(canManageSettingsAdmin(user), false);
 });
 
-test('canManageSettingsAdmin: company-wide settings.manage without setup.manage authorizes', () => {
+test('canManageSettingsAdmin: company-wide settings.manage authorizes', () => {
   const user = companyUser('settings.manage');
   assert.equal(canManageSettingsAdmin(user), true);
 });

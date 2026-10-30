@@ -21,6 +21,12 @@ export const BUSINESS_GROUP_DEFS: readonly BusinessGroupDef[] = [
     codes: ['branches.create', 'users.view', 'users.create', 'users.edit', 'users.deactivate', 'roles.view', 'roles.create', 'roles.edit', 'roles.delete'],
   },
   {
+    id: 'company-settings',
+    label: 'Company Settings',
+    codes: ['settings.manage'],
+    note: 'Company profile, currency, branches and statuses. Does not include managing members, roles, pay items or pay rates.',
+  },
+  {
     id: 'payroll-ops',
     label: 'Payroll Operations',
     codes: ['payroll.view', 'payroll.period.create', 'payroll.entry', 'review.decide', 'payroll.finalize'],
@@ -28,7 +34,7 @@ export const BUSINESS_GROUP_DEFS: readonly BusinessGroupDef[] = [
   {
     id: 'payroll-config',
     label: 'Payroll Configuration',
-    codes: ['settings.manage', 'setup.manage', 'payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
+    codes: ['payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
   },
   {
     id: 'payroll-setup',

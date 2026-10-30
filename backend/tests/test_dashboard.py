@@ -6,7 +6,7 @@ Test matrix:
      1.  payroll.entry admin can access dashboard (regression — existing user).
      2.  review.decide-only user can access dashboard and gets review_queue section.
      3.  payrates.view-only user can access dashboard and gets rates_health section.
-     4.  setup.manage-only user can access dashboard and gets setup_health section.
+     4.  payroll_setup.view-only user can access dashboard and gets setup_health section.
      5.  DRIVER/Self user cannot access operational dashboard → 403.
      6.  payroll.view SpecificBranch user can access dashboard.
 
@@ -16,7 +16,7 @@ Test matrix:
      9.  payroll.finalize user sees approved_periods list when Approved periods exist.
      10. Non-finalize user (payroll.view) does NOT see approved_periods section.
      11. payrates.view user: sections_available includes rates_health.
-     12. setup.manage user: sees setup_health section and setup_warnings list.
+     12. payroll_setup.view user: sees setup_health section and setup_warnings list.
 
   C. Branch scope
      13. AllCompanyBranches admin sees multiple branches in branch_summaries.
@@ -170,20 +170,49 @@ class TestDashboardAccess:
         assert "rates_health" in data["sections_available"]
         assert "payroll_ops" not in data["sections_available"]
 
-    async def test_setup_manage_only_user_can_access_dashboard(
+    async def test_payroll_setup_only_user_can_access_dashboard(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
     ):
-        """User with only setup.manage (AllCompanyBranches) gets 200 and setup_health."""
+        """User with only payroll_setup.view (AllCompanyBranches) gets 200 and setup_health."""
         _, token = await _make_user_with_perms(
             session_client, auth_token,
-            ["setup.manage"], "AllCompanyBranches",
+            ["payroll_setup.view"], "AllCompanyBranches",
         )
         r = await session_client.get("/dashboard", headers=_hdr(token))
         assert r.status_code == 200, r.text
         data = r.json()
         assert "setup_health" in data["sections_available"]
+
+    async def test_settings_manage_only_user_has_no_dashboard_section(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+    ):
+        """settings.manage manages company settings only; it opens no dashboard section."""
+        _, token = await _make_user_with_perms(
+            session_client, auth_token,
+            ["settings.manage"], "AllCompanyBranches",
+        )
+        r = await session_client.get("/dashboard", headers=_hdr(token))
+        assert r.status_code == 403, r.text
+
+    async def test_payroll_setup_only_user_does_not_see_missing_rate_warnings(
+        self,
+        session_client: httpx.AsyncClient,
+        auth_token: str,
+    ):
+        """DRIVERS_NO_APPROVED_RATE is acted on with pay rate permissions, not Payroll Setup ones."""
+        _, token = await _make_user_with_perms(
+            session_client, auth_token,
+            ["payroll_setup.view"], "AllCompanyBranches",
+        )
+        r = await session_client.get("/dashboard", headers=_hdr(token))
+        assert r.status_code == 200, r.text
+        codes = {w["code"] for w in r.json()["setup_warnings"]}
+        assert "DRIVERS_NO_APPROVED_RATE" not in codes
+        assert "rates_health" not in r.json()["sections_available"]
 
     async def test_driver_oda_user_cannot_access_dashboard(
         self,
@@ -368,15 +397,15 @@ class TestSectionGating:
         assert data["pending_rates"] is not None
         assert isinstance(data["pending_rates"], int)
 
-    async def test_setup_manage_user_sees_setup_health_and_warnings(
+    async def test_payroll_setup_user_sees_setup_health_and_warnings(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
     ):
-        """setup.manage user sees setup_health section; setup_warnings is a list."""
+        """payroll_setup.view user sees setup_health section; setup_warnings is a list."""
         _, token = await _make_user_with_perms(
             session_client, auth_token,
-            ["setup.manage"], "AllCompanyBranches",
+            ["payroll_setup.view"], "AllCompanyBranches",
         )
         r = await session_client.get("/dashboard", headers=_hdr(token))
         assert r.status_code == 200, r.text
@@ -384,15 +413,15 @@ class TestSectionGating:
         assert "setup_health" in data["sections_available"]
         assert isinstance(data["setup_warnings"], list)
 
-    async def test_setup_manage_user_no_payroll_ops(
+    async def test_payroll_setup_user_no_payroll_ops(
         self,
         session_client: httpx.AsyncClient,
         auth_token: str,
     ):
-        """setup.manage only user does NOT see payroll_ops section."""
+        """payroll_setup.view only user does NOT see payroll_ops section."""
         _, token = await _make_user_with_perms(
             session_client, auth_token,
-            ["setup.manage"], "AllCompanyBranches",
+            ["payroll_setup.view"], "AllCompanyBranches",
         )
         r = await session_client.get("/dashboard", headers=_hdr(token))
         assert r.status_code == 200, r.text

@@ -21,7 +21,7 @@ export const MODULE_LABELS: Record<string, string> = {
   employees:     'Employees',
   reports:       'Reports',
   ledger:        'Finalized Payroll',
-  settings:      'Settings',
+  settings:      'Company Settings',
 };
 export const MODULE_ORDER = Object.keys(MODULE_LABELS);
 
@@ -31,6 +31,7 @@ export const MODULE_ORDER = Object.keys(MODULE_LABELS);
 // company_permissions only in that case.
 export const MODULE_NOTES: Record<string, string> = {
   payroll_setup: 'Effective only for members with an All-Branches role assignment.',
+  settings: 'Company profile, currency, branches and statuses. Does not include managing members, roles, pay items or pay rates.',
 };
 
 // Codes no backend route checks (see HIDDEN_PERM_CODES in the Roles model). They are never

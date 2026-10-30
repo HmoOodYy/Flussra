@@ -77,7 +77,7 @@ async def list_company_roles(
     db: AsyncConnection,
 ) -> list[CompanyRole]:
     """Return all active (non-archived) company roles for this company."""
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.view")
 
     result = await db.execute(
         text("""
@@ -104,7 +104,7 @@ async def get_company_role(
     caller_id: int,
     db: AsyncConnection,
 ) -> CompanyRole:
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.view")
     return await _get_company_role_internal(company_role_id, company_id, db)
 
 
@@ -114,7 +114,7 @@ async def create_company_role(
     data: CompanyRoleCreate,
     db: AsyncConnection,
 ) -> CompanyRole:
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.create", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.create")
 
     role_name = data.role_name.strip()
 
@@ -173,7 +173,7 @@ async def update_company_role(
     data: CompanyRoleUpdate,
     db: AsyncConnection,
 ) -> CompanyRole:
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.edit")
 
     # Fetch + lock
     result = await db.execute(
@@ -244,7 +244,7 @@ async def delete_company_role(
     caller_id: int,
     db: AsyncConnection,
 ) -> None:
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.delete", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.delete")
 
     # Fetch + lock
     result = await db.execute(
@@ -316,7 +316,7 @@ async def get_company_role_users(
     Return all user assignments for a company role (both active and inactive).
     Ordered by display name.
     """
-    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", "users.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "roles.view", "users.view")
 
     # Verify role belongs to this company
     chk = await db.execute(

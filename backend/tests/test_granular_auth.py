@@ -265,36 +265,31 @@ class TestGranularAuth:
         )
         assert resp.status_code == 200
 
-    async def test_setup_manage_still_works_as_fallback(
+    async def test_settings_manage_alone_cannot_administer_users_or_roles(
         self, client: httpx.AsyncClient, auth_token: str
     ):
-        """setup.manage (legacy) is still sufficient for all admin operations."""
+        """settings.manage means company settings only: it opens no user or role route."""
         role_id = await _create_role_with_perms(
-            client, auth_token, "GA LegacyAdmin", ["settings.view", "settings.manage"]
+            client, auth_token, "GA SettingsOnly", ["settings.view", "settings.manage"]
         )
-        user = await _create_user(client, auth_token, "ga_legacy_admin")
+        user = await _create_user(client, auth_token, "ga_settings_only")
         await _assign_role(client, auth_token, user["user_id"], role_id)
 
-        tok = await _login(client, "ga_legacy_admin")
+        tok = await _login(client, "ga_settings_only")
 
-        # Can list users
-        r1 = await client.get("/admin/users", headers=_hdr(tok))
-        assert r1.status_code == 200
+        assert (await client.get("/admin/users", headers=_hdr(tok))).status_code == 403
+        assert (await client.get("/admin/company-roles", headers=_hdr(tok))).status_code == 403
+        assert (await client.get("/admin/permissions", headers=_hdr(tok))).status_code == 403
 
-        # Can list roles
-        r2 = await client.get("/admin/company-roles", headers=_hdr(tok))
-        assert r2.status_code == 200
-
-        # Can edit permissions on a role
         target_role_id = await _create_role_with_perms(
-            client, auth_token, "GA LegacyTarget", ["users.view"]
+            client, auth_token, "GA SettingsTarget", ["users.view"]
         )
         r3 = await client.put(
             f"/admin/company-roles/{target_role_id}/permissions",
             json={"permission_codes": ["users.view"]},
             headers=_hdr(tok),
         )
-        assert r3.status_code == 200
+        assert r3.status_code == 403
 
     async def test_no_permission_gets_403(
         self, client: httpx.AsyncClient, auth_token: str
@@ -822,25 +817,42 @@ class TestFieldSensitivePatch:
         )
         assert resp.status_code == 403
 
-    async def test_fallback_can_do_all_fields(
+    async def test_users_edit_can_do_all_fields(
         self, client: httpx.AsyncClient, auth_token: str
     ):
-        """settings.manage (fallback) can update any combination of fields."""
+        """users.edit can update any combination of fields."""
         role_id = await _create_role_with_perms(
-            client, auth_token, "FSP FallbackAll", ["settings.view", "settings.manage"]
+            client, auth_token, "FSP EditAll", ["users.view", "users.edit"]
         )
-        caller = await _create_user(client, auth_token, "fsp_fallback_all")
-        target = await _create_user(client, auth_token, "fsp_fallback_tgt")
+        caller = await _create_user(client, auth_token, "fsp_edit_all")
+        target = await _create_user(client, auth_token, "fsp_edit_tgt")
         await _assign_role(client, auth_token, caller["user_id"], role_id)
 
-        tok = await _login(client, "fsp_fallback_all")
+        tok = await _login(client, "fsp_edit_all")
         resp = await client.patch(
             f"/admin/users/{target['user_id']}",
-            json={"is_active": False, "display_name": "Fallback Edit"},
+            json={"is_active": False, "display_name": "Edited Name"},
             headers=_hdr(tok),
         )
         assert resp.status_code == 200
-        assert resp.json()["display_name"] == "Fallback Edit"
+        assert resp.json()["display_name"] == "Edited Name"
+
+    async def test_settings_manage_alone_cannot_update_a_user(
+        self, client: httpx.AsyncClient, auth_token: str
+    ):
+        role_id = await _create_role_with_perms(
+            client, auth_token, "FSP SettingsOnly", ["settings.view", "settings.manage"]
+        )
+        caller = await _create_user(client, auth_token, "fsp_settings_only")
+        target = await _create_user(client, auth_token, "fsp_settings_tgt")
+        await _assign_role(client, auth_token, caller["user_id"], role_id)
+
+        tok = await _login(client, "fsp_settings_only")
+        for body in ({"display_name": "Nope"}, {"is_active": False}):
+            resp = await client.patch(
+                f"/admin/users/{target['user_id']}", json=body, headers=_hdr(tok),
+            )
+            assert resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------

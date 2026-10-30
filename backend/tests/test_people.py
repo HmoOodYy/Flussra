@@ -560,7 +560,7 @@ class TestOwnerTransfer:
             "password": "TestPass1234!",
             "company_code": "DEMO",
         })
-        # User may fail _ensure_admin if DRIVER role doesn't have setup.manage,
+        # User may fail the scope gate if the DRIVER role holds no admin permission,
         # which is correct — they should be blocked either at scope or permission level.
         # Either 403 is acceptable.
         if login_resp.status_code == 200:

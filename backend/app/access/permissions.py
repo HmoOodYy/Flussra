@@ -61,7 +61,7 @@ async def check_any_permission(
 
     Accepts a list and passes when the user has at least one.
     Use this when an action is reachable via multiple roles
-    (e.g. payrates.view OR payrates.edit OR settings.manage).
+    (e.g. payrates.view OR payrates.edit).
     """
     await require_non_driver_subject(company_id, user_id, db)
     for code in permission_codes:

@@ -49,7 +49,7 @@ async def _may_view_access_accounts(
     """
     try:
         await access_security.ensure_any_permission(
-            company_id, user_id, db, "users.view", *access_security.ADMIN_FALLBACKS)
+            company_id, user_id, db, "users.view")
     except HTTPException as exc:
         if exc.status_code == 403:
             return False

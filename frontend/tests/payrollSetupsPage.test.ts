@@ -392,8 +392,8 @@ test('BranchAssignmentsTab.tsx: never references canManage/canPublish for its ow
   assert.doesNotMatch(branchAssignmentsTabSource, /canManage|canManageSettingsAdmin|canPublish/);
 });
 
-test('PayrollSetupsPage.tsx: does not use the setup.manage literal or canManageSettingsAdmin', () => {
-  assert.doesNotMatch(pageSource, /setup\.manage/);
+test('PayrollSetupsPage.tsx: does not use the settings.manage literal or canManageSettingsAdmin', () => {
+  assert.doesNotMatch(pageSource, /settings\.manage/);
   assert.doesNotMatch(pageSource, /canManageSettingsAdmin/);
 });
 

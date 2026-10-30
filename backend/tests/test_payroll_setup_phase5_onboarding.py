@@ -247,7 +247,7 @@ async def test_branch_create_permission_contract_and_no_legacy_authority(
                                    scope="AllCompanyBranches")
         assign_only = await _actor(db_conn, permissions=("payroll_setup.assign",),
                                    scope="AllCompanyBranches")
-        manager = await _actor(db_conn, permissions=("setup.manage",),
+        manager = await _actor(db_conn, permissions=("settings.manage",),
                                scope="AllCompanyBranches")
         branch_scoped = await _actor(
             db_conn, permissions=("branches.create", "payroll_setup.assign"),
@@ -291,8 +291,10 @@ async def test_branch_create_permission_contract_and_no_legacy_authority(
         # warning must fire from the canonical resolver alone, with no legacy
         # authority row involved at all.
         warnings = await _compute_setup_warnings(
-            db_conn, company_id, False, [branch_id], {},
-            has_setup=True, has_payroll=False, has_rates=False,
+            db_conn, company_id,
+            setup_scope=(True, False, [branch_id]),
+            payroll_scope=(False, False, []),
+            rates_scope=(False, False, []),
         )
         assert any(w.code == "BRANCH_NO_PAYROLL_SETTINGS" and w.branch_id == branch_id
                    for w in warnings)
@@ -860,15 +862,15 @@ async def test_branch_create_default_requires_settings_admin(
     set-default endpoint's authority — branches.create alone must not be able
     to change the Company default indirectly via create.
 
-    The fixture's admin token does not hold setup.manage in this isolated
-    database, so setup.manage-gated calls use an explicit admin_only actor.
+    The fixture's admin token does not hold settings.manage in this isolated
+    database, so settings.manage-gated calls use an explicit admin_only actor.
     """
     client = phase5_onboarding_db.client
     db_conn = phase5_onboarding_conn
     marker = uuid4().hex
     company_id = phase5_onboarding_db.company_id
 
-    admin_only = await _actor(db_conn, permissions=("setup.manage",),
+    admin_only = await _actor(db_conn, permissions=("settings.manage",),
                               scope="AllCompanyBranches")
 
     # Establish a known Company default branch before the scenario begins.
@@ -887,7 +889,7 @@ async def test_branch_create_default_requires_settings_admin(
                                    scope="AllCompanyBranches")
         create_assign = await _actor(db_conn, permissions=("branches.create", "payroll_setup.assign"),
                                      scope="AllCompanyBranches")
-        create_admin = await _actor(db_conn, permissions=("branches.create", "setup.manage"),
+        create_admin = await _actor(db_conn, permissions=("branches.create", "settings.manage"),
                                     scope="AllCompanyBranches")
 
         # 1. create_only ordinary create (no is_default) -> 201, is_default False;
@@ -973,7 +975,7 @@ async def test_branch_create_default_requires_settings_admin(
         """), {"cid": company_id, "code": code6})).scalar_one() == 0
 
         # 7. set-default contract unchanged: create_only -> 403; admin_only
-        #    (setup.manage) -> success. Restoring original_default_id here
+        #    (settings.manage) -> success. Restoring original_default_id here
         #    also serves as part of the test's cleanup.
         denied_set_default = await client.post(
             f"/settings/branches/{original_default_id}/set-default", headers=_auth(create_only),

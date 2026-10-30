@@ -59,7 +59,7 @@ DbDep    = Annotated[AsyncConnection, Depends(get_db)]
         "each with their full role-assignment list.  By default only active "
         "users are returned; pass `include_inactive=true` to include "
         "deactivated accounts.\n\n"
-        "Requires: `users.view` OR `settings.manage` OR `setup.manage`."
+        "Requires: `users.view`."
     ),
     responses={403: {"description": "Insufficient scope"}},
 )
@@ -84,7 +84,7 @@ async def list_users(
         "Employees with no linked User, with only the identity needed to choose one "
         "(name, key, Branch, employment status, Driver state). This is an Access read, "
         "not the Workforce roster.\n\n"
-        "Requires: `users.create`, `users.edit` or `roles.edit` (or the admin fallbacks)."
+        "Requires: `users.create`, `users.edit` or `roles.edit`."
     ),
     responses={403: {"description": "Insufficient scope"}},
 )
@@ -134,8 +134,8 @@ async def get_user(
         "Creates a staged account with login disabled and no role assignments, "
         "or atomically creates a provisioned account with an optional Employee "
         "link and one CompanyRole/Scope assignment. Passwords are bcrypt-hashed.\n\n"
-        "Requires `users.create` (or admin fallbacks); provisioned creation also "
-        "requires `users.edit` or `roles.edit` (or admin fallbacks)."
+        "Requires `users.create`; provisioned creation also "
+        "requires `users.edit` or `roles.edit`."
     ),
     responses={
         403: {"description": "Insufficient scope"},
@@ -181,9 +181,9 @@ async def provision_user(user_id: int, body: UserProvision, token: TokenDep, db:
         "Callers cannot deactivate their own account or remove their own login access.\n\n"
         "Field-sensitive permissions:\n"
         "- `display_name`, `email`, `phone`, `can_login`, `must_change_password`: "
-        "requires `users.edit` OR fallbacks.\n"
-        "- `is_active` alone: requires `users.deactivate` OR `users.edit` OR fallbacks.\n"
-        "- Mixed payloads (profile + is_active): requires `users.edit` OR fallbacks."
+        "requires `users.edit`.\n"
+        "- `is_active` alone: requires `users.deactivate` OR `users.edit`.\n"
+        "- Mixed payloads (profile + is_active): requires `users.edit`."
     ),
     responses={
         403: {"description": "Insufficient scope"},
@@ -279,7 +279,7 @@ async def list_permissions(
         "Returns all roles for this company — both default/protected roles "
         "(Company Owner, Driver) and any custom roles created by the company. "
         "Includes the count of active users assigned to each role.\n\n"
-        "Requires: `roles.view` OR `settings.manage` OR `setup.manage`."
+        "Requires: `roles.view`."
     ),
     responses={403: {"description": "Insufficient scope"}},
 )
