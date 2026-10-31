@@ -7,6 +7,8 @@ immutable lifecycle evidence captured by the Phase 6 foundation.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
+from itertools import islice
 from typing import Any
 
 from sqlalchemy import text
@@ -99,6 +101,61 @@ async def capture_period_audit_evidence(
         "source_revision": source_revision,
     })
     return int(result.scalar_one())
+
+
+async def capture_period_audit_evidence_batch(
+    *, company_id: int, branch_id: int, period_id: int, domain: str,
+    source_entity_type: str, user_id: int, required_permission_code: str,
+    events: Iterable[dict[str, Any]], correlation_id: str, db: AsyncConnection,
+    source_revision: int | None = None, batch_size: int = 1000,
+) -> dict[str, int]:
+    """Capture complete per-change evidence with one coverage/actor snapshot.
+
+    The owning canonical mutation authorizes and locks first. This writer uses
+    the same evidence columns/coverage policy as the single-event writer, keeps
+    ordinary constraints active and never commits the caller's transaction.
+    """
+    if batch_size < 1 or domain not in _DOMAINS:
+        raise ValueError("Invalid evidence batch parameters.")
+    iterator = iter(events)
+    chunk = list(islice(iterator, batch_size))
+    if not chunk:
+        return {}
+    await _ensure_partial_coverage(company_id=company_id, branch_id=branch_id,
+                                  period_id=period_id, domain=domain, db=db)
+    display_name, role_context = await _participant_snapshot(
+        company_id=company_id, branch_id=branch_id, user_id=user_id,
+        required_permission_code=required_permission_code, db=db,
+    )
+    event_ids: dict[str, int] = {}
+    while chunk:
+        result = (await db.execute(text("""
+            INSERT INTO payroll.payrollperiodauditevidenceevents
+                (companyid, branchid, payrollperiodid, evidencedomain, actioncode,
+                 sourceentitytype, sourceentityid, driverassignmentid, driverid, workdate,
+                 beforestatejson, afterstatejson, actoruserid, actordisplaynamesnapshot,
+                 responsibilitycontextsnapshot, correlationid, sourcerevision)
+            SELECT :cid, :bid, :pid, :domain, x.action_code, :entity_type, x.entity_id,
+                x.assignment_id, a.driverid, x.work_date, x.before_state, x.after_state,
+                :uid, :display_name, CAST(:role_context AS jsonb), CAST(:correlation AS uuid), :revision
+            FROM jsonb_to_recordset(CAST(:events AS jsonb)) AS x(action_code text,
+                entity_id text, assignment_id integer, work_date date, before_state jsonb, after_state jsonb)
+            LEFT JOIN core.driverassignments a ON a.driverassignmentid = x.assignment_id
+                AND a.companyid = :cid AND a.branchid = :bid
+            WHERE x.assignment_id IS NULL OR a.driverassignmentid IS NOT NULL
+            RETURNING sourceentityid, payrollperiodauditevidenceeventid
+        """), {"cid": company_id, "bid": branch_id, "pid": period_id, "domain": domain,
+               "entity_type": source_entity_type, "uid": user_id, "display_name": display_name,
+               "role_context": role_context, "correlation": correlation_id,
+               "revision": source_revision, "events": _json(chunk)})).all()
+        if len(result) != len(chunk):
+            raise RuntimeError("Evidence batch contains an unowned assignment; roll back the mutation.")
+        for entity_id, event_id in result:
+            if entity_id in event_ids:
+                raise RuntimeError("Evidence batch repeats an entity; roll back the mutation.")
+            event_ids[entity_id] = event_id
+        chunk = list(islice(iterator, batch_size))
+    return event_ids
 
 
 async def link_unmapped_audit_evidence_to_snapshot(

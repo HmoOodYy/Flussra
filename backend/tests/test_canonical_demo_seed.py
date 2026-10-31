@@ -53,8 +53,8 @@ def _count(dsn, statement: str, *params) -> int:
 
 async def test_a_fresh_database_upgrades_to_the_single_head_and_holds_the_canonical_demo(seeded):
     dsn = seeded["dsn"]
-    assert [line.split()[0] for line in seeded["heads"].splitlines() if "(head)" in line] == ["0096"]
-    assert _version(dsn) == "0096"
+    assert [line.split()[0] for line in seeded["heads"].splitlines() if "(head)" in line] == ["0099"]
+    assert _version(dsn) == "0099"
     run_schema_guard(seeded["env"]["DATABASE_URL"], is_dev=True)
     with psycopg2.connect(**dsn) as conn, conn.cursor() as cursor:
         assert _check_target_physical_authorities(cursor) == []
@@ -270,7 +270,7 @@ def test_the_development_reset_restores_the_canonical_demo(seeded, tmp_path):
     reset = run("--admin-url", admin_url, "--confirm", database)
     assert reset.returncode == 0, reset.stdout + reset.stderr
     assert "canonical demo verified" in reset.stdout
-    assert _version(seeded["dsn"]) == "0096"
+    assert _version(seeded["dsn"]) == "0099"
     for table in PAYROLL_HISTORY_TABLES:
         assert _count(seeded["dsn"], f"SELECT count(*) FROM {table}") == 0, table
     verified = run("--verify-only")

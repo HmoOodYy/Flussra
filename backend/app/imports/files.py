@@ -8,9 +8,10 @@ import json
 import posixpath
 import re
 import zipfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
 from copy import copy
-from datetime import date, datetime, time
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from typing import Any
 from xml.etree.ElementTree import ParseError
 
@@ -18,15 +19,16 @@ from defusedxml import ElementTree as SafeET
 from openpyxl import load_workbook
 
 from app.imports.errors import ImportFailure
+from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY, ImportResourcePolicy
 
-MAX_FILE_BYTES = 10_000_000
-MAX_XLSX_DECOMPRESSED_BYTES = 50_000_000
-MAX_XLSX_SHEETS = 10
-MAX_SELECTED_ROWS = 20_000
-MAX_SELECTED_COLUMNS = 50
-MAX_SELECTED_CELLS = 1_000_000
-MAX_CELL_TEXT_BYTES = 8_000
-MAX_INSPECTION_JSON_BYTES = 4_000_000
+MAX_FILE_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_file_bytes
+MAX_XLSX_DECOMPRESSED_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_file_decompressed_bytes
+MAX_XLSX_SHEETS = DEFAULT_IMPORT_RESOURCE_POLICY.max_worksheets_per_file
+MAX_SELECTED_ROWS = DEFAULT_IMPORT_RESOURCE_POLICY.max_rows_per_unit
+MAX_SELECTED_COLUMNS = DEFAULT_IMPORT_RESOURCE_POLICY.max_columns_per_unit
+MAX_SELECTED_CELLS = DEFAULT_IMPORT_RESOURCE_POLICY.max_cells_per_unit
+MAX_CELL_TEXT_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_cell_text_bytes
+MAX_INSPECTION_JSON_BYTES = DEFAULT_IMPORT_RESOURCE_POLICY.max_inspection_bytes
 
 # Internal safety ceiling: >400x the member count of the generated supported
 # workbooks, including a million-cell sheet. See the design's measured evidence.
@@ -48,6 +50,26 @@ _BASE_HEADER_LABELS = {
     "date",
 }
 _CELL_REF = re.compile(r"^([A-Z]{1,3})([1-9][0-9]*)$")
+_MAX_HEADER_SCAN_ROWS = 200
+
+
+@dataclass(frozen=True, slots=True)
+class FileCell(Mapping[str, Any]):
+    value: Any
+    kind: str
+    formula: bool = False
+    missing_cache: bool = False
+
+    def __getitem__(self, key: str) -> Any:
+        if key not in {"value", "kind", "formula", "missing_cache"}:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("value", "kind", "formula", "missing_cache"))
+
+    def __len__(self) -> int:
+        return 4
 
 
 def inspect_file(
@@ -58,10 +80,11 @@ def inspect_file(
     header_row_number: int | None = None,
     date_order: str | None = None,
     header_labels: Iterable[str] | None = None,
+    policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY,
 ) -> dict[str, Any]:
     """Validate and inspect one accepted file, returning bounded metadata only."""
-    if len(data) > MAX_FILE_BYTES:
-        raise _failure("IMPORT_FILE_TOO_LARGE", "File exceeds the 10 MB upload limit.")
+    if len(data) > policy.max_file_bytes:
+        raise _failure("IMPORT_FILE_TOO_LARGE", "File exceeds its configured upload limit.")
     if not data:
         raise _failure("IMPORT_FILE_EMPTY", "The uploaded file is empty.")
     if not isinstance(filename, str) or not filename.strip():
@@ -73,9 +96,9 @@ def inspect_file(
     if suffix == "csv":
         if sheet_name not in (None, "CSV"):
             raise _failure("IMPORT_SHEET_NOT_FOUND", "CSV has one sheet named CSV.")
-        result = _inspect_csv(data, normalized_labels, header_row_number)
+        result = _inspect_csv(data, normalized_labels, header_row_number, policy)
     elif suffix == "xlsx":
-        result = _inspect_xlsx(data, normalized_labels, sheet_name, header_row_number)
+        result = _inspect_xlsx(data, normalized_labels, sheet_name, header_row_number, policy)
     elif suffix in {"xls", "xlsm"}:
         raise _failure("IMPORT_FILE_TYPE_UNSUPPORTED", "Only .xlsx and .csv files are supported.")
     else:
@@ -84,12 +107,291 @@ def inspect_file(
     result["file_type"] = suffix
     result["date_order"] = normalized_date_order
     result["date_order_state"] = "selected" if normalized_date_order else "unresolved"
-    _enforce_metadata_bound(result)
+    _enforce_metadata_bound(result, policy.max_inspection_bytes)
     return result
 
 
+def inspect_source_file(
+    data: bytes,
+    filename: str,
+    policy: ImportResourcePolicy,
+    *,
+    header_labels: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Inspect every source unit in one file without selecting or mapping it."""
+    if len(data) > policy.max_file_bytes:
+        raise _failure("IMPORT_FILE_TOO_LARGE", "File exceeds its configured upload limit.")
+    if not data:
+        raise _failure("IMPORT_FILE_EMPTY", "The uploaded file is empty.")
+    if not isinstance(filename, str) or not filename.strip():
+        raise _failure("IMPORT_FILE_NAME_REQUIRED", "A file name is required.")
+    suffix = filename.rsplit(".", 1)[-1].casefold() if "." in filename else ""
+    if suffix == "csv":
+        inspection = _inspect_csv(data, _header_labels(header_labels), None, policy)
+        units = [{
+            "name": "CSV",
+            "index": 1,
+            "visibility": "visible",
+            "inspection": inspection,
+        }]
+        decompressed = 0
+    elif suffix == "xlsx":
+        result = _inspect_xlsx(data, _header_labels(header_labels), None, None,
+                               policy, include_all_units=True)
+        units = result["source_units"]
+        decompressed = result["decompressed_bytes"]
+    else:
+        raise _failure("IMPORT_FILE_TYPE_UNSUPPORTED", "Only .xlsx and .csv files are supported.")
+    if len(units) > policy.max_source_units:
+        raise _failure("IMPORT_SOURCE_UNIT_LIMIT_EXCEEDED", "Import batch exceeds its configured source-unit limit.")
+    result = {"file_type": suffix, "decompressed_bytes": decompressed, "source_units": units}
+    _enforce_metadata_bound(result, policy.max_inspection_bytes)
+    return result
+
+
+def read_source_units(
+    data: bytes,
+    filename: str,
+    unit_configs: list[dict[str, Any]],
+    policy: ImportResourcePolicy,
+) -> list[dict[str, Any]]:
+    """Read selected units once per workbook and retain only requested columns."""
+    if len(data) > policy.max_file_bytes:
+        raise _failure("IMPORT_FILE_TOO_LARGE", "File exceeds its configured upload limit.")
+    if not data:
+        raise _failure("IMPORT_FILE_EMPTY", "The uploaded file is empty.")
+    if not isinstance(filename, str) or not filename.strip():
+        raise _failure("IMPORT_FILE_NAME_REQUIRED", "A file name is required.")
+    if not unit_configs or len(unit_configs) > policy.max_source_units:
+        raise _failure("IMPORT_SOURCE_UNIT_LIMIT_EXCEEDED", "Select a valid number of source units.")
+    if any(not isinstance(config, dict) for config in unit_configs):
+        raise _failure("IMPORT_SOURCE_UNIT_INVALID", "Source-unit selection is malformed.")
+    names = [config.get("unit_name") for config in unit_configs]
+    if any(not isinstance(name, str) or not name for name in names):
+        raise _failure("IMPORT_SOURCE_UNIT_INVALID", "Source-unit names must be non-empty text.")
+    if len(set(names)) != len(unit_configs):
+        raise _failure("IMPORT_SOURCE_UNIT_INVALID", "Source-unit selections must be unique.")
+    suffix = filename.rsplit(".", 1)[-1].casefold() if isinstance(filename, str) and "." in filename else ""
+    if suffix == "csv":
+        inspection = inspect_source_file(data, filename, policy)
+        if len(unit_configs) != 1 or unit_configs[0].get("unit_name") != "CSV":
+            raise _failure("IMPORT_SOURCE_UNIT_NOT_FOUND", "CSV contains one source unit named CSV.")
+        unit = inspection["source_units"][0]
+        return [_read_csv_source_unit(data, unit, unit_configs[0], policy)]
+    if suffix != "xlsx":
+        raise _failure("IMPORT_FILE_TYPE_UNSUPPORTED", "Only .xlsx and .csv files are supported.")
+    if len(data) > policy.max_file_bytes:
+        raise _failure("IMPORT_FILE_TOO_LARGE", "File exceeds its configured upload limit.")
+    result = _inspect_xlsx(data, _header_labels(None), None, None, policy,
+                           include_all_units=True, unit_configs=unit_configs)
+    return result["read_units"]
+
+
+def _validate_unit_config(config: dict[str, Any], inspection: dict[str, Any], policy: ImportResourcePolicy) -> None:
+    header = config.get("header_row_number")
+    if isinstance(header, bool) or not isinstance(header, int) or not 1 <= header <= max(inspection["row_count"], 1):
+        raise _failure("IMPORT_HEADER_ROW_INVALID", "Selected header row is outside the source unit.")
+    columns = config.get("columns")
+    if not isinstance(columns, list) or not columns:
+        raise _failure("IMPORT_SOURCE_COLUMNS_INVALID", "Select at least one source column.")
+    if any(isinstance(column, bool) or not isinstance(column, int) or column < 1
+           or column > policy.max_columns_per_unit for column in columns):
+        raise _failure("IMPORT_SOURCE_COLUMNS_INVALID", "A selected source column is outside the configured limit.")
+    if len(set(columns)) != len(columns):
+        raise _failure("IMPORT_SOURCE_COLUMNS_INVALID", "Selected source columns must be unique.")
+    if max(columns) > inspection["column_count"]:
+        raise _failure("IMPORT_SOURCE_COLUMNS_INVALID", "A selected source column is outside the inspected unit.")
+    order = config.get("date_order")
+    if order is not None:
+        _normalize_date_order(order)
+
+
+def _read_csv_source_unit(data: bytes, unit: dict[str, Any], config: dict[str, Any],
+                          policy: ImportResourcePolicy) -> dict[str, Any]:
+    inspection = unit["inspection"]
+    _validate_unit_config(config, inspection, policy)
+    selected = set(config["columns"])
+    rows = []
+    nonempty: set[int] = set()
+    header_cells: list[str] = []
+    try:
+        text = data.decode(inspection["encoding"], errors="strict")
+        reader = csv.reader(io.StringIO(text, newline=""), delimiter=inspection["delimiter"], strict=True)
+        for number, values in enumerate(reader, start=1):
+            if number <= config["header_row_number"]:
+                if number == config["header_row_number"]:
+                    header_cells = list(values[:policy.max_columns_per_unit])
+                    nonempty.update(column for column, value in enumerate(values, start=1) if value.strip())
+                continue
+            nonempty.update(column for column, value in enumerate(values, start=1) if value.strip())
+            cells = {}
+            for column in selected:
+                value = values[column - 1] if column <= len(values) else ""
+                if value.strip():
+                    nonempty.add(column)
+                cells[str(column)] = FileCell(value, "text")
+            rows.append({"source_row": number, "cells": cells})
+    except (UnicodeError, csv.Error) as exc:
+        raise _failure("IMPORT_CSV_MALFORMED", "CSV structure is malformed.") from exc
+    accepted_inspection = {**inspection, "header_row_number": config["header_row_number"],
+                           "header_state": "selected", "header_cells": header_cells,
+                           "date_order": _normalize_date_order(config.get("date_order"))}
+    return {"unit_name": unit["name"], "inspection": accepted_inspection,
+            "rows": rows, "nonempty_columns": sorted(nonempty)}
+
+
+def _read_xlsx_source_unit(worksheet, unit: dict[str, Any], config: dict[str, Any],
+                           markers, policy: ImportResourcePolicy) -> dict[str, Any]:
+    inspection = unit["inspection"]
+    selected = set(config["columns"])
+    header_row = config["header_row_number"]
+    columns = inspection["column_count"]
+    rows_count = inspection["row_count"]
+    rows = []
+    nonempty: set[int] = set()
+    header_cells: list[str] = []
+    marker_iter = iter(markers)
+    marker_row, row_markers = next(marker_iter, (None, {}))
+    values_iter = worksheet.iter_rows(min_row=1, max_row=rows_count, min_col=1,
+                                      max_col=columns, values_only=False)
+    for number, cells in enumerate(values_iter, start=1):
+        while marker_row is not None and marker_row < number:
+            marker_row, row_markers = next(marker_iter, (None, {}))
+        row_markers = row_markers if marker_row == number else {}
+        values = {offset + 1: cell for offset, cell in enumerate(cells)}
+        if number <= header_row:
+            if number == header_row:
+                header_cells = [_display_cell(cell.value) for cell in cells[:policy.max_columns_per_unit]]
+                nonempty.update(column for column, cell in values.items()
+                                if _display_cell(cell.value).strip() or row_markers.get(column, {}).get("formula"))
+            continue
+        nonempty.update(column for column, cell in values.items()
+                        if _display_cell(cell.value).strip() or row_markers.get(column, {}).get("formula"))
+        output_cells = {}
+        for column in selected:
+            cell = values.get(column)
+            value = cell.value if cell is not None else None
+            marker = row_markers.get(column, {})
+            if marker.get("native_date"):
+                value = marker.get("date")
+            formula = bool(marker.get("formula"))
+            is_error = bool(marker.get("error")) or bool(cell is not None and cell.data_type == "e")
+            if value is not None and _display_cell(value).strip() or formula:
+                nonempty.add(column)
+            kind = ("error" if is_error else "date" if marker.get("native_date") or isinstance(value, (date, datetime))
+                    else "time" if isinstance(value, time) else "duration" if isinstance(value, timedelta)
+                    else "boolean" if isinstance(value, bool) else "number" if isinstance(value, (int, float))
+                    else "text")
+            rendered = value.isoformat() if isinstance(value, (date, datetime, time)) else (
+                str(value) if kind in {"number", "duration"} and value is not None else value)
+            if kind == "number" and marker.get("raw_number") is not None:
+                # openpyxl's binary float can round away an invalid fractional
+                # quantity before Decimal validation. Keep numeric XML lexemes;
+                # styled dates/times/durations still use workbook interpretation.
+                rendered = marker["raw_number"]
+            output_cells[str(column)] = FileCell(
+                rendered, kind, formula, bool(marker.get("missing_cache")),
+            )
+        rows.append({"source_row": number, "cells": output_cells})
+    # Drain metadata so malformed trailing row/cell coordinates cannot escape
+    # validation when openpyxl stops at the verified rectangle.
+    for _remaining in marker_iter:
+        pass
+    accepted_inspection = {**inspection, "header_row_number": header_row,
+                           "header_state": "selected", "header_cells": header_cells,
+                           "date_order": _normalize_date_order(config.get("date_order"))}
+    return {"unit_name": unit["name"], "inspection": accepted_inspection,
+            "rows": rows, "nonempty_columns": sorted(nonempty)}
+
+
+def _selected_cell_metadata(
+    archive_path_data: bytes,
+    sheet_name: str,
+    policy: ImportResourcePolicy,
+    selected_columns: set[int] | None,
+):
+    """Yield one row of formula/cache/date/exact numeric metadata at a time."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_path_data), "r") as archive:
+            paths = _sheet_paths(archive, archive.namelist(), policy)
+            path = _path_for_sheet(paths, sheet_name)
+            with archive.open(path) as source:
+                row_number = 0
+                previous_row = 0
+                row_markers: dict[int, dict[str, Any]] = {}
+                column = 0
+                cell: dict[str, Any] = {}
+                last_column = 0
+                for event, element in _xml_events(source, max_depth=policy.max_xlsx_xml_depth):
+                    tag = _local_name(element.tag)
+                    if event == "start" and tag == "row":
+                        text_row = element.attrib.get("r")
+                        row_number = int(text_row) if text_row and text_row.isdigit() else previous_row + 1
+                        if row_number <= previous_row:
+                            raise _failure("IMPORT_XLSX_INVALID", "Workbook rows must have unique increasing coordinates.")
+                        row_markers = {}
+                        last_column = 0
+                    elif event == "start" and tag == "c":
+                        match = _CELL_REF.fullmatch(element.attrib.get("r", ""))
+                        if match is None or int(match.group(2)) != row_number:
+                            raise _failure("IMPORT_XLSX_INVALID", "Workbook row and cell coordinates disagree.")
+                        column = _column_number(match.group(1))
+                        if column <= last_column:
+                            raise _failure("IMPORT_XLSX_INVALID", "Workbook contains duplicate or unordered cell coordinates.")
+                        last_column = column
+                        cell = {"formula": False, "formula_text": None, "formula_attributes": {},
+                                "cache_present": False, "cache_type": element.attrib.get("t", "n"),
+                                "date": None, "native_date": element.attrib.get("t") == "d",
+                                "error": element.attrib.get("t") == "e", "value_seen": False,
+                                "numeric": element.attrib.get("t", "n") == "n"}
+                    elif event == "start" and tag == "f":
+                        cell["formula"] = True
+                        if sum(len(key.encode("utf-8")) + len(value.encode("utf-8"))
+                               for key, value in element.attrib.items()) > policy.max_cell_text_bytes:
+                            raise _failure("IMPORT_CELL_TEXT_LIMIT_EXCEEDED", "A formula exceeds its configured text limit.")
+                        cell["formula_attributes"] = dict(element.attrib)
+                    elif event == "start" and tag == "v":
+                        cell["value_seen"] = True
+                        cell["cache_present"] = True
+                    elif event == "end" and tag == "f":
+                        cell["formula_text"] = element.text or ""
+                    elif event == "end" and tag == "v":
+                        cell["raw_value"] = element.text
+                        if cell.get("native_date"):
+                            cell["date"] = element.text
+                    elif event == "end" and tag == "c":
+                        if (selected_columns is None or column in selected_columns) and (
+                            cell.get("formula") or cell.get("native_date") or cell.get("error")
+                            or cell.get("numeric") and cell.get("value_seen")
+                        ):
+                            row_markers[column] = {
+                                "formula": cell.get("formula", False),
+                                "missing_cache": bool(cell.get("formula") and not cell.get("raw_value")),
+                                "native_date": cell.get("native_date", False),
+                                "date": cell.get("date"),
+                                "error": cell.get("error", False),
+                                "raw_number": cell.get("raw_value") if cell.get("numeric") else None,
+                                "formula_text": cell.get("formula_text"),
+                                "formula_attributes": cell.get("formula_attributes", {}),
+                                "cache_present": cell.get("cache_present", False),
+                                "cache_type": cell.get("cache_type"),
+                                "raw_cache_value": cell.get("raw_value"),
+                            }
+                        cell = {}
+                    elif event == "end" and tag == "row":
+                        yield row_number, row_markers
+                        previous_row = row_number
+    except ImportFailure:
+        raise
+    except (ParseError, OSError, KeyError, zipfile.BadZipFile, ValueError) as exc:
+        raise _failure("IMPORT_XLSX_INVALID", "Workbook worksheet XML is malformed.") from exc
+
+
 def _inspect_csv(
-    data: bytes, labels: set[str], selected_header_row: int | None
+    data: bytes,
+    labels: set[str],
+    selected_header_row: int | None,
+    policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY,
 ) -> dict[str, Any]:
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         raise _failure("IMPORT_CSV_ENCODING_UNSUPPORTED", "UTF-16 CSV files are not supported.")
@@ -117,15 +419,15 @@ def _inspect_csv(
     try:
         for row_num, row in enumerate(reader, start=1):
             rows_seen = row_num
-            if rows_seen > MAX_SELECTED_ROWS:
-                raise _failure("IMPORT_ROW_LIMIT_EXCEEDED", "CSV exceeds 20,000 rows.")
+            if rows_seen > policy.max_rows_per_unit:
+                raise _failure("IMPORT_ROW_LIMIT_EXCEEDED", "CSV exceeds the configured number of rows.")
             row = [cell for cell in row]
             max_columns = max(max_columns, len(row))
-            if max_columns > MAX_SELECTED_COLUMNS:
-                raise _failure("IMPORT_COLUMN_LIMIT_EXCEEDED", "CSV exceeds 50 columns.")
-            if rows_seen * max_columns > MAX_SELECTED_CELLS:
-                raise _failure("IMPORT_CELL_LIMIT_EXCEEDED", "CSV exceeds 1,000,000 cells.")
-            _check_text_values(row)
+            if max_columns > policy.max_columns_per_unit:
+                raise _failure("IMPORT_COLUMN_LIMIT_EXCEEDED", "CSV exceeds the configured number of columns.")
+            if rows_seen * max_columns > policy.max_cells_per_unit:
+                raise _failure("IMPORT_CELL_LIMIT_EXCEEDED", "CSV exceeds the configured rectangular cell limit.")
+            _check_text_values(row, policy.max_cell_text_bytes)
             text_values = [cell for cell in row if cell.strip()]
             if first_text_row is None and text_values and len(text_values) * 2 >= max(1, len(row)):
                 first_text_row = (row_num, row)
@@ -140,8 +442,8 @@ def _inspect_csv(
     if max_columns == 0:
         max_columns = 1
     cell_count = rows_seen * max_columns
-    if cell_count > MAX_SELECTED_CELLS:
-        raise _failure("IMPORT_CELL_LIMIT_EXCEEDED", "CSV exceeds 1,000,000 cells.")
+    if cell_count > policy.max_cells_per_unit:
+        raise _failure("IMPORT_CELL_LIMIT_EXCEEDED", "CSV exceeds the configured rectangular cell limit.")
 
     if selected_header_row is not None:
         if not isinstance(selected_header_row, int) or not 1 <= selected_header_row <= rows_seen:
@@ -165,7 +467,7 @@ def _inspect_csv(
         "selected_sheet_index": 1,
         "header_row_number": header_row_number,
         "header_state": header_state,
-        "header_cells": header_cells[:MAX_SELECTED_COLUMNS],
+        "header_cells": header_cells[:policy.max_columns_per_unit],
         "row_count": rows_seen,
         "column_count": max_columns,
         "cell_count": cell_count,
@@ -176,6 +478,33 @@ def _inspect_csv(
         "formula_empty_cache_count": 0,
         "formula_missing_cache_count": 0,
     }
+
+
+def _inspect_worksheet_header(worksheet, rows: int, columns: int, labels: set[str],
+                              policy: ImportResourcePolicy) -> dict[str, Any]:
+    scan_rows = min(rows, _MAX_HEADER_SCAN_ROWS)
+    scan_columns = min(columns, policy.max_columns_per_unit)
+    best_header: tuple[int, int, list[str]] | None = None
+    first_text_row: tuple[int, list[str]] | None = None
+    if scan_rows and scan_columns:
+        iterator = worksheet.iter_rows(min_row=1, max_row=scan_rows, min_col=1,
+                                       max_col=scan_columns, values_only=True)
+        for row_number, values in enumerate(iterator, start=1):
+            display = [_display_cell(value) for value in values]
+            text_values = [value for value in values if isinstance(value, str) and value.strip()]
+            if first_text_row is None and text_values and len(text_values) * 2 >= max(1, len(display)):
+                first_text_row = (row_number, display)
+            score = sum(_normalize_header(value) in labels for value in display)
+            if score and (best_header is None or score > best_header[0]):
+                best_header = (score, row_number, display)
+    if best_header is not None:
+        _score, header_row, header_cells = best_header
+    elif first_text_row is not None:
+        header_row, header_cells = first_text_row
+    else:
+        header_row, header_cells = 1, []
+    return {"header_row_number": header_row, "header_state": "detected",
+            "header_cells": header_cells[:policy.max_columns_per_unit]}
 
 
 def _csv_row_at(data: bytes, encoding: str, delimiter: str, row_number: int) -> list[str]:
@@ -212,6 +541,11 @@ def _inspect_xlsx(
     labels: set[str],
     selected_sheet: str | None,
     selected_header_row: int | None,
+    policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY,
+    *,
+    include_all_units: bool = False,
+    unit_configs: list[dict[str, Any]] | None = None,
+    strict_table: bool = False,
 ) -> dict[str, Any]:
     try:
         archive = zipfile.ZipFile(io.BytesIO(data), "r")
@@ -221,7 +555,7 @@ def _inspect_xlsx(
     with archive:
         infos = archive.infolist()
         names = [info.filename for info in infos]
-        if len(infos) > MAX_XLSX_MEMBERS:
+        if len(infos) > policy.max_xlsx_members:
             raise _failure("IMPORT_XLSX_MEMBER_LIMIT_EXCEEDED", "Workbook contains too many ZIP members.")
         if len(names) != len(set(names)):
             raise _failure("IMPORT_XLSX_DUPLICATE_MEMBER", "Workbook contains duplicate ZIP entries.")
@@ -235,19 +569,19 @@ def _inspect_xlsx(
             path_parts = info.filename.replace("\\", "/").split("/")
             if info.filename.startswith(("/", "\\")) or ".." in path_parts:
                 raise _failure("IMPORT_XLSX_INVALID", "Workbook contains an unsafe ZIP path.")
-        if sum(info.file_size for info in infos) > MAX_XLSX_DECOMPRESSED_BYTES:
-            raise _failure("IMPORT_XLSX_DECOMPRESSED_LIMIT_EXCEEDED", "Workbook exceeds 50 MB decompressed.")
+        if sum(info.file_size for info in infos) > policy.max_file_decompressed_bytes:
+            raise _failure("IMPORT_XLSX_DECOMPRESSED_LIMIT_EXCEEDED", "Workbook exceeds its configured decompressed-byte limit.")
 
         try:
-            sheet_paths = _sheet_paths(archive, names)
+            sheet_paths = _sheet_paths(archive, names, policy)
             if not sheet_paths:
                 raise _failure("IMPORT_XLSX_INVALID", "Workbook contains no worksheets.")
-            if len(sheet_paths) > MAX_XLSX_SHEETS:
-                raise _failure("IMPORT_SHEET_LIMIT_EXCEEDED", "Workbook exceeds 10 sheets.")
-            xml_parts = _xml_parts(archive, names, sheet_paths)
+            if len(sheet_paths) > policy.max_worksheets_per_file:
+                raise _failure("IMPORT_SHEET_LIMIT_EXCEEDED", "Workbook exceeds its configured worksheet limit.")
+            xml_parts = _xml_parts(archive, names, sheet_paths, policy.max_xlsx_xml_depth)
             shape_by_path: dict[str, dict[str, int]] = {}
             formulas_by_path: dict[str, dict[str, int]] = {}
-            decompressed = _DecompressedCounter()
+            decompressed = _DecompressedCounter(policy.max_file_decompressed_bytes)
             for info in infos:
                 if info.is_dir():
                     continue
@@ -255,12 +589,12 @@ def _inspect_xlsx(
                 # Read against a bounded larger allowance so a lying directory
                 # cannot hide extra inflated bytes before openpyxl reads it.
                 bounded_info = copy(info)
-                bounded_info.file_size = MAX_XLSX_DECOMPRESSED_BYTES + 1
+                bounded_info.file_size = policy.max_file_decompressed_bytes + 1
                 with archive.open(bounded_info, "r") as member:
                     counted_member = _CountingReader(member, decompressed.add)
                     if info.filename in xml_parts:
                         xml_state: dict[str, Any] = {}
-                        for _event, element in _xml_events(counted_member):
+                        for _event, element in _xml_events(counted_member, max_depth=policy.max_xlsx_xml_depth):
                             _scan_xml_element(
                                 _event,
                                 element,
@@ -269,6 +603,7 @@ def _inspect_xlsx(
                                 shape_by_path,
                                 formulas_by_path,
                                 xml_state,
+                                policy.max_cell_text_bytes,
                             )
                         while counted_member.read(64 * 1024):
                             pass
@@ -277,7 +612,8 @@ def _inspect_xlsx(
                             pass
                     if counted_member.bytes_read != info.file_size:
                         raise _failure("IMPORT_XLSX_INVALID", "Workbook ZIP member length disagrees with its content.")
-            _check_xlsx_shape_limits(shape_by_path, sheet_paths, selected_sheet)
+            if not include_all_units:
+                _check_xlsx_shape_limits(shape_by_path, sheet_paths, selected_sheet)
             if "vbaproject.bin" in " ".join(names).casefold() or b"macroenabled" in archive.read(
                 "[Content_Types].xml"
             ).lower():
@@ -287,16 +623,109 @@ def _inspect_xlsx(
         except (ParseError, zipfile.BadZipFile, RuntimeError, ValueError, OSError) as exc:
             raise _failure("IMPORT_XLSX_INVALID", "Workbook XML or ZIP structure is malformed.") from exc
 
+        if strict_table:
+            entries = list(_metadata_elements(archive, "xl/workbook.xml", "sheet", policy.max_xlsx_xml_depth))
+            if len(entries) != 1 or len(sheet_paths) != 1:
+                raise _failure("IMPORT_WORKBOOK_SHEET_COUNT_INVALID",
+                               "Upload exactly one workbook sheet per file; it must be a data worksheet.")
+            name, path = next(iter(sheet_paths.items()))
+            _check_xml_text(name, policy.max_cell_text_bytes)
+            shape = shape_by_path.get(path, {"rows": 0, "columns": 0})
+            _check_shape(shape["rows"], shape["columns"], policy)
+            return {"source_units": [{"name": name, "index": 1,
+                    "visibility": entries[0].get("state", "visible"),
+                    "inspection": {"row_count": shape["rows"], "column_count": shape["columns"],
+                        "cell_count": shape["rows"] * shape["columns"],
+                        "last_data_rows": shape.get("last_data_rows", {}),
+                        "header_row_number": 1, "encoding": None, "delimiter": None}}],
+                    "decompressed_bytes": decompressed.total}
+
         try:
             values_book = load_workbook(io.BytesIO(data), read_only=True, data_only=True, keep_links=False)
         except Exception as exc:
             raise _failure("IMPORT_XLSX_INVALID", "The .xlsx workbook could not be opened safely.") from exc
         try:
-            if len(values_book.worksheets) > MAX_XLSX_SHEETS:
-                raise _failure("IMPORT_SHEET_LIMIT_EXCEEDED", "Workbook exceeds 10 sheets.")
+            if len(values_book.worksheets) > policy.max_worksheets_per_file:
+                raise _failure("IMPORT_SHEET_LIMIT_EXCEEDED", "Workbook exceeds its configured worksheet limit.")
             if not values_book.worksheets:
                 raise _failure("IMPORT_XLSX_INVALID", "Workbook contains no worksheets.")
-            sheet_names = values_book.sheetnames
+            sheet_names = [worksheet.title for worksheet in values_book.worksheets]
+            if include_all_units:
+                visibility = {
+                    ws.title: "visible" if ws.sheet_state == "visible" else "hidden"
+                    for ws in (*values_book.worksheets, *values_book.chartsheets)
+                }
+                units = []
+                for index, name in enumerate(sheet_names, start=1):
+                    path = _path_for_sheet(sheet_paths, name)
+                    shape = shape_by_path.get(path, {"rows": 0, "columns": 0})
+                    rows, columns = shape["rows"], shape["columns"]
+                    worksheet = values_book[name]
+                    if not hasattr(worksheet, "reset_dimensions"):
+                        raise _failure("IMPORT_SHEET_UNSUPPORTED", "A workbook unit is not a data worksheet.")
+                    worksheet.reset_dimensions()
+                    header = _inspect_worksheet_header(worksheet, rows, columns, labels, policy)
+                    formulas = formulas_by_path.get(path, {
+                        "formula_count": 0,
+                        "formula_cached_value_count": 0,
+                        "formula_empty_cache_count": 0,
+                        "formula_missing_cache_count": 0,
+                    })
+                    units.append({
+                        "name": name,
+                        "index": index,
+                        "visibility": visibility[name],
+                        "inspection": {
+                            **header,
+                            "row_count": rows,
+                            "column_count": columns,
+                            "cell_count": rows * columns,
+                            "encoding": None,
+                            "delimiter": None,
+                            **formulas,
+                        },
+                    })
+                result = {"source_units": units, "decompressed_bytes": decompressed.total}
+                if unit_configs is None:
+                    return result
+                if not unit_configs or len(unit_configs) > policy.max_source_units:
+                    raise _failure("IMPORT_SOURCE_UNIT_LIMIT_EXCEEDED", "Select a valid number of source units.")
+                by_name = {unit["name"]: unit for unit in units}
+                selected = []
+                aggregate_cells = 0
+                aggregate_rows = 0
+                for config in unit_configs:
+                    name = config.get("unit_name")
+                    unit = by_name.get(name)
+                    if unit is None:
+                        raise _failure("IMPORT_SOURCE_UNIT_NOT_FOUND", "Selected worksheet does not exist.")
+                    meta = unit["inspection"]
+                    _validate_unit_config(config, meta, policy)
+                    _check_shape(meta["row_count"], meta["column_count"], policy)
+                    aggregate_cells += meta["cell_count"]
+                    aggregate_rows += max(0, meta["row_count"] - config["header_row_number"])
+                    if aggregate_cells > policy.max_selected_cells:
+                        raise _failure("IMPORT_SELECTED_CELL_LIMIT_EXCEEDED", "Selected units exceed their aggregate cell limit.")
+                    if aggregate_rows > policy.max_data_rows:
+                        raise _failure("IMPORT_DATA_ROW_LIMIT_EXCEEDED", "Selected units exceed their aggregate data-row limit.")
+                    selected.append((unit, config))
+                marker_rows = {}
+                for unit, config in selected:
+                    marker_rows[unit["name"]] = _selected_cell_metadata(
+                        archive_path_data=data, sheet_name=unit["name"], policy=policy,
+                        selected_columns=None,
+                    )
+                read_units = []
+                for unit, config in selected:
+                    worksheet = values_book[unit["name"]]
+                    if not hasattr(worksheet, "reset_dimensions"):
+                        raise _failure("IMPORT_SHEET_UNSUPPORTED", "Select a worksheet containing cells, not a chart sheet.")
+                    worksheet.reset_dimensions()
+                    read_units.append(_read_xlsx_source_unit(
+                        worksheet, unit, config, marker_rows[unit["name"]], policy
+                    ))
+                result["read_units"] = read_units
+                return result
             chosen = selected_sheet if selected_sheet is not None else sheet_names[0]
             if chosen not in sheet_names:
                 raise _failure("IMPORT_SHEET_NOT_FOUND", "Selected sheet does not exist in this workbook.")
@@ -308,7 +737,7 @@ def _inspect_xlsx(
             shape = shape_by_path.get(path, {"rows": 0, "columns": 0})
             rows = shape["rows"]
             columns = shape["columns"]
-            _check_shape(rows, columns)
+            _check_shape(rows, columns, policy)
             best_header: tuple[int, int, list[str]] | None = None
             first_text_row: tuple[int, list[str]] | None = None
             selected_header_cells: list[str] = []
@@ -367,7 +796,7 @@ def _inspect_xlsx(
                 "selected_sheet_index": sheet_names.index(chosen) + 1,
                 "header_row_number": header_row,
                 "header_state": header_state,
-                "header_cells": selected_header_cells[:MAX_SELECTED_COLUMNS],
+                "header_cells": selected_header_cells[:policy.max_columns_per_unit],
                 "row_count": rows,
                 "column_count": columns,
                 "cell_count": rows * columns,
@@ -385,46 +814,67 @@ def _inspect_xlsx(
     return result
 
 
-def _sheet_paths(archive: zipfile.ZipFile, names: list[str]) -> dict[str, str]:
+def _sheet_paths(
+    archive: zipfile.ZipFile,
+    names: list[str],
+    policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY,
+) -> dict[str, str]:
     sheets: list[tuple[str, str]] = []
     for attributes in _metadata_elements(archive, "xl/workbook.xml", "sheet"):
         sheets.append((attributes.get("name", ""), next(
             (value for key, value in attributes.items() if key.endswith("}id")), "")))
-        if len(sheets) > MAX_XLSX_SHEETS:
-            raise _failure("IMPORT_SHEET_LIMIT_EXCEEDED", "Workbook exceeds 10 sheets.")
+        if len(sheets) > policy.max_xlsx_members:
+            raise _failure("IMPORT_XLSX_MEMBER_LIMIT_EXCEEDED", "Workbook declares too many sheet entries.")
     required = {rel for _, rel in sheets}
-    targets: dict[str, str] = {}
+    targets: dict[str, tuple[str, str]] = {}
     for attributes in _metadata_elements(archive, "xl/_rels/workbook.xml.rels", "Relationship"):
         rel = attributes.get("Id", "")
         if rel in required:
             if rel in targets or attributes.get("TargetMode") == "External":
                 raise _failure("IMPORT_XLSX_INVALID", "Worksheet relationships must be unique and internal.")
-            targets[rel] = attributes.get("Target", "")
+            targets[rel] = (attributes.get("Target", ""), attributes.get("Type", ""))
     paths: dict[str, str] = {}
     for name, rel_id in sheets:
-        target = targets.get(rel_id)
-        if not name or not target:
+        relationship = targets.get(rel_id)
+        if not name or not relationship:
             raise _failure("IMPORT_XLSX_INVALID", "Workbook contains an invalid sheet relationship.")
+        target, relationship_type = relationship
+        if relationship_type.endswith("/chartsheet"):
+            continue
+        if not relationship_type.endswith("/worksheet"):
+            raise _failure("IMPORT_XLSX_INVALID", "Workbook sheet relationship is not a worksheet.")
         path = target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl", target))
         if not path.startswith("xl/") or path not in names:
             raise _failure("IMPORT_XLSX_INVALID", "Workbook contains an unsafe sheet relationship.")
         if name in paths:
             raise _failure("IMPORT_XLSX_INVALID", "Workbook contains duplicate worksheet names.")
         paths[name] = path
+        if len(paths) > policy.max_worksheets_per_file:
+            raise _failure("IMPORT_SHEET_LIMIT_EXCEEDED", "Workbook exceeds the configured worksheet limit.")
     return paths
 
 
-def _metadata_elements(archive: zipfile.ZipFile, name: str, tag: str):
+def _metadata_elements(
+    archive: zipfile.ZipFile,
+    name: str,
+    tag: str,
+    max_depth: int = MAX_XLSX_XML_DEPTH,
+):
     try:
         with archive.open(name) as source:
-            for event, element in _xml_events(source):
+            for event, element in _xml_events(source, max_depth=max_depth):
                 if event == "end" and _local_name(element.tag) == tag:
                     yield dict(element.attrib)
     except (ParseError, OSError, KeyError, zipfile.BadZipFile) as exc:
         raise _failure("IMPORT_XLSX_INVALID", "Workbook XML is malformed.") from exc
 
 
-def _xml_parts(archive: zipfile.ZipFile, names: list[str], sheet_paths: dict[str, str]) -> set[str]:
+def _xml_parts(
+    archive: zipfile.ZipFile,
+    names: list[str],
+    sheet_paths: dict[str, str],
+    max_depth: int = MAX_XLSX_XML_DEPTH,
+) -> set[str]:
     """OPC part types, not suffix alone, determine XML parsed by workbook readers."""
     members = set(names)
     xml = {name for name in names if name.lower().endswith((".xml", ".rels"))}
@@ -440,7 +890,7 @@ def _xml_parts(archive: zipfile.ZipFile, names: list[str], sheet_paths: dict[str
     # Retain only names from the already member-count-bounded archive, even
     # when an untrusted manifest declares many nonexistent parts/extensions.
     for tag in ("Default", "Override"):
-        for attributes in _metadata_elements(archive, "[Content_Types].xml", tag):
+        for attributes in _metadata_elements(archive, "[Content_Types].xml", tag, max_depth):
             content_type = attributes.get("ContentType", "").split(";", 1)[0].strip().lower()
             is_xml = content_type in ("application/xml", "text/xml") or content_type.endswith("+xml")
             if tag == "Default":
@@ -465,15 +915,15 @@ def _xml_parts(archive: zipfile.ZipFile, names: list[str], sheet_paths: dict[str
     return xml | declared_xml
 
 
-def _xml_events(source):
+def _xml_events(source, *, max_depth: int = MAX_XLSX_XML_DEPTH):
     """Discard finished children as well as text: empty XML nodes also cost memory."""
     stack = []
     for event, element in SafeET.iterparse(source, events=("start", "end"),
                                           forbid_dtd=True, forbid_entities=True, forbid_external=True):
         if event == "start":
-            if len(stack) >= MAX_XLSX_XML_DEPTH:
+            if len(stack) >= max_depth:
                 raise _failure("IMPORT_XLSX_XML_DEPTH_LIMIT_EXCEEDED",
-                               f"Workbook XML exceeds the internal depth bound of {MAX_XLSX_XML_DEPTH} elements.")
+                               f"Workbook XML exceeds the internal depth bound of {max_depth} elements.")
             stack.append(element)
         yield event, element
         if event == "end":
@@ -510,13 +960,14 @@ class _CountingReader:
 
 
 class _DecompressedCounter:
-    def __init__(self) -> None:
+    def __init__(self, max_bytes: int = MAX_XLSX_DECOMPRESSED_BYTES) -> None:
         self.total = 0
+        self.max_bytes = max_bytes
 
     def add(self, size: int) -> None:
         self.total += size
-        if self.total > MAX_XLSX_DECOMPRESSED_BYTES:
-            raise _failure("IMPORT_XLSX_DECOMPRESSED_LIMIT_EXCEEDED", "Workbook exceeds 50 MB decompressed.")
+        if self.total > self.max_bytes:
+            raise _failure("IMPORT_XLSX_DECOMPRESSED_LIMIT_EXCEEDED", "Workbook exceeds its configured decompressed-byte limit.")
 
 
 def _scan_xml_element(
@@ -527,51 +978,63 @@ def _scan_xml_element(
     shapes: dict[str, dict[str, int]],
     formulas: dict[str, dict[str, int]],
     state: dict[str, Any],
+    max_cell_text_bytes: int = MAX_CELL_TEXT_BYTES,
 ) -> None:
-    # Iterparse emits start/end events. Accumulate text for one logical cell or
-    # shared string while clearing completed XML nodes to bound memory.
+    # Iterparse emits start/end events. Accumulate one cell or shared string at
+    # a time, preserve worksheet coordinates, and clear completed XML nodes.
+    tag = _local_name(element.tag)
+    is_sheet = member_name in sheet_paths.values()
     if event == "start":
-        tag = _local_name(element.tag)
-        if tag in {"c", "si"}:
+        if tag == "row" and is_sheet:
+            row_text = element.attrib.get("r")
+            row_number = int(row_text) if row_text and row_text.isdigit() else state.get("last_row", 0) + 1
+            if row_number <= state.get("last_row", 0):
+                raise _failure("IMPORT_XLSX_INVALID", "Workbook rows must have unique increasing coordinates.")
+            state["current_row"] = row_number
+            state["last_row"] = row_number
+            state["last_column"] = 0
+        elif tag == "c" and is_sheet:
+            match = _CELL_REF.fullmatch(element.attrib.get("r", ""))
+            if match is None:
+                raise _failure("IMPORT_XLSX_INVALID", "Workbook contains an invalid cell reference.")
+            column, row = _column_number(match.group(1)), int(match.group(2))
+            if row != state.get("current_row") or column <= state.get("last_column", 0):
+                raise _failure("IMPORT_XLSX_INVALID", "Workbook cell coordinates must be unique and increasing within each row.")
+            state.update(context="c", text_bytes=0, formula=False, value_seen=False,
+                         value_nonempty=False, cell_type=element.attrib.get("t"),
+                         cell_row=row, cell_column=column, inline_text=False)
+        elif tag == "si":
             state.clear()
-            state.update(
-                context=tag,
-                text_bytes=0,
-                formula=False,
-                value_seen=False,
-                value_nonempty=False,
-            )
-        elif tag == "f":
-            if state.get("context") == "c":
-                state["formula"] = True
-        elif tag == "v":
-            if state.get("context") == "c":
-                state["value_seen"] = True
+            state.update(context="si", text_bytes=0)
+        elif tag == "f" and state.get("context") == "c":
+            state["formula"] = True
+        elif tag == "v" and state.get("context") == "c":
+            state["value_seen"] = True
         return
 
-    tag = _local_name(element.tag)
     if tag in {"t", "v", "f"}:
         value = element.text or ""
         if state.get("context"):
             state["text_bytes"] += len(value.encode("utf-8"))
-            if state["text_bytes"] > MAX_CELL_TEXT_BYTES:
-                raise _failure("IMPORT_CELL_TEXT_LIMIT_EXCEEDED", "A cell exceeds the 8 KB text limit.")
+            if state["text_bytes"] > max_cell_text_bytes:
+                raise _failure("IMPORT_CELL_TEXT_LIMIT_EXCEEDED", "A cell exceeds its configured text limit.")
             if tag == "v" and value:
                 state["value_nonempty"] = True
-    if tag == "row" and member_name in sheet_paths.values():
-        row_text = element.attrib.get("r")
-        if row_text and row_text.isdigit():
-            shape = shapes.setdefault(member_name, {"rows": 0, "columns": 0})
-            shape["rows"] = max(shape["rows"], int(row_text))
-    elif tag == "c" and member_name in sheet_paths.values():
+            if tag == "v":
+                state["raw_value"] = value
+            elif tag == "t" and state.get("cell_type") == "inlineStr":
+                state["inline_text"] = True
+    if tag == "c" and is_sheet:
         shape = shapes.setdefault(member_name, {"rows": 0, "columns": 0})
-        match = _CELL_REF.fullmatch(element.attrib.get("r", ""))
-        if not match:
-            raise _failure("IMPORT_XLSX_INVALID", "Workbook contains an invalid cell reference.")
-        column = _column_number(match.group(1))
-        row = int(match.group(2))
-        shape["rows"] = max(shape["rows"], row)
-        shape["columns"] = max(shape["columns"], column)
+        column = state.get("cell_column", 0)
+        row = state.get("cell_row", 0)
+        # Styled empty cells do not extend the physical data rectangle. This
+        # check runs after the cell's formula/value events have been seen.
+        has_data = state.get("formula") or state.get("value_seen") or state.get("inline_text")
+        if has_data:
+            shape["rows"] = max(shape["rows"], row)
+            shape["columns"] = max(shape["columns"], column)
+            shape.setdefault("last_data_rows", {})[column] = row
         if state.get("formula"):
             counts = formulas.setdefault(
                 member_name,
@@ -589,6 +1052,9 @@ def _scan_xml_element(
                 counts["formula_cached_value_count"] += 1
             else:
                 counts["formula_empty_cache_count"] += 1
+        state["last_column"] = column
+        state.pop("context", None)
+    elif tag == "si":
         state.clear()
     elif tag == "si":
         state.clear()
@@ -602,13 +1068,17 @@ def _path_for_sheet(sheet_paths: dict[str, str], sheet_name: str) -> str:
         raise _failure("IMPORT_SHEET_NOT_FOUND", "Selected sheet does not exist in this workbook.") from exc
 
 
-def _check_shape(rows: int, columns: int) -> None:
-    if rows > MAX_SELECTED_ROWS:
-        raise _failure("IMPORT_ROW_LIMIT_EXCEEDED", "Selected sheet exceeds 20,000 rows.")
-    if columns > MAX_SELECTED_COLUMNS:
-        raise _failure("IMPORT_COLUMN_LIMIT_EXCEEDED", "Selected sheet exceeds 50 columns.")
-    if rows * columns > MAX_SELECTED_CELLS:
-        raise _failure("IMPORT_CELL_LIMIT_EXCEEDED", "Selected sheet exceeds 1,000,000 cells.")
+def _check_shape(
+    rows: int,
+    columns: int,
+    policy: ImportResourcePolicy = DEFAULT_IMPORT_RESOURCE_POLICY,
+) -> None:
+    if rows > policy.max_rows_per_unit:
+        raise _failure("IMPORT_ROW_LIMIT_EXCEEDED", "Selected unit exceeds its configured row limit.")
+    if columns > policy.max_columns_per_unit:
+        raise _failure("IMPORT_COLUMN_LIMIT_EXCEEDED", "Selected unit exceeds its configured column limit.")
+    if rows * columns > policy.max_cells_per_unit:
+        raise _failure("IMPORT_CELL_LIMIT_EXCEEDED", "Selected unit exceeds its configured rectangular-cell limit.")
 
 
 def _row_at(worksheet, row_number: int, columns: int) -> list[str]:
@@ -647,14 +1117,14 @@ def _display_cell(value: Any) -> str:
     return str(value)
 
 
-def _check_text_values(values: Iterable[str]) -> None:
+def _check_text_values(values: Iterable[str], max_bytes: int = MAX_CELL_TEXT_BYTES) -> None:
     for value in values:
-        _check_xml_text(value)
+        _check_xml_text(value, max_bytes)
 
 
-def _check_xml_text(value: str) -> None:
-    if len(value.encode("utf-8")) > MAX_CELL_TEXT_BYTES:
-        raise _failure("IMPORT_CELL_TEXT_LIMIT_EXCEEDED", "A cell exceeds the 8 KB text limit.")
+def _check_xml_text(value: str, max_bytes: int = MAX_CELL_TEXT_BYTES) -> None:
+    if len(value.encode("utf-8")) > max_bytes:
+        raise _failure("IMPORT_CELL_TEXT_LIMIT_EXCEEDED", "A cell exceeds its configured text limit.")
 
 
 def _column_number(letters: str) -> int:
@@ -668,13 +1138,15 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _enforce_metadata_bound(metadata: dict[str, Any]) -> None:
+def _enforce_metadata_bound(
+    metadata: dict[str, Any], max_bytes: int = MAX_INSPECTION_JSON_BYTES
+) -> None:
     try:
         serialized = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise _failure("IMPORT_INSPECTION_INVALID", "File inspection metadata is not serializable.") from exc
-    if len(serialized) > MAX_INSPECTION_JSON_BYTES:
-        raise _failure("IMPORT_INSPECTION_TOO_LARGE", "Inspection metadata exceeds its 4 MB limit.")
+    if len(serialized) > max_bytes:
+        raise _failure("IMPORT_INSPECTION_TOO_LARGE", "Inspection metadata exceeds its configured limit.")
 
 
 def _failure(code: str, message: str) -> ImportFailure:

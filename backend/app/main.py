@@ -76,7 +76,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
-    app.state.import_admission = anyio.CapacityLimiter(2)
+    app.state.import_admission = anyio.CapacityLimiter(settings.import_resource_policy.max_concurrent_requests)
 
     @app.exception_handler(ImportFailure)
     async def import_failure_handler(request: Request, exc: ImportFailure) -> JSONResponse:

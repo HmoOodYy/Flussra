@@ -412,118 +412,307 @@ _RETIRED_COLUMNS = (
 
 
 _IMPORT_TABLES = (
-    "imports", "importsourcerecords", "importissues", "filesources", "filesourcerecords",
-    "payrollworkimports", "payrollworkrecords", "payrollworkdrivermatches",
-    "payrollworkrecordidentifiers", "payrollworkcells", "payrollworkstatusremovals",
+    "imports", "importsourcerecords", "importissues", "filesourcebatches", "filesources",
+    "filesourceunits", "sourcelayouts", "filesourcerecords", "payrollworkimports",
+    "payrollworkrecords", "payrollworkpreviewgroups", "payrollworkdrivermatches",
+    "payrollworkrecordidentifiers",
 )
 
 
 def _check_import_foundation(cur) -> list[str]:
     errors: list[str] = []
+    cur.execute("""
+        SELECT am.amname, i.indisunique, i.indisvalid, i.indisready,
+            i.indpred IS NULL, i.indexprs IS NULL,
+            ARRAY(
+                SELECT a.attname FROM unnest(i.indkey) WITH ORDINALITY AS key(attnum, ordinality)
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key.attnum
+                WHERE key.ordinality <= i.indnkeyatts
+                ORDER BY key.ordinality
+            )
+        FROM pg_index i
+        JOIN pg_class x ON x.oid = i.indexrelid
+        JOIN pg_am am ON am.oid = x.relam
+        WHERE i.indexrelid = to_regclass('core.ix_drivers_company_driverid')
+          AND i.indrelid = to_regclass('core.drivers')
+    """)
+    driver_scan_index = cur.fetchone()
+    if (driver_scan_index is None or driver_scan_index[0] != "btree" or driver_scan_index[1]
+            or not driver_scan_index[2] or not driver_scan_index[3] or not driver_scan_index[4]
+            or not driver_scan_index[5] or driver_scan_index[6] != ["companyid", "driverid"]):
+        errors.append("Missing or drifted Company/Driver ordered lookup index core.ix_drivers_company_driverid (0097).")
     for table in _IMPORT_TABLES:
         cur.execute("SELECT to_regclass(%s)", (f"import.{table}",))
         if cur.fetchone()[0] is None:
-            errors.append(f"Missing Import foundation table import.{table} (0094).")
-        triggers = (("trg_imports_envelope", "fn_guard_import_envelope"),
-                    ("trg_imports_notruncate", "fn_guard_import_envelope"),
-                    ("trg_imports_payrollwork", "fn_guard_payroll_work_envelope")) if table == "imports" else (
-                        ("trg_importdetail_writable", "fn_guard_payroll_work_detail"),
-                        ("trg_importdetail_notruncate", "fn_guard_payroll_work_detail"))
-        for trigger, function in triggers:
+            errors.append(f"Missing Import foundation table import.{table} (0095).")
+        triggers = (("trg_imports_envelope", "fn_guard_import_envelope", 31),
+                    ("trg_imports_notruncate", "fn_guard_import_envelope", 34),
+                    ("trg_imports_payrollwork", "fn_guard_payroll_work_envelope", 19)) if table == "imports" else (
+                        ("trg_importdetail_writable", "fn_guard_payroll_work_detail", 31),
+                        ("trg_importdetail_notruncate", "fn_guard_payroll_work_detail", 34))
+        for trigger, function, events in triggers:
             cur.execute("""
                 SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
                 JOIN pg_namespace n ON n.oid = p.pronamespace
                 WHERE t.tgrelid = to_regclass(%s) AND t.tgname = %s
-                  AND t.tgenabled IN ('O','A') AND n.nspname = 'import' AND p.proname = %s
-            """, (f"import.{table}", trigger, function))
+                  AND t.tgenabled IN ('O','A') AND t.tgtype = %s
+                  AND n.nspname = 'import' AND p.proname = %s
+            """, (f"import.{table}", trigger, events, function))
             if cur.fetchone() is None:
-                errors.append(f"Missing or disabled Import guard {table}.{trigger} -> {function} (0094).")
+                errors.append(f"Missing or disabled Import guard {table}.{trigger} -> {function} (0095).")
+    for obsolete in ("payrollworkcells", "payrollworkstatusremovals"):
+        cur.execute("SELECT to_regclass(%s)", (f"import.{obsolete}",))
+        if cur.fetchone()[0] is not None:
+            errors.append(f"Retired per-cell Import authority remains: import.{obsolete} (0095).")
     for table, columns in (
-        ("imports", ("companyid", "importkind", "sourcekind", "revision", "contractversion",
-                     "idempotencykey", "creationfingerprint")),
-        ("filesources", ("companyid", "contractversion", "filehashsha256", "filesizebytes")),
+        ("imports", ("companyid", "importkind", "sourcekind", "revision", "contractversion", "idempotencykey", "creationfingerprint")),
+        ("filesourcebatches", ("importid", "companyid", "contractversion", "sourcemanifest")),
+        ("filesources", ("filesourceid", "importid", "companyid", "fileordinal", "contractversion", "filehashsha256", "filesizebytes")),
+        ("filesourceunits", ("sourceunitid", "filesourceid", "companyid", "importid", "unitname", "unitordinal", "unitkind", "isselected", "headerrownumber", "datesource")),
+        ("sourcelayouts", ("sourcelayoutid", "companyid", "importid", "structurefingerprint")),
         ("payrollworkimports", ("companyid", "branchid", "payrollperiodid", "contractversion", "canonicalizationversion")),
+        ("payrollworkrecords", ("previewgroupid", "rowfingerprint", "valuesjson", "issuesjson", "contextjson", "branchid", "payrollperiodid")),
+        ("filesourcerecords", ("sourcerecordid", "sourceunitid", "sourcerownumber")),
         ("payrollworkrecordidentifiers", ("sourcerecordid", "sourcecolumnindex", "drivermatchid")),
     ):
         for column in columns:
-            cur.execute("""
-                SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(%s)
-                    AND attname = %s AND NOT attisdropped
-            """, (f"import.{table}", column))
+            cur.execute("""SELECT attnotnull FROM pg_attribute WHERE attrelid = to_regclass(%s)
+                AND attname = %s AND NOT attisdropped""", (f"import.{table}", column))
             if cur.fetchone() != (True,):
-                errors.append(f"Import foundation requires NOT NULL {table}.{column} (0094).")
-    cur.execute("""
-        SELECT attname FROM pg_attribute WHERE attrelid = to_regclass('import.imports')
-            AND attname IN ('payrollperiodid','driverid','drivermatchid','sheetname','headerrownumber','dateorder','filecontent')
-            AND NOT attisdropped
-    """)
-    if cur.fetchall():
-        errors.append("Generic Import envelope contains source/target-specific authority (0094).")
-    for table, column, expected_type in (
-        ("filesources", "sheetname", "text"), ("filesources", "headerrownumber", "integer"),
-        ("filesources", "dateorder", "character varying(3)"),
-        ("filesources", "encoding", "character varying(20)"),
-        ("filesources", "delimiter", "character varying(1)"),
-        ("payrollworkimports", "columnmapping", "jsonb"),
+                errors.append(f"Import foundation requires NOT NULL {table}.{column} (0095).")
+    for table, columns in (
+        ("imports", ("payrollperiodid", "driverid", "sheetname", "filecontent", "columnmapping")),
+        ("payrollworkimports", ("columnmapping", "sourcemanifest")),
+        ("filesources", ("sheetname", "headerrownumber", "dateorder")),
+    ):
+        cur.execute("""SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s)
+            AND attname = ANY(%s::text[]) AND NOT attisdropped""", (f"import.{table}", list(columns)))
+        if cur.fetchall():
+            errors.append(f"Obsolete source/target ownership on import.{table} (0095).")
+    for table, column, expected in (
+        ("filesourceunits", "dateorder", "character varying(3)"),
+        ("filesourceunits", "datesource", "jsonb"),
+        ("sourcelayouts", "columnmapping", "jsonb"),
+        ("filesourcebatches", "sourcemanifest", "jsonb"),
+        ("payrollworkimports", "detailpurgedatutc", "timestamp with time zone"),
         ("payrollworkimports", "mappingfingerprint", "text"),
         ("payrollworkimports", "contentfingerprint", "text"),
-        ("payrollworkcells", "decision", "character varying(20)"),
-        ("payrollworkcells", "decisionbasisquantity", "numeric(18,4)"),
-        ("payrollworkcells", "heldstatuskeyid", "integer"),
-        ("payrollworkcells", "statusdecision", "character varying(20)"),
-        ("payrollworkcells", "statusdecisionbasiskeyid", "integer"),
-        ("payrollworkcells", "dayoffdecision", "character varying(20)"),
+        ("payrollworkrecords", "valuesjson", "jsonb"),
+        ("payrollworkrecords", "issuesjson", "jsonb"),
         ("payrollworkrecords", "isexcluded", "boolean"),
     ):
         cur.execute("""SELECT format_type(atttypid, atttypmod) FROM pg_attribute
-            WHERE attrelid = to_regclass(%s) AND attname = %s AND NOT attisdropped""",
-                    (f"import.{table}", column))
-        if cur.fetchone() != (expected_type,):
-            errors.append(f"Missing or drifted Import contract column {table}.{column} (0094).")
-    for table, constraint, required_values in (
-        ("filesources", "ck_filesources_dateorder", ("'DMY'", "'MDY'", "'YMD'")),
+            WHERE attrelid = to_regclass(%s) AND attname = %s AND NOT attisdropped""", (f"import.{table}", column))
+        if cur.fetchone() != (expected,):
+            errors.append(f"Missing or drifted Import contract column {table}.{column} (0095).")
+    for table, constraint, required in (
+        ("filesourceunits", "ck_filesourceunits_dateorder", ("'DMY'", "'MDY'", "'YMD'")),
         ("filesources", "ck_filesources_inspectionpurge", ("inspectionmetadata",)),
-        ("payrollworkcells", "ck_payrollworkcells_valuedecision", ("'UseImported'", "'KeepExisting'", "'Exclude'")),
-        ("payrollworkcells", "ck_payrollworkcells_statusdecision", ("'RemoveStatus'", "'Exclude'")),
-        ("payrollworkcells", "ck_payrollworkcells_dayoffdecision", ("'AcceptException'", "'Exclude'")),
-        ("payrollworkcells", "ck_payrollworkcells_statusdecisionbasis", ("statusdecisionbasiskeyid",)),
-        ("payrollworkcells", "ck_payrollworkcells_valuedecisionbasis", ("decisionbasisquantity",)),
     ):
-        cur.execute("""SELECT pg_get_constraintdef(oid) FROM pg_constraint
-            WHERE conrelid = to_regclass(%s) AND conname = %s AND contype = 'c' AND convalidated""",
-                    (f"import.{table}", constraint))
+        cur.execute("""SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = to_regclass(%s)
+            AND conname = %s AND contype = 'c' AND convalidated""", (f"import.{table}", constraint))
         row = cur.fetchone()
-        if row is None or any(value not in row[0] for value in required_values):
-            errors.append(f"Missing or drifted Import contract check {table}.{constraint} (0094).")
-    for table, columns, parent, parent_columns in (
+        if row is None or any(token not in row[0] for token in required):
+            errors.append(f"Missing or drifted Import contract check {table}.{constraint} (0095).")
+    scope = ["importid", "companyid"]
+    target = ["importid", "companyid", "branchid", "payrollperiodid"]
+    source = ["sourcerecordid", "importid", "companyid"]
+    ownership = (
         ("imports", ["branchid", "companyid"], "core.branches", ["branchid", "companyid"]),
-        ("payrollworkimports", ["payrollperiodid", "companyid", "branchid"],
-         "payroll.payrollperiods", ["payrollperiodid", "companyid", "branchid"]),
+        ("filesourcebatches", scope, "import.imports", scope),
+        ("filesources", scope, "import.filesourcebatches", scope),
+        ("filesourceunits", ["filesourceid", *scope], "import.filesources", ["filesourceid", *scope]),
+        ("filesourceunits", ["sourcelayoutid", *scope], "import.sourcelayouts", ["sourcelayoutid", *scope]),
+        ("sourcelayouts", scope, "import.imports", scope),
+        ("filesourcerecords", ["sourceunitid", *scope], "import.filesourceunits", ["sourceunitid", *scope]),
+        ("filesourcerecords", source, "import.importsourcerecords", source),
+        ("payrollworkimports", ["payrollperiodid", "companyid", "branchid"], "payroll.payrollperiods", ["payrollperiodid", "companyid", "branchid"]),
+        ("payrollworkpreviewgroups", target, "import.payrollworkimports", target),
+        ("payrollworkrecords", target, "import.payrollworkimports", target),
+        ("payrollworkrecords", source, "import.importsourcerecords", source),
+        ("payrollworkrecords", ["previewgroupid", *scope], "import.payrollworkpreviewgroups", ["previewgroupid", *scope]),
+        ("payrollworkrecords", ["driverassignmentid", "companyid", "branchid"], "core.driverassignments", ["driverassignmentid", "companyid", "branchid"]),
+        ("payrollworkrecords", ["driverid", "companyid"], "core.drivers", ["driverid", "companyid"]),
+        ("payrollworkrecords", ["payrollperiodid", "workdate"], "payroll.payrollperioddays", ["payrollperiodid", "workdate"]),
         ("payrollworkdrivermatches", ["driverid", "companyid"], "core.drivers", ["driverid", "companyid"]),
-        ("payrollworkrecordidentifiers", ["drivermatchid", "importid", "companyid"],
-         "import.payrollworkdrivermatches", ["drivermatchid", "importid", "companyid"]),
-        ("payrollworkcells", ["importid", "companyid", "branchid", "payrollperiodid"],
-         "import.payrollworkimports", ["importid", "companyid", "branchid", "payrollperiodid"]),
-        ("payrollworkcells", ["driverassignmentid", "companyid", "branchid"],
-         "core.driverassignments", ["driverassignmentid", "companyid", "branchid"]),
-        ("payrollworkcells", ["heldstatuskeyid", "companyid"],
-         "payroll.payrollstatuskeys", ["statuskeyid", "companyid"]),
-        ("payrollworkcells", ["statusdecisionbasiskeyid", "companyid"],
-         "payroll.payrollstatuskeys", ["statuskeyid", "companyid"]),
-        ("payrollworkcells", ["payrollperioddefinitionid", "payrollperiodid", "companyid", "branchid", "paydefinitionid", "ratedefinitionid"],
-         "payroll.payrollperioddefinitions", ["payrollperioddefinitionid", "payrollperiodid", "companyid", "branchid", "paydefinitionid", "ratedefinitionid"]),
-    ):
+        ("payrollworkrecordidentifiers", source, "import.payrollworkrecords", source),
+        ("payrollworkrecordidentifiers", ["drivermatchid", *scope], "import.payrollworkdrivermatches", ["drivermatchid", *scope]),
+    )
+    for table, columns, parent, parent_columns in ownership:
         cur.execute("""
-            SELECT 1 FROM pg_constraint c
-            WHERE c.conrelid = to_regclass(%s) AND c.confrelid = to_regclass(%s)
-              AND c.contype = 'f' AND c.convalidated
+            SELECT 1 FROM pg_constraint c WHERE c.conrelid = to_regclass(%s)
+              AND c.confrelid = to_regclass(%s) AND c.contype = 'f' AND c.convalidated
               AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(num, pos)
                         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.num ORDER BY k.pos) = %s::text[]
               AND ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(num, pos)
                         JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.num ORDER BY k.pos) = %s::text[]
         """, (f"import.{table}", parent, columns, parent_columns))
         if cur.fetchone() is None:
-            errors.append(f"Missing validated Import ownership FK {table}({', '.join(columns)}) -> {parent} (0094).")
+            errors.append(f"Missing validated Import ownership FK {table}({', '.join(columns)}) -> {parent} (0095).")
+    for table, index_name, columns in (
+        ("filesourceunits", "ix_filesourceunits_layout", ["sourcelayoutid", "importid", "companyid"]),
+        ("payrollworkrecords", "ix_payrollworkrecords_group", ["previewgroupid", "importid", "companyid", "sourcerecordid"]),
+        ("payrollworkrecords", "ix_payrollworkrecords_import", ["importid", "companyid"]),
+        ("importsourcerecords", "ix_importsourcerecords_import", ["importid", "companyid", "sourcerecordid"]),
+        ("payrollworkrecordidentifiers", "ix_payrollworkrecordidentifiers_matchscope", ["drivermatchid", "importid", "companyid"]),
+        ("importissues", "ix_importissues_sourcerecordscope", ["sourcerecordid", "importid", "companyid"]),
+    ):
+        method = "brin" if index_name == "ix_payrollworkrecords_import" else "btree"
+        cur.execute("""SELECT 1 FROM pg_index i
+            JOIN pg_class x ON x.oid=i.indexrelid JOIN pg_am am ON am.oid=x.relam
+            WHERE i.indrelid=to_regclass(%s) AND x.relname=%s AND am.amname=%s
+              AND i.indisvalid AND i.indisready AND i.indpred IS NULL AND i.indexprs IS NULL
+              AND ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(num,pos)
+                  JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.num
+                  WHERE k.pos <= i.indnkeyatts ORDER BY k.pos)=%s::text[]""",
+                    (f"import.{table}", index_name, method, columns))
+        if cur.fetchone() is None:
+            errors.append(f"Missing or drifted Import lookup index {table}.{index_name} (0095).")
+    cur.execute("SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('import.fn_guard_payroll_work_detail()')")
+    row = cur.fetchone()
+    if row is None or any(token not in row[0].lower() for token in (
+        "import_payload_scope", "valuesjson", "payrollperioddefinitions", "previewgroupid",
+        "detailpurgedatutc", "import_manifest_scope", "import_purge_scope",
+    )):
+        errors.append("Missing compact Import payload/retention ownership validation (0095).")
+    return errors
+
+
+def _check_import_rule_lifecycle(cur) -> list[str]:
+    """Verify the forward canonical-payload and rule-history schema boundary."""
+    errors: list[str] = []
+    tables = {
+        "filecanonicaldata": ("filesourceid", "importid", "companyid", "formatversion", "payload",
+                              "bytecount", "hashsha256", "purgedatutc"),
+        "payrollworkruleversions": ("ruleversionid", "companyid", "branchid", "paydefinitionid",
+                                    "originimportid", "originpayrollperiodid", "rulefingerprint",
+                                    "sourcesignature", "targetmeaning", "rulepayload", "createdbyuserid"),
+        "payrollworkpendingrules": ("importid", "companyid", "branchid", "payrollperiodid",
+                                    "paydefinitionid", "payrollperioddefinitionid", "ratedefinitionid",
+                                    "ruleversionid", "revision", "expectedheadrevision", "updatedbyuserid"),
+        "payrollworkruleheads": ("companyid", "branchid", "paydefinitionid", "ruleversionid",
+                                 "revision", "activatedbyimportid", "activatedpayrollperiodid",
+                                 "activatedbyuserid"),
+        "payrollworkreviewdecisions": ("decisionid", "importid", "companyid", "branchid",
+                                       "payrollperiodid", "decisionkey", "contractversion",
+                                       "reviewedrevision", "planfingerprint", "decisionkind", "choice",
+                                       "basisjson", "actoruserid"),
+        "payrollworkappliedchanges": ("changeid", "importid", "companyid", "branchid", "payrollperiodid",
+                                      "paydefinitionid", "payrollperioddefinitionid", "ratedefinitionid",
+                                      "ruleversionid", "driverid", "driverassignmentid", "workdate",
+                                      "draftlineid", "evidenceeventid", "reviewedrevision", "planfingerprint",
+                                      "contractversion", "action"),
+        "payrollworkpreviewrulecontexts": ("importid", "companyid", "branchid", "payrollperiodid", "fingerprint"),
+    }
+    for table, columns in tables.items():
+        cur.execute("SELECT to_regclass(%s)", (f"import.{table}",))
+        if cur.fetchone()[0] is None:
+            errors.append(f"Missing Import lifecycle table import.{table} (0096).")
+            continue
+        cur.execute("""SELECT attname FROM pg_attribute WHERE attrelid = to_regclass(%s)
+            AND attnum > 0 AND NOT attisdropped""", (f"import.{table}",))
+        found = {row[0] for row in cur.fetchall()}
+        for column in columns:
+            if column not in found:
+                errors.append(f"Missing Import lifecycle column import.{table}.{column} (0096).")
+        cur.execute("""SELECT count(*) FROM pg_constraint WHERE conrelid = to_regclass(%s)
+            AND contype = 'f' AND convalidated""", (f"import.{table}",))
+        validated = cur.fetchone()[0]
+        cur.execute("""SELECT count(*) FROM pg_constraint WHERE conrelid = to_regclass(%s)
+            AND contype = 'f'""", (f"import.{table}",))
+        total = cur.fetchone()[0]
+        if total == 0 or validated != total:
+            errors.append(f"Import lifecycle table import.{table} has missing or unvalidated scope foreign keys.")
+
+    cur.execute("""
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conrelid = to_regclass('import.payrollworkpendingrules')
+          AND c.conname = 'uq_payrollworkpendingrules_importtargetrule'
+          AND c.contype = 'u' AND c.convalidated
+          AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(num,pos)
+                    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num ORDER BY k.pos)
+              = ARRAY['importid','paydefinitionid','ruleversionid']::text[]
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing exact pending-target/rule unique key required by durable applied-change links (0096).")
+    cur.execute("""
+        SELECT 1 FROM pg_constraint c
+        WHERE c.conrelid = to_regclass('import.payrollworkappliedchanges')
+          AND c.confrelid = to_regclass('import.payrollworkpendingrules')
+          AND c.conname = 'fk_payrollworkappliedchanges_pendingruleversion'
+          AND c.contype = 'f' AND c.convalidated
+          AND ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(num,pos)
+                    JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.num ORDER BY k.pos)
+              = ARRAY['importid','paydefinitionid','ruleversionid']::text[]
+          AND ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(num,pos)
+                    JOIN pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=k.num ORDER BY k.pos)
+              = ARRAY['importid','paydefinitionid','ruleversionid']::text[]
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing exact validated applied-change to pending-rule version FK (0096).")
+
+    guards = (
+        ("filecanonicaldata", "trg_filecanonicaldata_writable", "fn_guard_file_canonical_data", 31),
+        ("filecanonicaldata", "trg_filecanonicaldata_notruncate", "fn_guard_file_canonical_data", 34),
+        ("payrollworkruleversions", "trg_payrollworkruleversions_writable", "fn_guard_rule_version", 31),
+        ("payrollworkruleversions", "trg_payrollworkruleversions_notruncate", "fn_guard_rule_version", 34),
+        ("payrollworkpendingrules", "trg_payrollworkpendingrules_writable", "fn_guard_pending_rule", 31),
+        ("payrollworkpendingrules", "trg_payrollworkpendingrules_notruncate", "fn_guard_pending_rule", 34),
+        ("payrollworkruleheads", "trg_payrollworkruleheads_writable", "fn_guard_rule_head", 31),
+        ("payrollworkruleheads", "trg_payrollworkruleheads_notruncate", "fn_guard_rule_head", 34),
+        ("payrollworkreviewdecisions", "trg_payrollworkreviewdecisions_writable", "fn_guard_review_decision", 31),
+        ("payrollworkreviewdecisions", "trg_payrollworkreviewdecisions_notruncate", "fn_guard_review_decision", 34),
+        ("payrollworkappliedchanges", "trg_payrollworkappliedchanges_writable", "fn_guard_applied_change", 31),
+        ("payrollworkappliedchanges", "trg_payrollworkappliedchanges_notruncate", "fn_guard_applied_change", 34),
+        ("payrollworkpreviewrulecontexts", "trg_payrollworkpreviewrulecontexts_writable", "fn_guard_preview_rule_context", 31),
+        ("payrollworkpreviewrulecontexts", "trg_payrollworkpreviewrulecontexts_notruncate", "fn_guard_preview_rule_context", 34),
+    )
+    for table, trigger, function, events in guards:
+        cur.execute("""
+            SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE t.tgrelid = to_regclass(%s) AND t.tgname = %s
+              AND t.tgenabled IN ('O','A') AND t.tgtype = %s
+              AND n.nspname = 'import' AND p.proname = %s
+        """, (f"import.{table}", trigger, events, function))
+        if cur.fetchone() is None:
+            errors.append(f"Missing or disabled Import lifecycle guard {table}.{trigger} -> {function} (0096).")
+    cur.execute("""
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE t.tgrelid = to_regclass('import.filesources') AND t.tgname = 'trg_filesources_canonicalretention'
+          AND t.tgenabled IN ('O','A') AND t.tgtype = 19
+          AND n.nspname = 'import' AND p.proname = 'fn_guard_file_canonical_retention'
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing or disabled canonical-payload-before-original retention guard (0096).")
+    cur.execute("""
+        SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE t.tgrelid = to_regclass('import.payrollworkappliedchanges')
+          AND t.tgname = 'trg_payrollworkappliedchanges_completedimport'
+          AND t.tgenabled IN ('O','A') AND t.tgconstraint <> 0
+          AND t.tgdeferrable AND t.tginitdeferred
+          AND n.nspname = 'import' AND p.proname = 'fn_require_applied_import_completed'
+    """)
+    if cur.fetchone() is None:
+        errors.append("Missing deferred Completed-Import gate for durable applied-change links (0096).")
+    for name in ("ix_filecanonicaldata_import", "ix_payrollworkruleversions_origin",
+                 "ix_payrollworkpendingrules_ruleversion", "ix_payrollworkruleheads_ruleversion",
+                 "ix_payrollworkreviewdecisions_import", "ix_payrollworkappliedchanges_import"):
+        if not _index_exists(cur, "import", name):
+            errors.append(f"Missing Import lifecycle lookup index import.{name} (0096).")
+    for function, markers in (
+        ("fn_guard_file_canonical_data", ("import_purge_id", "payload", "purgedatutc")),
+        ("fn_guard_pending_rule", ("import_rule_reuse_unconfirmed", "expectedheadrevision")),
+        ("fn_guard_rule_head", ("completed", "mappingfingerprint", "contentfingerprint", "planfingerprint")),
+        ("fn_guard_review_decision", ("fn_require_current_pending_head", "reviewedrevision")),
+        ("fn_guard_applied_change", ("correlationid", "sourcerevision", "source_created", "expected_head_revision")),
+    ):
+        cur.execute("SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure(%s)", (f"import.{function}()",))
+        row = cur.fetchone()
+        if row is None or any(marker not in row[0].lower() for marker in markers):
+            errors.append(f"Missing or drifted Import lifecycle semantic guard import.{function}() (0096).")
     return errors
 
 
@@ -987,6 +1176,7 @@ def run_schema_guard(database_url: str, is_dev: bool) -> None:
     temporal_errors.extend(_check_company_status_catalog(cur))
     temporal_errors.extend(_check_target_physical_authorities(cur))
     temporal_errors.extend(_check_import_foundation(cur))
+    temporal_errors.extend(_check_import_rule_lifecycle(cur))
 
     # ------------------------------------------------------------------
     # 3. Required functions (security layer)

@@ -13,12 +13,16 @@ app.payroll.audit_evidence is deliberately generic infrastructure; this module i
 SOURCE domain's own adapter and must not be folded into it. Dependency direction is
 one-way: source_evidence.py -> audit_evidence.py.
 """
+from collections.abc import Iterable
 from datetime import date
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.payroll.audit_evidence import capture_period_audit_evidence
+from app.payroll.audit_evidence import (
+    capture_period_audit_evidence,
+    capture_period_audit_evidence_batch,
+)
 from app.payroll.definition_calculation import PeriodDefinition
 
 
@@ -29,6 +33,28 @@ def definition_context(definition: PeriodDefinition) -> dict[str, Any]:
         "pay_definition_id": definition.pay_definition_id,
         "rate_definition_id": definition.rate_definition_id,
     }
+
+
+async def capture_source_evidence_batch(
+    *, company_id: int, branch_id: int, period_id: int, user_id: int,
+    changes: Iterable[dict[str, Any]], correlation_id: str, db: AsyncConnection,
+    source_revision: int | None = None,
+) -> dict[int, int]:
+    """SOURCE-owned adaptation of actual bulk quantity changes, not review choices."""
+    def events():
+        for change in changes:
+            context = definition_context(change["definition"])
+            yield {"entity_id": str(change["line_id"]), "action_code": change["evidence_action"],
+                   "assignment_id": change["driver_assignment_id"], "work_date": change["work_date"],
+                   "before_state": None if change["before"] is None else {**context, **change["before"]},
+                   "after_state": {**context, **change["after"]}}
+
+    result = await capture_period_audit_evidence_batch(
+        company_id=company_id, branch_id=branch_id, period_id=period_id, user_id=user_id,
+        domain="SOURCE", source_entity_type="PayrollDraftLines", required_permission_code="payroll.entry",
+        events=events(), correlation_id=correlation_id, source_revision=source_revision, db=db,
+    )
+    return {int(line_id): event_id for line_id, event_id in result.items()}
 
 
 async def _capture_source_evidence(

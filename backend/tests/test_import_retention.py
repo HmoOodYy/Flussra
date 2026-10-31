@@ -1,4 +1,5 @@
-"""Payroll finalization atomically purges all Import states and serializes staging."""
+from __future__ import annotations
+
 import asyncio
 import threading
 from decimal import Decimal
@@ -6,9 +7,9 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError, IntegrityError
+from sqlalchemy.exc import DBAPIError
 
-from app.imports import service
+from app.imports import batch_service
 from app.imports.retention import purge_payroll_work_import_details
 from app.payroll import finalization
 from tests.calculation_snapshot_helpers import (
@@ -19,16 +20,15 @@ from tests.calculation_snapshot_helpers import (
     standard_scenario,
     submit_and_approve,
 )
-from tests.compensation_api_fixtures import (  # noqa: F401
+from tests.compensation_api_fixtures import (  # noqa: F401 - register isolated API fixtures
     p3c_application,
     p3c_database_engine,
     p3c_http_client,
 )
 from tests.compensation_database_fixtures import p3b_database  # noqa: F401
-from tests.payroll_runtime_fixtures import build_payroll_tenant, seed_status_key
+from tests.payroll_runtime_fixtures import build_payroll_tenant, map_import_columns
 
 pytestmark = pytest.mark.asyncio
-DATA = b"Driver Number,Date,Haul\n001,2026-10-20,1\n"
 
 
 @pytest.fixture
@@ -36,144 +36,194 @@ def tenant(p3b_dsn):
     return build_payroll_tenant(p3b_dsn)
 
 
-async def upload(client, tenant, pid, *, key=None):
+async def _valid_file(p3c_engine, tenant, period_id):
+    from app.imports.mapping import targets
+    from app.payroll.period_definitions import list_period_definitions
+
+    async with p3c_engine.connect() as db:
+        driver = (await db.execute(text("""
+            SELECT d.drivernumber, x.workdate
+            FROM payroll.payrollperioddrivereligibility p
+            JOIN core.driverassignments a ON a.driverassignmentid=p.driverassignmentid
+                AND a.companyid=p.companyid AND a.branchid=p.branchid
+            JOIN core.drivers d ON d.driverid=a.driverid AND d.companyid=a.companyid
+            CROSS JOIN LATERAL unnest(p.eligibleworkdates) AS x(workdate)
+            WHERE p.companyid=:cid AND p.payrollperiodid=:pid AND p.iseligibleforperiod
+            ORDER BY d.driverid,x.workdate LIMIT 1
+        """), {"cid": tenant.company_id, "pid": period_id})).one()
+        definitions = await list_period_definitions(period_id, tenant.company_id, db, active_only=True)
+    definition = next(item for item in targets(definitions) if item["target"].startswith("Definition:"))
+    definition_id = int(definition["target"].split(":", 1)[1])
+    data = (f"DriverNumber,WorkDate,{definition['code']}\n"
+            f"{driver.drivernumber},{driver.workdate.isoformat()},1\n").encode()
+    return data, definition_id
+
+
+async def upload(client, tenant, pid, data, *, key=None):
     return await client.post(f"/payroll/periods/{pid}/imports",
-                             files={"file": ("work.csv", DATA)},
-                             headers={**tenant.admin, "Idempotency-Key": str(key or uuid4())})
+        files={"file": ("work.csv", data, "text/csv")},
+        headers={**tenant.admin, "Idempotency-Key": str(key or uuid4())})
+
+
+async def _map_and_preview(client, tenant, created, definition_id):
+    iid = created["import_id"]
+    mapped = await map_import_columns(client, tenant, created, {
+        "1": "DriverNumber", "2": "WorkDate", "3": f"Definition:{definition_id}"})
+    assert mapped.status_code == 200, mapped.text
+    preview = await client.post(f"/payroll/imports/{iid}/preview",
+        json={"expected_revision": mapped.json()["revision"]}, headers=tenant.admin)
+    assert preview.status_code == 200, preview.text
+    return preview.json()
 
 
 def details(tenant, iid):
     return rows(tenant, """SELECT i.status, i.revision, f.filecontent IS NULL, f.contentpurgedatutc,
-        f.inspectionmetadata, f.sheetname, w.reviewsummary, w.columnmapping,
-        f.headerrownumber, f.dateorder, f.encoding, f.delimiter,
-        w.mappingfingerprint, w.contentfingerprint, w.planfingerprint, w.previewcounts
-        FROM import.imports i JOIN import.filesources f USING (importid, companyid)
-        JOIN import.payrollworkimports w USING (importid, companyid) WHERE i.importid = %s""", iid)[0]
+        f.inspectionmetadata, u.inspectionmetadata, l.inspectionmetadata, b.sourcemanifest,
+        w.defaultworkdate, w.detailpurgedatutc, w.mappingfingerprint, w.contentfingerprint,
+        w.planfingerprint, w.previewcounts, w.reviewsummary, w.reviewsummary->'semantic_input_receipt'
+        FROM import.imports i
+        JOIN import.filesources f ON f.importid=i.importid AND f.companyid=i.companyid
+        JOIN import.filesourceunits u ON u.filesourceid=f.filesourceid AND u.importid=f.importid AND u.companyid=f.companyid
+        JOIN import.sourcelayouts l ON l.sourcelayoutid=u.sourcelayoutid AND l.importid=u.importid AND l.companyid=u.companyid
+        JOIN import.filesourcebatches b ON b.importid=i.importid AND b.companyid=i.companyid
+        JOIN import.payrollworkimports w ON w.importid=i.importid AND w.companyid=i.companyid
+        WHERE i.importid=%s""", iid)[0]
 
 
-async def test_finalization_purges_unfinished_cancelled_and_completed_detail_and_keeps_metadata(
+async def _detail_counts(tenant, iid):
+    tables = ("importsourcerecords", "filesourcerecords", "importissues", "payrollworkrecords",
+              "payrollworkpreviewgroups", "payrollworkdrivermatches", "payrollworkrecordidentifiers")
+    return tuple(rows(tenant, f"SELECT count(*) FROM import.{table} WHERE importid=%s", iid)[0][0]
+                 for table in tables)
+
+
+async def test_finalization_purges_transient_preview_details_and_retains_batch_history(
     p3c_client, p3c_engine, tenant,
 ):
     scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
     pid = scenario.period_id
-    source_evidence_before = rows(tenant, "SELECT payrollperiodauditevidenceeventid FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid = %s ORDER BY 1", pid)
+    data, definition_id = await _valid_file(p3c_engine, tenant, pid)
+    evidence_before = rows(tenant,
+        "SELECT payrollperiodauditevidenceeventid FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid=%s ORDER BY 1", pid)
     staged = []
     for desired in ("NeedsMapping", "NeedsReview", "Cancelled", "Completed"):
-        response = await upload(p3c_client, tenant, pid)
+        response = await upload(p3c_client, tenant, pid, data)
         assert response.status_code == 200, response.text
         iid = response.json()["import_id"]
-        interpreted = await p3c_client.put(f"/payroll/imports/{iid}/mapping",
-            json={"expected_revision": 1, "header_row_number": 2, "date_order": "YMD"}, headers=tenant.admin)
-        assert interpreted.status_code == 200, interpreted.text
-        async with p3c_engine.begin() as db:
-            if desired in ("NeedsReview", "Completed"):
-                await db.execute(text("UPDATE import.imports SET status = 'NeedsReview', revision = revision + 1 WHERE importid = :iid"), {"iid": iid})
-            # Populate A2-ready schema directly to exercise the retention
-            # contract. No mapping or apply behavior is exposed by A1.
-            record = (await db.execute(text("""INSERT INTO import.importsourcerecords
-                (importid, companyid, locator, payload) VALUES (:iid, :cid, '{"row": 2}', '{"value":"1"}')
-                RETURNING sourcerecordid"""), {"iid": iid, "cid": tenant.company_id})).scalar_one()
-            await db.execute(text("""INSERT INTO import.payrollworkrecords (sourcerecordid, importid, companyid)
-                VALUES (:rid, :iid, :cid)"""), {"rid": record, "iid": iid, "cid": tenant.company_id})
-            await db.execute(text("""INSERT INTO import.importissues (importid, companyid, sourcerecordid, severity, code, message)
-                VALUES (:iid, :cid, :rid, 'Warning', 'TEST_WARNING', 'Staged detail')"""), {"iid": iid, "cid": tenant.company_id, "rid": record})
-            await db.execute(text("""UPDATE import.payrollworkimports
-                SET columnmapping = CASE WHEN :mapped THEN '{"1":"DriverNumber"}'::jsonb ELSE NULL END,
-                mappingfingerprint = CASE WHEN :mapped THEN :mapping ELSE NULL END,
-                contentfingerprint = CASE WHEN :mapped THEN :content ELSE NULL END,
-                planfingerprint = :plan, previewcounts = '{"rows": 1}',
-                reviewsummary = CASE WHEN :completed THEN '{"applied": 1}'::jsonb ELSE NULL END WHERE importid = :iid"""),
-                             {"iid": iid, "completed": desired == "Completed", "mapped": desired != "NeedsMapping",
-                              "mapping": "1" * 64, "content": "2" * 64, "plan": "3" * 64})
-            if desired == "Completed":
-                await db.execute(text("""UPDATE import.imports SET status = 'Completed', revision = revision + 1,
-                    completedbyuserid = :uid, completedatutc = NOW() WHERE importid = :iid"""), {"iid": iid, "uid": tenant.owner})
-        if desired == "Cancelled":
-            response = await p3c_client.post(f"/payroll/imports/{iid}/cancel", json={"expected_revision": 2}, headers=tenant.admin)
-            assert response.status_code == 200, response.text
+        if desired in ("NeedsReview", "Completed"):
+            preview = await _map_and_preview(p3c_client, tenant, response.json(), definition_id)
+            assert preview["status"] == "NeedsReview"
+        elif desired == "Cancelled":
+            cancelled = await p3c_client.post(f"/payroll/imports/{iid}/cancel",
+                json={"expected_revision": 1}, headers=tenant.admin)
+            assert cancelled.status_code == 200, cancelled.text
+        if desired == "Completed":
+            async with p3c_engine.begin() as db:
+                await db.execute(text("""UPDATE import.imports SET status='Completed', revision=revision+1,
+                    completedbyuserid=:uid, completedatutc=NOW(), updatedbyuserid=:uid, updatedatutc=NOW()
+                    WHERE importid=:iid AND companyid=:cid"""), {"uid": tenant.owner, "iid": iid, "cid": tenant.company_id})
         staged.append((iid, desired, details(tenant, iid)))
+    completed_receipt = next(before[15] for _iid, desired, before in staged if desired == "Completed")
+    assert completed_receipt["version"] == 1 and completed_receipt["targets"]
+
+    headers, values = (line.split(",") for line in data.decode().strip().splitlines())
+    code = headers[2]
+    duplicate_data = (",".join([*headers[:2], code, code, code]) + "\n"
+                      + ",".join([*values[:2], values[2], values[2], "99"]) + "\n").encode()
+    duplicate_upload = await upload(p3c_client, tenant, pid, duplicate_data)
+    assert duplicate_upload.status_code == 200, duplicate_upload.text
+    duplicate_created = duplicate_upload.json()
+    duplicate_layout = duplicate_created["layouts"][0]
+    signature = duplicate_layout["inspection"]["duplicate_header_signatures"][0]["signature"]
+    mapping = await p3c_client.put(
+        f"/payroll/imports/{duplicate_created['import_id']}/mapping",
+        json={"expected_revision": duplicate_created["revision"],
+              "shared_columns": {"DriverNumber": {"header": headers[0]},
+                                 "WorkDate": {"header": headers[1]}},
+              "ignored_columns": [{"header": code, "occurrences": [
+                  {"duplicate_signature": signature, "occurrence_ordinal": 3}]}],
+              "targets": [{"target": f"Definition:{definition_id}", "transform": "Sum",
+                           "inputs": [
+                               {"header": code, "occurrences": [
+                                   {"duplicate_signature": signature, "occurrence_ordinal": 1}]},
+                               {"header": code, "occurrences": [
+                                   {"duplicate_signature": signature, "occurrence_ordinal": 2}]},
+                           ], "expected_head_revision": 0}]},
+        headers=tenant.admin,
+    )
+    assert mapping.status_code == 200, mapping.text
+    duplicate_preview = await p3c_client.post(
+        f"/payroll/imports/{duplicate_created['import_id']}/preview",
+        json={"expected_revision": mapping.json()["revision"]}, headers=tenant.admin)
+    assert duplicate_preview.status_code == 200, duplicate_preview.text
+    async with p3c_engine.begin() as db:
+        await db.execute(text("""UPDATE import.Imports SET Status='Completed', Revision=Revision+1,
+            CompletedByUserID=:uid, CompletedAtUtc=NOW(), UpdatedByUserID=:uid, UpdatedAtUtc=NOW()
+            WHERE ImportID=:iid AND CompanyID=:cid"""),
+            {"uid": tenant.owner, "iid": duplicate_created["import_id"], "cid": tenant.company_id})
+    duplicate_iid = duplicate_created["import_id"]
+    staged.append((duplicate_iid, "Completed", details(tenant, duplicate_iid)))
+
     await submit_and_approve(p3c_client, tenant, scenario.period)
     result = await finalize(p3c_client, tenant, scenario.period)
     assert Decimal(result.json()["final_gross"]) == Decimal("42.00")
     for iid, desired, before in staged:
         state = details(tenant, iid)
-        assert state[:3] == (desired, before[1] + 1, True)
-        assert state[3] is not None and state[4] is None
-        assert state[5:14] == before[5:14]  # durable interpretation, mapping, semantic identity and summary
-        assert state[8:12] == (2, "YMD", "utf-8", ",")
-        assert state[6] == ({"applied": 1} if desired == "Completed" else None)
-        assert state[7] == ({"1": "DriverNumber"} if desired != "NeedsMapping" else None)
-        assert state[14:] == (None, None)  # only current-plan identity/counts are transient
-        for table in ("importsourcerecords", "importissues", "payrollworkrecords"):
-            assert rows(tenant, f"SELECT count(*) FROM import.{table} WHERE importid = %s", iid) == [(0,)]
+        assert state[0] == desired and state[1] == before[1] + 1
+        assert state[2] is True and state[3] is not None
+        assert state[4:7] == (None, None, None)
+        assert state[7:9] == before[7:9]
+        assert state[10:12] == before[10:12]
+        assert state[12:14] == (None, None)
+        assert state[14] == before[14]  # Aggregate review counts remain durable.
+        assert state[15] == before[15]
+        assert state[9] is not None
+        assert await _detail_counts(tenant, iid) == (0, 0, 0, 0, 0, 0, 0)
         read = await p3c_client.get(f"/payroll/imports/{iid}", headers=tenant.admin)
         assert read.status_code == 200, read.text
-        assert read.json()["file"]["content_purged_at"] is not None
-        assert read.json()["interpretation"] == {"sheet_name": "CSV", "header_row_number": 2,
-            "date_order": "YMD", "encoding": "utf-8", "delimiter": ",", "inspection": None}
-    # Repeated cleanup is a no-op, including revisions.
+        assert read.json()["files"][0]["content_purged_at"] is not None
+        assert read.json()["files"][0]["canonical_format_version"] == 1
+        assert read.json()["files"][0]["canonical_data_bytes"] > 0
+        assert read.json()["source_editable"] is False
+        expected_public_summary = {key: value for key, value in (before[14] or {}).items()
+                                   if key not in {"semantic_input_receipt", "date_review_full"}}
+        expected_public_summary.setdefault("repeat_notice", {
+            "state": "None", "matched_target_count": 0, "supplied_target_count": 0, "targets": []})
+        expected_public_summary["repeat_notice"].pop("targets", None)
+        assert read.json()["preview"]["summary"] == expected_public_summary
+
+    persisted_signature = rows(tenant, """
+        SELECT RuleVersionID, TargetMeaning, RulePayload, SourceSignature, RuleFingerprint
+        FROM import.PayrollWorkRuleVersions
+        WHERE CompanyID=%s AND OriginImportID=%s
+    """, tenant.company_id, duplicate_iid)
+    assert len(persisted_signature) == 2
+    expected_ignored = [{
+        "header": code.casefold(),
+        "occurrences": [{"duplicate_signature": signature, "occurrence_ordinal": 3}],
+    }]
+    assert all(row[3]["ignored_columns"] == expected_ignored for row in persisted_signature)
+    assert all(row[1] == persisted_signature[0][1] for row in persisted_signature)
+    payloads = [row[2] for row in persisted_signature]
+    assert sum("date_interpretation" not in payload for payload in payloads) == 1
+    assert sum("date_interpretation" in payload for payload in payloads) == 1
+    assert all("row_handling" not in payload for payload in payloads)
+
     async with p3c_engine.begin() as db:
         await purge_payroll_work_import_details(db, company_id=tenant.company_id, period_id=pid, actor_id=tenant.owner)
     assert [details(tenant, iid)[1] for iid, _, _ in staged] == [before[1] + 1 for _, _, before in staged]
-    assert rows(tenant, "SELECT payrollperiodauditevidenceeventid FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid = %s ORDER BY 1", pid) == source_evidence_before
-    # Even the retention marker cannot rewrite history or restore detail.
-    completed = next(iid for iid, desired, _ in staged if desired == "Completed")
-    async with p3c_engine.begin() as db:
-        await db.execute(text("SELECT set_config('flussra.import_purge_id', :iid, TRUE)"), {"iid": str(completed)})
-        for table, mutation in (("filesources", "sheetname = 'Changed'"), ("filesources", "dateorder = 'DMY'"),
-                                ("filesources", "encoding = 'cp1252'"), ("filesources", "contentpurgedatutc = NOW()"),
-                                ("payrollworkimports", "columnmapping = '{}'"),
-                                ("payrollworkimports", "mappingfingerprint = 'changed'"),
-                                ("payrollworkimports", "contentfingerprint = 'changed'"),
-                                ("payrollworkimports", "reviewsummary = '{}'")):
-            with pytest.raises(DBAPIError, match="IMPORT_PURGE_SCOPE"):
-                async with db.begin_nested():
-                    await db.execute(text(f"UPDATE import.{table} SET {mutation} WHERE importid = :iid"), {"iid": completed})
-        with pytest.raises(DBAPIError, match="IMPORT_PURGE_SCOPE"):
-            async with db.begin_nested():
-                await db.execute(text("""INSERT INTO import.importsourcerecords (importid, companyid, locator, payload)
-                    VALUES (:iid, :cid, '{}', '{}')"""), {"iid": completed, "cid": tenant.company_id})
-
-
-async def test_cell_decisions_coexist_with_typed_scoped_bases_and_row_exclusion(
-    p3c_client, p3c_engine, tenant, p3b_dsn,
-):
-    scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
-    status = seed_status_key(tenant, "Import decision basis")
-    foreign = build_payroll_tenant(p3b_dsn)
-    foreign_status = seed_status_key(foreign, "Foreign basis")
-    created = await upload(p3c_client, tenant, scenario.period_id)
-    assert created.status_code == 200, created.text
-    iid = created.json()["import_id"]
-    async with p3c_engine.begin() as db:
-        params = {"iid": iid, "cid": tenant.company_id, "bid": tenant.branch_a, "pid": scenario.period_id, "status": status}
-        rid = (await db.execute(text("""INSERT INTO import.importsourcerecords
-            (importid, companyid, locator, payload) VALUES (:iid, :cid, '{}', '{}') RETURNING sourcerecordid"""), params)).scalar_one()
-        params["rid"] = rid
-        await db.execute(text("INSERT INTO import.payrollworkrecords (sourcerecordid, importid, companyid) VALUES (:rid, :iid, :cid)"), params)
-        cell = (await db.execute(text("""INSERT INTO import.payrollworkcells
-            (sourcerecordid, importid, companyid, branchid, payrollperiodid, sourcecolumnindex,
-             hasstatus, isdayoff, decision, decisionbasisquantity, heldstatuskeyid,
-             statusdecision, statusdecisionbasiskeyid, dayoffdecision)
-            VALUES (:rid, :iid, :cid, :bid, :pid, 3, TRUE, TRUE, 'UseImported', 7.25,
-                    :status, 'RemoveStatus', :status, 'AcceptException') RETURNING payrollworkcellid"""), params)).scalar_one()
-        params["cell"] = cell
-        expected = ("UseImported", Decimal("7.2500"), status, "RemoveStatus", status, "AcceptException")
-        select = text("""SELECT decision, decisionbasisquantity, heldstatuskeyid, statusdecision,
-            statusdecisionbasiskeyid, dayoffdecision FROM import.payrollworkcells WHERE payrollworkcellid = :cell""")
-        assert tuple((await db.execute(select, params)).one()) == expected
-        await db.execute(text("UPDATE import.payrollworkrecords SET isexcluded = TRUE WHERE sourcerecordid = :rid"), params)
-        assert tuple((await db.execute(select, params)).one()) == expected
-        for column, invalid in (("decision", "RemoveStatus"), ("statusdecision", "UseImported"),
-                                ("dayoffdecision", "KeepExisting"), ("statusdecisionbasiskeyid", foreign_status),
-                                ("heldstatuskeyid", foreign_status), ("statusdecisionbasiskeyid", None)):
-            with pytest.raises(IntegrityError):
-                async with db.begin_nested():
-                    await db.execute(text(f"UPDATE import.payrollworkcells SET {column} = :value WHERE payrollworkcellid = :cell"),
-                                     {**params, "value": invalid})
-        await db.execute(text("""UPDATE import.payrollworkcells SET decision = 'KeepExisting',
-            statusdecision = 'Exclude', dayoffdecision = 'Exclude' WHERE payrollworkcellid = :cell"""), params)
-        assert tuple((await db.execute(select, params)).one()) == ("KeepExisting", Decimal("7.2500"), status, "Exclude", status, "Exclude")
+    assert rows(tenant, """
+        SELECT count(*) FROM import.FileCanonicalData
+        WHERE CompanyID=%s AND Payload IS NULL AND PurgedAtUtc IS NOT NULL
+          AND ByteCount > 0 AND HashSha256 ~ '^[0-9a-f]{64}$'
+    """, tenant.company_id)[0][0] == len(staged)
+    assert rows(tenant,
+        "SELECT payrollperiodauditevidenceeventid FROM payroll.payrollperiodauditevidenceevents WHERE payrollperiodid=%s ORDER BY 1", pid) == evidence_before
+    with pytest.raises(DBAPIError, match="IMPORT_PURGE_SCOPE|IMPORT_IMMUTABLE"):
+        async with p3c_engine.begin() as db:
+            await db.execute(text("SELECT set_config('flussra.import_purge_id', :iid, TRUE)"), {"iid": str(staged[-1][0])})
+            await db.execute(text("UPDATE import.payrollworkimports SET detailpurgedatutc=NOW() WHERE importid=:iid"),
+                             {"iid": staged[-1][0]})
 
 
 @pytest.mark.parametrize("failure_point", ["purge", "audit"])
@@ -181,12 +231,12 @@ async def test_purge_and_finalization_failures_roll_back_the_entire_lifecycle(
     p3c_client, p3c_engine, tenant, monkeypatch, failure_point,
 ):
     scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
-    created = await upload(p3c_client, tenant, scenario.period_id)
+    data, _definition_id = await _valid_file(p3c_engine, tenant, scenario.period_id)
+    created = await upload(p3c_client, tenant, scenario.period_id, data)
     assert created.status_code == 200, created.text
-    iid = created.json()["import_id"]
+    before = details(tenant, created.json()["import_id"])
     await submit_and_approve(p3c_client, tenant, scenario.period)
-    before = period_evidence_counts(tenant, scenario.period)
-    original = details(tenant, iid)
+    evidence_before = period_evidence_counts(tenant, scenario.period)
 
     async def fail(*args, **kwargs):
         if failure_point == "purge":
@@ -196,38 +246,32 @@ async def test_purge_and_finalization_failures_roll_back_the_entire_lifecycle(
     monkeypatch.setattr(finalization, "purge_payroll_work_import_details" if failure_point == "purge" else "_write_finalization_audit", fail)
     with pytest.raises(RuntimeError, match="injected finalization"):
         await finalize(p3c_client, tenant, scenario.period)
-    assert details(tenant, iid) == original
+    assert details(tenant, created.json()["import_id"]) == before
     assert period_status(tenant, scenario.period) == "Approved"
-    assert period_evidence_counts(tenant, scenario.period) == before
+    assert period_evidence_counts(tenant, scenario.period) == evidence_before
 
 
-@pytest.mark.parametrize("operation", ["upload", "reinterpret"])
-async def test_finalization_during_parser_work_cannot_recreate_details(
-    p3c_client, p3c_engine, tenant, monkeypatch, operation,
+async def test_finalization_during_upload_parsing_cannot_recreate_details(
+    p3c_client, p3c_engine, tenant, monkeypatch,
 ):
     scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
-    created = await upload(p3c_client, tenant, scenario.period_id)
+    data, _definition_id = await _valid_file(p3c_engine, tenant, scenario.period_id)
+    created = await upload(p3c_client, tenant, scenario.period_id, data)
     assert created.status_code == 200, created.text
     iid = created.json()["import_id"]
     parser_entered, parser_release = threading.Event(), threading.Event()
-    inspect = service.inspect_file
+    inspect = batch_service._inspect_batch
 
-    def held_parser(*args, **kwargs):
+    def held(*args, **kwargs):
         parser_entered.set()
         if not parser_release.wait(15):
             raise RuntimeError("test did not release parser")
         return inspect(*args, **kwargs)
 
-    monkeypatch.setattr(service, "inspect_file", held_parser)
-    if operation == "upload":
-        pending = asyncio.create_task(upload(p3c_client, tenant, scenario.period_id))
-    else:
-        pending = asyncio.create_task(p3c_client.put(f"/payroll/imports/{iid}/mapping",
-            json={"expected_revision": 1, "date_order": "DMY"}, headers=tenant.admin))
+    monkeypatch.setattr(batch_service, "_inspect_batch", held)
+    pending = asyncio.create_task(upload(p3c_client, tenant, scenario.period_id, data))
     try:
         assert await asyncio.to_thread(parser_entered.wait, 5)
-        # These actual workflow requests would wait on a period lock or idle
-        # request transaction if parsing held one. They must finish first.
         await asyncio.wait_for(submit_and_approve(p3c_client, tenant, scenario.period), 10)
         await asyncio.wait_for(finalize(p3c_client, tenant, scenario.period), 10)
     finally:
@@ -235,4 +279,25 @@ async def test_finalization_during_parser_work_cannot_recreate_details(
     response = await asyncio.wait_for(pending, 10)
     assert response.status_code == 409, response.text
     assert details(tenant, iid)[2] is True
-    assert rows(tenant, "SELECT count(*) FROM import.payrollworkimports WHERE payrollperiodid = %s", scenario.period_id) == [(1,)]
+    assert rows(tenant, "SELECT count(*) FROM import.payrollworkimports WHERE payrollperiodid=%s", scenario.period_id) == [(1,)]
+
+
+async def test_normalized_preview_has_no_decision_surface(p3c_client, p3c_engine, tenant):
+    scenario = await standard_scenario(p3c_client, p3c_engine, tenant)
+    data, definition_id = await _valid_file(p3c_engine, tenant, scenario.period_id)
+    created = await upload(p3c_client, tenant, scenario.period_id, data)
+    assert created.status_code == 200, created.text
+    preview = await _map_and_preview(p3c_client, tenant, created.json(), definition_id)
+    assert preview["status"] == "NeedsReview"
+    async with p3c_engine.connect() as db:
+        schema = (await db.execute(text("""
+            SELECT to_regclass('import.payrollworkcells') IS NULL,
+                to_regclass('import.payrollworkrecords') IS NOT NULL,
+                to_regclass('import.payrollworkpreviewgroups') IS NOT NULL
+        """))).one()
+        columns = (await db.execute(text("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_schema='import' AND table_name='payrollworkrecords'
+        """))).scalars().all()
+    assert tuple(schema) == (True, True, True)
+    assert not {"decision", "decisionbasisquantity", "appliedevidenceeventid", "confirmed"}.intersection(columns)

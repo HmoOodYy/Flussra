@@ -198,3 +198,82 @@ def test_get_settings_is_cached_and_test_configuration_is_isolated():
     assert settings.DATABASE_URL.endswith("/test_configuration_only")
     assert "test-only" in settings.SECRET_KEY
     assert settings.ENVIRONMENT == "test"
+
+
+@pytest.mark.asyncio
+async def test_benchmark_application_restores_environment_and_settings_cache():
+    import os
+
+    from scripts.import_benchmark_support import application
+
+    get_settings.cache_clear()
+    before_environment = {key: os.environ.get(key) for key in ("DATABASE_URL", "ENVIRONMENT")}
+    before_settings = get_settings()
+    dsn = {"user": "tester", "host": "127.0.0.1", "port": 15432, "database": "disposable"}
+    expected_temporary_url = "postgresql+asyncpg://tester@127.0.0.1:15432/disposable"
+
+    async with application(dsn):
+        assert get_settings().DATABASE_URL == expected_temporary_url
+        assert get_settings() is get_settings()
+
+    assert {key: os.environ.get(key) for key in before_environment} == before_environment
+    assert get_settings().DATABASE_URL == before_settings.DATABASE_URL
+    assert get_settings().SECRET_KEY == before_settings.SECRET_KEY
+
+    with pytest.raises(RuntimeError, match="benchmark body failed"):
+        async with application(dsn):
+            assert get_settings().DATABASE_URL == expected_temporary_url
+            raise RuntimeError("benchmark body failed")
+
+    assert {key: os.environ.get(key) for key in before_environment} == before_environment
+    assert get_settings().DATABASE_URL == before_settings.DATABASE_URL
+    assert get_settings().SECRET_KEY == before_settings.SECRET_KEY
+
+
+def test_private_database_restores_environment_when_workload_raises(monkeypatch):
+    import os
+    from contextlib import contextmanager
+
+    import tests.conftest as conftest
+    import tests.database_templates as database_templates
+    import tests.postgresql_compat as postgresql_compat
+    from scripts.import_benchmark_support import private_database
+
+    events = []
+
+    class FakeCluster:
+        def start(self):
+            events.append("start")
+
+        def dsn(self):
+            return {"database": "template"}
+
+    class FakeDatabases:
+        def __init__(self, _dsn, _root):
+            pass
+
+        @contextmanager
+        def database(self, _name):
+            yield {"database": "workload"}
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(postgresql_compat, "create_test_postgresql", FakeCluster)
+    monkeypatch.setattr(database_templates, "SchemaDatabases", FakeDatabases)
+    monkeypatch.setattr(conftest, "_stop_test_postgresql_safely", lambda cluster: events.append("stop"))
+    keys = ("DATABASE_URL", "SECRET_KEY", "ENVIRONMENT", "PATH")
+    before = {key: os.environ.get(key) for key in keys}
+    get_settings.cache_clear()
+    before_settings = get_settings()
+
+    with pytest.raises(RuntimeError, match="workload failed"):
+        with private_database() as dsn:
+            assert dsn == {"database": "workload"}
+            assert get_settings().ENVIRONMENT == "test"
+            raise RuntimeError("workload failed")
+
+    assert {key: os.environ.get(key) for key in keys} == before
+    assert get_settings().DATABASE_URL == before_settings.DATABASE_URL
+    assert get_settings().SECRET_KEY == before_settings.SECRET_KEY
+    assert events == ["start", "close", "stop"]

@@ -672,6 +672,73 @@ class TestDashboardSetupWarnings:
 # ---------------------------------------------------------------------------
 
 class TestDashboardBranchSummaries:
+    async def test_company_dashboard_includes_inactive_branch_periods_without_cross_company_leakage(
+        self,
+        client: httpx.AsyncClient,
+        apply_schema,
+        test_engine,
+    ):
+        """Company totals and branch breakdown retain Open periods after branch deactivation."""
+        tenant = build_payroll_tenant(apply_schema.dsn())
+        other_tenant = build_payroll_tenant(apply_schema.dsn())
+        company_user = make_user(tenant, ["payroll.view"], scope="AllCompanyBranches")
+
+        async with test_engine.begin() as db:
+            for period_company, branch_id, label in (
+                (tenant.company_id, tenant.branch_a, "active"),
+                (tenant.company_id, tenant.branch_b, "inactive"),
+                (other_tenant.company_id, other_tenant.branch_a, "other-company"),
+            ):
+                await db.execute(text("""
+                    INSERT INTO payroll.payrollperiods
+                        (companyid, branchid, status, periodcode, periodname, periodtype,
+                         startdate, enddate)
+                    VALUES (:company, :branch, 'Open', :code, :name, 'Week',
+                            DATE '2099-01-01', DATE '2099-01-07')
+                """), {
+                    "company": period_company,
+                    "branch": branch_id,
+                    "code": f"DASH_{label}_{uuid4().hex[:10]}",
+                    "name": f"Dashboard {label} period",
+                })
+
+        before = await client.get(BASE, headers=company_user)
+        assert before.status_code == 200, before.text
+        assert before.json()["periods_open"] == 2
+
+        async with test_engine.begin() as db:
+            deactivated_branch_id = await db.scalar(text("""
+                UPDATE core.branches SET status='Inactive'
+                WHERE companyid=:company AND branchid=:branch
+                  AND status='Active' AND isdefault=FALSE
+                RETURNING branchid
+            """), {"company": tenant.company_id, "branch": tenant.branch_b})
+        assert deactivated_branch_id == tenant.branch_b
+
+        company_response = await client.get(BASE, headers=company_user)
+        assert company_response.status_code == 200, company_response.text
+        company_data = company_response.json()
+        assert company_data["periods_open"] == before.json()["periods_open"]
+        company_summaries = {
+            summary["branch_id"]: summary for summary in company_data["branch_summaries"]
+        }
+        assert set(company_summaries) == {tenant.branch_a, tenant.branch_b}
+        assert company_summaries[tenant.branch_a]["open_count"] == 1
+        assert company_summaries[tenant.branch_b]["open_count"] == 1
+        assert sum(summary["open_count"] for summary in company_summaries.values()) == 2
+
+        branch_user = make_user(
+            tenant, ["payroll.view"], scope="SpecificBranch", branch_id=tenant.branch_a,
+        )
+        branch_response = await client.get(BASE, headers=branch_user)
+        assert branch_response.status_code == 200, branch_response.text
+        branch_data = branch_response.json()
+        assert branch_data["periods_open"] == 1
+        assert [summary["branch_id"] for summary in branch_data["branch_summaries"]] == [
+            tenant.branch_a
+        ]
+        assert branch_data["branch_summaries"][0]["open_count"] == 1
+
     async def test_branch_summary_counts_match_totals(
         self,
         client: httpx.AsyncClient,

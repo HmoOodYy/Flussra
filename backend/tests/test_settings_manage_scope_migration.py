@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import psycopg2
 
-from tests.schema_helpers import _alembic, _schema_database
+from tests.schema_helpers import _alembic, _disposable_database
 
 _SETTINGS_MANAGE_GRANTS = {
     "users.view", "users.create", "users.edit",
@@ -82,10 +82,11 @@ def _active_override_codes(cur, user_id: int) -> set[str]:
     return {row[0] for row in cur.fetchall()}
 
 
-def test_migration_converts_the_two_legacy_codes_into_the_specific_permissions(schema_databases):
-    with _schema_database(schema_databases, "settings_scope") as (env, dsn):
-        downgraded = _alembic(env, "downgrade", "0095")
-        assert downgraded.returncode == 0, downgraded.stderr
+def test_migration_converts_the_two_legacy_codes_into_the_specific_permissions(pg_instance):
+    # Later migrations cannot be downgraded, so the database is built up to 0095 directly.
+    with _disposable_database(pg_instance, "settings_scope") as (env, dsn):
+        upgraded_to_0095 = _alembic(env, "upgrade", "0095")
+        assert upgraded_to_0095.returncode == 0, upgraded_to_0095.stderr
 
         with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
             cur.execute("SELECT permissionname FROM sec.permissions WHERE permissioncode = 'settings.manage'")
@@ -152,10 +153,10 @@ def test_migration_converts_the_two_legacy_codes_into_the_specific_permissions(s
             assert cur.fetchone()[0] == "Manage Company Settings"
 
 
-def test_migration_is_repeatable_and_downgrade_keeps_granted_permissions(schema_databases):
-    with _schema_database(schema_databases, "settings_scope_repeat") as (env, dsn):
-        downgraded = _alembic(env, "downgrade", "0095")
-        assert downgraded.returncode == 0, downgraded.stderr
+def test_migration_is_repeatable_and_downgrade_keeps_granted_permissions(pg_instance):
+    with _disposable_database(pg_instance, "settings_scope_repeat") as (env, dsn):
+        upgraded_to_0095 = _alembic(env, "upgrade", "0095")
+        assert upgraded_to_0095.returncode == 0, upgraded_to_0095.stderr
 
         with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
             company_id = _seed_company(cur)

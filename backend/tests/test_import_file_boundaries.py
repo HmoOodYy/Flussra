@@ -1,4 +1,4 @@
-"""Inclusive product limits, actual worksheet content and safe package handling."""
+"""Inclusive operational limits, actual worksheet content and safe packages."""
 import asyncio
 import io
 import re
@@ -10,7 +10,8 @@ import zlib
 import pytest
 from openpyxl import Workbook
 
-from app.imports import ImportFailure, inspect_file, receive_file
+from app.imports import ImportFailure, inspect_file, receive_files
+from app.imports.policy import DEFAULT_IMPORT_RESOURCE_POLICY
 from tests.test_import_file_inspection import _rewrite_xlsx, _workbook_bytes
 from tests.test_import_upload_transport import _multipart, _request
 
@@ -30,10 +31,9 @@ def test_csv_rectangle_at_one_million_cells_and_beyond_row_and_column_bounds():
     row = b",".join([b"1"] * 50) + b"\n"
     result = inspect_file(row * 20_000, "dense.csv")
     assert (result["row_count"], result["column_count"], result["cell_count"]) == (20_000, 50, 1_000_000)
-    # With both dimension caps enforced, exceeding a million necessarily
-    # exceeds a dimension first; there is no independent >1M valid rectangle.
     for data, code in ((row * 20_001, "IMPORT_ROW_LIMIT_EXCEEDED"),
-                       (b",".join([b"1"] * 51), "IMPORT_COLUMN_LIMIT_EXCEEDED")):
+                       (b",".join([b"1"] * 129), "IMPORT_COLUMN_LIMIT_EXCEEDED"),
+                       ((b",".join([b"1"] * 51) + b"\n") * 20_000, "IMPORT_CELL_LIMIT_EXCEEDED")):
         with pytest.raises(ImportFailure) as exc:
             inspect_file(data, "over.csv")
         assert exc.value.code == code
@@ -88,7 +88,7 @@ def test_actual_selected_extents_count_gaps_and_ignore_declared_dimensions():
     assert (result["row_count"], result["column_count"], result["cell_count"]) == (20_000, 50, 1_000_000)
 
 
-@pytest.mark.parametrize(("row", "column", "code"), [(20_001, 1, "IMPORT_ROW_LIMIT_EXCEEDED"), (1, 51, "IMPORT_COLUMN_LIMIT_EXCEEDED")])
+@pytest.mark.parametrize(("row", "column", "code"), [(20_001, 1, "IMPORT_ROW_LIMIT_EXCEEDED"), (1, 129, "IMPORT_COLUMN_LIMIT_EXCEEDED")])
 def test_unselected_sheet_shape_does_not_reduce_the_selected_sheet_capacity(row, column, code):
     data = _sparse_workbook(row, column)
     assert inspect_file(data, "scope.xlsx", sheet_name="Small")["row_count"] == 1
@@ -110,19 +110,20 @@ def test_unselected_sheet_text_is_still_checked():
     assert inspect_file(data, "small.xlsx")["row_count"] == 1
 
 
-def test_hidden_sheets_count_toward_ten_sheet_cap():
+def test_hidden_sheets_count_toward_configured_worksheet_cap():
     wb = Workbook()
     wb.active.append(["Header"])
-    for index in range(9):
+    for index in range(30):
         wb.create_sheet(f"Hidden{index}").sheet_state = "hidden"
     output = io.BytesIO()
     wb.save(output)
-    assert len(inspect_file(output.getvalue(), "ten.xlsx")["sheets"]) == 10
-    wb.create_sheet("Eleventh").sheet_state = "hidden"
+    assert len(inspect_file(output.getvalue(), "thirty-one.xlsx")["sheets"]) == 31
+    for index in range(98):
+        wb.create_sheet(f"Hidden extra {index}").sheet_state = "hidden"
     output = io.BytesIO()
     wb.save(output)
     with pytest.raises(ImportFailure) as exc:
-        inspect_file(output.getvalue(), "eleven.xlsx")
+        inspect_file(output.getvalue(), "too-many.xlsx")
     assert exc.value.code == "IMPORT_SHEET_LIMIT_EXCEEDED"
 
 
@@ -201,7 +202,7 @@ def test_header_fallback_requires_text_and_preserves_unicode_filename():
     assert result["header_cells"] == ["Notes", "Other"]
     filename = "\u0628\u064a\u0627\u0646\u0627\u062a.csv"
     request = _request(_multipart(b"Header\n001\n", filename=filename))
-    assert asyncio.run(receive_file(request)).filename == filename
+    assert asyncio.run(receive_files(request, DEFAULT_IMPORT_RESOURCE_POLICY))[0].filename == filename
 
 
 @pytest.mark.parametrize("data", [b"%PDF-1.7\n", b"GIF89a", b"\x01binary", b"PK\x03\x04workbook"])
@@ -215,9 +216,9 @@ def test_consumed_bytes_ignore_false_content_length_and_disconnect_cleans_memory
     data = b"Header\n001\n"
     request = _request(_multipart(data), chunk_sizes=(1, 3, 5, 7))
     request.scope["headers"].append((b"content-length", b"1"))
-    assert asyncio.run(receive_file(request)).data == data
+    assert asyncio.run(receive_files(request, DEFAULT_IMPORT_RESOURCE_POLICY))[0].data == data
     # No spool/temp file exists: invocation-owned buffers become unreachable
     # on rejection; a subsequent invocation remains independent and succeeds.
     with pytest.raises(ImportFailure):
-        asyncio.run(receive_file(_request(_multipart(data)[:-15])))
-    assert asyncio.run(receive_file(_request(_multipart(data)))).data == data
+        asyncio.run(receive_files(_request(_multipart(data)[:-15]), DEFAULT_IMPORT_RESOURCE_POLICY))
+    assert asyncio.run(receive_files(_request(_multipart(data)), DEFAULT_IMPORT_RESOURCE_POLICY))[0].data == data

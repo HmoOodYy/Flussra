@@ -23,6 +23,10 @@ from app.access.branch_access import check_branch_access
 from app.access.policy import require_non_driver_subject
 from app.compensation.audit import write_audit
 from app.compensation.branch_config import activate_for_requesting_branch
+from app.compensation.capacity import (
+    enforce_company_pay_definition_capacity,
+    lock_company_pay_definition_capacity,
+)
 from app.compensation.errors import compensation_error, translate_database_error
 from app.compensation.guards import (
     require_definition_branch_edit,
@@ -44,6 +48,7 @@ from app.compensation.schemas import (
     PayDefinitionSummary,
     RateComponentSummary,
 )
+from app.product_policy import DEFAULT_PRODUCT_POLICY, ProductPolicy
 from app.rate_definition_concurrency import lock_rate_definition_structure
 
 GOVERNANCE_SCHEMA_VERSION = 1
@@ -391,12 +396,12 @@ async def submit_draft(
 
 async def decide_request(
     company_id: int, user_id: int, request_id: UUID, data: PayDefinitionRequestDecision,
-    db: AsyncConnection,
+    db: AsyncConnection, *, policy: ProductPolicy = DEFAULT_PRODUCT_POLICY,
 ) -> PayDefinitionRequestSummary:
     await _load_request(company_id, request_id, db)
     await require_definition_company_edit(company_id, user_id, db)
     if data.action == DecisionAction.Approve:
-        return await _approve_request(company_id, user_id, request_id, data, db)
+        return await _approve_request(company_id, user_id, request_id, data, db, policy=policy)
 
     new_status, event_type = (
         ("Draft", "ReturnedToDraft") if data.action == DecisionAction.ReturnToDraft
@@ -463,6 +468,7 @@ async def _insert_components(
 async def _create_definition_structure(
     db: AsyncConnection, *, company_id: int, user_id: int, code: str | None, name: str,
     input_type: str, unit: str | None, method: str, tiers: list | None = None,
+    policy: ProductPolicy = DEFAULT_PRODUCT_POLICY,
 ) -> tuple[int, int]:
     """Create the PayDefinition with its RateDefinition and the components its method requires.
 
@@ -471,6 +477,7 @@ async def _create_definition_structure(
     period that references the RateDefinition), never by creation: until then
     ``change_structure`` may correct the method and topology.
     """
+    await enforce_company_pay_definition_capacity(company_id, db, policy)
     pay_definition_id = (await db.execute(
         text("""
             INSERT INTO payroll.paydefinitions
@@ -496,8 +503,9 @@ async def _create_definition_structure(
 
 async def _approve_request(
     company_id: int, user_id: int, request_id: UUID, data: PayDefinitionRequestDecision,
-    db: AsyncConnection,
+    db: AsyncConnection, *, policy: ProductPolicy = DEFAULT_PRODUCT_POLICY,
 ) -> PayDefinitionRequestSummary:
+    await lock_company_pay_definition_capacity(company_id, db)
     row = await _load_request(company_id, request_id, db, for_update=True)
     if row["status"] != "PendingCompanyApproval":
         raise await _diagnose_conflict(
@@ -519,7 +527,7 @@ async def _approve_request(
         pay_definition_id, _ = await _create_definition_structure(
             db, company_id=company_id, user_id=user_id, code=row["definition_code"],
             name=row["definition_name"], input_type=row["input_type"], unit=row["unit"],
-            method=row["calculation_method"], tiers=row["ordinal_tiers"])
+            method=row["calculation_method"], tiers=row["ordinal_tiers"], policy=policy)
     except DBAPIError as exc:
         translated = translate_database_error(exc)
         if translated is not None:
@@ -559,7 +567,7 @@ async def _approve_request(
     )
     await activate_for_requesting_branch(
         db, company_id=company_id, branch_id=row["requesting_branch_id"],
-        pay_definition_id=pay_definition_id, user_id=user_id)
+        pay_definition_id=pay_definition_id, user_id=user_id, policy=policy)
     await _insert_event(
         db, request_id, "Approved", "PendingCompanyApproval", "Approved", user_id,
         revision, data.reason)
@@ -599,6 +607,7 @@ async def copy_rejected(
 
 async def create_direct(
     company_id: int, user_id: int, data: PayDefinitionDirectCreate, db: AsyncConnection,
+    *, policy: ProductPolicy = DEFAULT_PRODUCT_POLICY,
 ) -> PayDefinitionSummary:
     await require_definition_company_edit(company_id, user_id, db)
     _require_valid_structure(
@@ -607,7 +616,7 @@ async def create_direct(
         pay_definition_id, _ = await _create_definition_structure(
             db, company_id=company_id, user_id=user_id, code=data.definition_code,
             name=data.definition_name, input_type=data.input_type, unit=data.unit,
-            method=data.calculation_method, tiers=data.ordinal_tiers)
+            method=data.calculation_method, tiers=data.ordinal_tiers, policy=policy)
         await db.execute(
             text("""
                 INSERT INTO payroll.paydefinitionprovenance
@@ -813,9 +822,9 @@ async def retire_definition(
     """Retire a PayDefinition. Nothing is deleted: structure, provenance, rate
     assignments and branch configuration history are preserved."""
     await require_definition_company_edit(company_id, user_id, db)
-    # Lock order: RateDefinition structure first (the same first lock every target
-    # authoring path takes), then the PayDefinition row. The RateDefinition is
-    # resolved with a plain read so no conflicting lock is taken before it.
+    await lock_company_pay_definition_capacity(company_id, db)
+    # Lock order: Company capacity, then RateDefinition structure and PayDefinition row.
+    # The RateDefinition is resolved with a plain read so no conflicting lock is taken before it.
     rate_definition_id = (await db.execute(
         text("""
             SELECT rd.ratedefinitionid

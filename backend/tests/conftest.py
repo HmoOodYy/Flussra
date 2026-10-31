@@ -34,7 +34,7 @@ from tests.db_state import (
     preserve_test_guc_state,
     read_trigger_fingerprint,
 )
-from tests.ownership import delete_driver_and_residue
+from tests.ownership import delete_driver_and_residue, pay_definition_ownership_scope
 from tests.postgresql_compat import create_test_postgresql
 
 # Tests that need process configuration must never inherit a developer DSN or
@@ -387,7 +387,7 @@ async def test_app(test_engine) -> FastAPI:
 
 
 @pytest_asyncio.fixture
-async def db_conn(test_engine) -> AsyncGenerator[AsyncConnection, None]:
+async def db_conn(test_engine, pay_definition_ownership) -> AsyncGenerator[AsyncConnection, None]:
     """Function-scoped raw AsyncConnection for direct DB seeding (bypasses HTTP layer).
     Uses AUTOCOMMIT so inserts are immediately visible to other connections."""
     async with test_engine.connect() as conn:
@@ -411,15 +411,25 @@ async def session_db_conn(test_engine) -> AsyncGenerator[AsyncConnection, None]:
 
 
 @pytest_asyncio.fixture
-async def client(test_app) -> AsyncGenerator[httpx.AsyncClient, None]:
+async def pay_definition_ownership(test_engine):
+    """Per-test exact-ID ownership scope shared by HTTP and raw DB fixtures."""
+    async with pay_definition_ownership_scope(test_engine) as ownership:
+        yield ownership
+
+
+@pytest_asyncio.fixture
+async def client(test_app, pay_definition_ownership) -> AsyncGenerator[httpx.AsyncClient, None]:
     """Async HTTP client for each test function."""
+    from tests.ownership import track_function_client_pay_definitions
+
     # httpx >= 0.20 removed the app= shorthand; use ASGITransport instead.
     transport = ASGITransport(app=test_app)
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://test",
     ) as c:
-        yield c
+        async with track_function_client_pay_definitions(c, test_app.state.engine):
+            yield c
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +775,7 @@ async def branch_user_token(session_client: httpx.AsyncClient) -> str:
 
 
 @pytest_asyncio.fixture
-async def direct_db(test_engine):
+async def direct_db(test_engine, pay_definition_ownership):
     """
     Function-scoped direct AsyncConnection for tests that need raw DB manipulation,
     e.g. deleting tier rows to test approval guards that cannot be reached via the API.

@@ -149,7 +149,7 @@ def test_inspect_csv_rejects_row_column_cell_and_text_limits() -> None:
     assert rows_error.value.code == "IMPORT_ROW_LIMIT_EXCEEDED"
 
     with pytest.raises(ImportFailure) as columns_error:
-        inspect_file((",".join(["x"] * 51) + "\n").encode(), "columns.csv")
+        inspect_file((",".join(["x"] * 129) + "\n").encode(), "columns.csv")
     assert columns_error.value.code == "IMPORT_COLUMN_LIMIT_EXCEEDED"
 
     with pytest.raises(ImportFailure) as text_error:

@@ -165,6 +165,7 @@ interface PeriodCardProps {
   onPreview: () => void;
   onFinalize: () => void;
   onReports: () => void;
+  onImport: () => void;
   onReload: () => void;
   canEntry: boolean;
   canPreview: boolean;
@@ -182,7 +183,7 @@ interface PeriodCardProps {
 }
 
 function PeriodCard({
-  period: p, onViewPayroll, onDriversOff, onBonus, onPreview, onFinalize, onReports, onReload, canEntry, canPreview, canFinalize, canViewReports, workflowCapabilities,
+  period: p, onViewPayroll, onDriversOff, onBonus, onPreview, onFinalize, onReports, onImport, onReload, canEntry, canPreview, canFinalize, canViewReports, workflowCapabilities,
 }: PeriodCardProps) {
   const [transitioning,  setTransitioning]  = useState(false);
   const [transitionError, setTransitionError] = useState<string | null>(null);
@@ -339,6 +340,9 @@ function PeriodCard({
         )}
         {canEntry && isEnterable && (
           <button className={styles.actionBtn} onClick={onBonus}>Bonus</button>
+        )}
+        {canEntry && (isDraft || isEnterable) && (
+          <button className={styles.actionBtn} onClick={onImport}>Import payroll source</button>
         )}
         {canEntry && isOpen && (
           <>
@@ -697,6 +701,7 @@ export function PeriodsListPage() {
         onPreview={() => setCalculationPreviewPeriodId(p.payroll_period_id)}
         onFinalize={() => setFinalizeDialogPeriodId(p.payroll_period_id)}
         onReports={() => setReportsDialogPeriodId(p.payroll_period_id)}
+        onImport={() => navigate(`/payroll/periods/${p.payroll_period_id}/imports`)}
         onReload={() => {
           setCalculationPreviewPeriodId(null);
           refreshHub();

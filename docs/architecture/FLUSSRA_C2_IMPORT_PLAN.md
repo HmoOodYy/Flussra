@@ -1,210 +1,145 @@
-# FLUSSRA C2 IMPORT PLAN
+# Flussra C2 Import Plan
 
-**Status:** Agreed product direction (2026-10-24), with Slice A delivery and operational decisions finalized on 2026-10-25. A1 is implemented locally and awaiting review acceptance; A2, A3 and Slice B have not started. The [implementation design](FLUSSRA_C2_IMPORT_DESIGN.md) specifies the sequential mission gates and must satisfy the C2 gate in `FLUSSRA_UNIFIED_REFOUNDATION_EXECUTION_PLAN.md` §10.<br>
-**Scope:** what Flussra Import is, where it starts, the rules it never breaks, what the first version contains, and what follows.<br>
-**Terms:** *Pay Items* are the company's PayDefinitions as shown in the UI. A period's *frozen Pay Items* are the definitions frozen into that period at creation. *Daily entries* are the period's Daily Grid source rows.
+**Migration numbers:** after main added its own 0095 and 0096, the Import migrations were renumbered to 0097–0099 (formerly 0095–0097). The numbers below use the new ones.
 
-Point IDs (R1, S4, L2, …) are stable so individual points can be accepted, changed or dropped by reference.
+**Status:** Revised ordinary-work Import delivery plan, 2026-10-28. The [product contract](FLUSSRA_C2_IMPORT_CONTRACT.md) is the decision authority; the [technical design](FLUSSRA_C2_IMPORT_DESIGN.md) defines implementation boundaries. A01's configurable policy and authorized metadata boundary, A02's canonical Company/Branch capacity enforcement and retirement semantics, A03's forward lifecycle/schema, scope/version, retention and staleness foundation, A04's strict per-file canonical extraction, A05's cross-file header compatibility/combined-column accounting, A06's per-target draft mappings, A07's Company-authoritative Driver identification/discrepancy discovery, A08's chosen date authority/inference/review, A09's explicit repeated-row/category preparation, and A10's semantic repeat recognition and bounded review are implemented and focused-verified. All 12 revised workloads and two supplemental single-day shapes have been manually measured. A11's focused recovery checks and full-suite run at `faebf994` are recorded; deployment-budget acceptance remains open. A12's local source-setup/read-only preview UI has completed independent implementation review and focused/synthetic mounted-flow verification; authenticated end-to-end workflow verification remains outstanding. Customer deployment remains gated on an authoritative operational-budget decision. Slice B and payroll application, completion evidence creation, and successful rule-head promotion remain later-stage work.
 
----
+**Baseline:** Continue on `codex/c2-import-foundation`, preserving implementation `9e03a66` and documentation through `f15bf96`. Main's safe-upload foundation was merged at `337e3f7` (historical A1). Historical A2 preview `6498453` is reference evidence, not a branch to merge/cherry-pick. Schema `0097` was the preserved baseline; forward schema head `0099` now adds the narrow Company Driver lookup index. The compact batch backend and internal canonical quantity writer are preserved assets; they do not already satisfy the revised contract. A local connected Import UI is implemented; public apply remains unimplemented.
 
-## 1. Starting point
+## 1. Product outcome and scope
 
-The first import is **payroll work data, inside one payroll period**. The user opens a period, chooses *Add payroll data*, brings in a file of daily work (driver, date, quantities per Pay Item), reviews it, confirms it, and it lands in that period's daily entries.
+A user imports ordinary work quantities into one editable Company/Branch payroll period. The period's frozen definitions and canonical Driver/date eligibility define the target. Money remains the calculation engine's responsibility. A period may receive many partial imports; missing coverage warns and does not imply zero, deletion or completed payroll.
 
-Why it comes first:
+One setup understands one source, potentially across compatible daily files. Another source gets its own setup afterward. Columns represent payroll inputs or shared identity/date/filter/reference fields. Calendar-looking header labels may be ordinary quantity names; headers never infer dates or create day-axis mapping. Dates come from the chosen file/sheet-name or Date Column authority. Accept `.xlsx` and `.csv`; one sheet/file, one table/sheet, first-row headers, no merged cells inside the imported table. Do not support arbitrary report layouts, multi-sheet selection or multiple independently configured source families within one setup.
 
-1. It is the work that repeats every period; People and Driver Rates are entered once at onboarding.
-2. It creates nothing. It only fills a period that already exists and is ready.
-3. Its target already exists: the period has frozen its drivers, dates and Pay Items.
-4. It forces the hard parts of the shared engine to be built and proven first: staging, conflicts, atomic commit, commit-time revalidation, history and provenance. People and Rate imports then reuse them.
-5. For the pilot, People and Driver Rates can be entered by hand.
+V1 includes Branch-specific reusable target relationships, Direct/Sum transformations, explicit duplicate-column resolution, confirmed within-day row aggregation and categorical filtering, assisted dates, accurate bounded preview, user review and atomic application. Normal compatible repeat imports need only organized-day confirmation unless a relevant problem appears.
 
-The idea the whole feature rests on:
+Detailed dedicated text-only Status import remains separate future design. People/Rate/Access imports, master-data creation, Bonus/final-pay import, a new ordinal model or tier-count cap, binary-prefix ordinal columns, additive source contributions, general spreadsheet recalculation, a company-wide source catalog, integrations, Undo and speculative background jobs are outside this delivery. Status is still one concept in the Branch capacity policy; an external category used to filter work is not Flussra Status import.
 
-- Import lives inside a payroll period, not on a separate Import page.
-- The period defines what a file may contain: its drivers, its dates, its frozen Pay Items and their input rules.
-- The file brings facts; Flussra determines pay.
-- Nothing changes in payroll until the user confirms, and then everything goes in or nothing does.
-- Every imported value remembers its file, sheet, row and column.
+## 2. Non-negotiable rules
 
-## 2. Rules (R)
-
-| ID | Rule |
+| ID | Revised rule |
 |---|---|
-| R1 | The file is flexible, the target is strict. Users bring their own Excel; Flussra adapts to it. |
-| R2 | No silent changes. Nothing is overwritten without being shown and decided. |
-| R3 | PayrollWork/File values are traceable to their import, file, sheet, row and column while the period can change; after finalization, to the durable import and payroll audit record (D7). Other sources/targets define their own provenance and retention contracts. |
-| R4 | For PayrollWork, the period is the target schema: not current settings or a fixed template. Importing into an older period uses that period's frozen Pay Items. Other Import kinds need not have a PayrollPeriod. |
-| R5 | PayrollWork import never calculates pay. It supplies driver, date, Pay Item and quantity; the calculation engine does the rest. |
-| R6 | PayrollWork v1 never creates Driver, Employee, PayDefinition or other master data. Future People Import may create/update only the entities permitted by the locked Workforce contract, through canonical Workforce authority. No import silently creates Access/User accounts or a parallel source of truth. |
-| R7 | Pay Items are never imported. They are configured in Flussra only. A bulk Pay Item tool, if ever needed, is a separate configuration feature and not part of Import. |
-| R8 | A Status in a file (for example PTO) belongs to the Status domain and never becomes a Pay Item. |
-| R9 | Everything before confirmation is staging, not payroll truth. |
-| R10 | All or nothing. There is no accidental partial import; the user may deliberately exclude rows. |
-| R11 | PayrollWork Driver identification is separate from eligibility for the period/date. Both are checked by that target contract. Generic source records have no mandatory Driver match. |
-| R12 | For PayrollWork quantities, blank is not zero: blank means the file gave no value; zero means it gave zero. |
-| R13 | Suggestions may assist mapping, but nothing decides payroll automatically. Anything ambiguous needs a person. |
+| R1 | Accept a strict supported source/table contract; explain rejection and retain recoverable setup. |
+| R2 | Never overwrite payroll without required review/confirmation. An identical completed business import is a no-op, preserving later manual edits. |
+| R3 | Preserve value provenance until finalization, then accepted payroll facts and durable receipt/audit/rule metadata. |
+| R4 | Frozen period definitions remain the target authority; do not substitute current live settings into an older period. |
+| R5 | Import supplies quantities; existing payroll methods calculate money. |
+| R6 | Do not create canonical Drivers, Employees, definitions, rates or Access accounts through ordinary work import. |
+| R7 | Pay items are configured through their canonical governance, not imported from headers. |
+| R8 | Status belongs to its own domain and dedicated future import. |
+| R9 | Every preparation, mapping and preview operation is staging, with zero payroll-source writes. |
+| R10 | Reviewed application is atomic; explicit exclusions are recorded and unresolved errors/decisions block it. |
+| R11 | Permanent Driver identity and Branch/date eligibility are separate checks; supplied codes have authority over names. |
+| R12 | Missing/blank supplies no quantity; zero is explicit zero. Missing Sum inputs skip the result with a warning. |
+| R13 | Explain date interpretation; do not use numeric confidence, guess missing days or silently reinterpret changed relationships. |
 
-## 3. Version 1 — included (S)
+## 3. Adjustable product and operational policy
 
-| ID | Included |
-|---|---|
-| S1 | `.xlsx` and `.csv` only, read by one engine. |
-| S2 | Two ways in: upload your own file, or download this period's Flussra template. |
-| S3 | Sheet selection and header-row detection. |
-| S4 | Column mapping: exact header matches map automatically, the user maps the rest, and columns the period does not need are ignored. |
-| S5 | Driver matching: stable driver identifier first; an exact name with a single candidate is a suggestion the user confirms; ambiguous names block until the user chooses. |
-| S6 | Validation: value type and unit per Pay Item, date inside the period, driver eligible for that period and date. A normal day off is still a valid date. |
-| S7 | Collisions: same value is unchanged; an empty cell is new; a different value is a conflict resolved as *keep existing* or *use imported*, with *apply to all similar*; the same cell twice in one file is a blocking error. |
-| S8 | Precise, human error messages naming the row, field, value and reason. |
-| S9 | Impact preview (new, changed, unchanged, skipped, conflicts resolved, errors) and a confirm button that states the number of changes. |
-| S10 | Commit-time revalidation: the period is still editable and nothing reviewed has changed, otherwise the preview must be refreshed. |
-| S11 | Re-uploading an already completed import changes nothing and says when and by whom it was done. |
-| S12 | Atomic commit into the period's daily entries, marked as imported. |
-| S13 | An import receipt and the period's import history: file, user, time, counts and the mapping used. |
-| S14 | Value-level provenance from each imported value to its batch, file, row and column. |
-
-These are the complete C2 v1 capabilities, not permission to deliver them all in Slice A. A1–A3 deliver upload/interpretation/mapping and a read-only payroll-impact preview. Slice B delivers user decisions and confirmations, conflict/exception/exclusion actions, applying changes, receipt and history (§10). Slice A can display an unresolved proposal or conflict but cannot decide it.
-
-### Upload and processing bounds (D9–D12)
-
-| Bound | C2 v1 hard maximum |
+| Product allowance | Initial default |
 |---|---:|
-| Uploaded file size | **10 MB** |
-| Decompressed XLSX content, whole archive | **50 MB** |
-| Sheets per workbook, including hidden sheets | **10** |
-| Rows in the selected sheet, including header/preceding rows | **20,000** |
-| Columns in the selected sheet, including unmapped columns | **50** |
-| Cells in the selected sheet | **1,000,000** |
-| Text content per individual cell | **8 KB** |
+| Uploaded bytes/file | 10,000,000 |
+| Canonical headed-table bytes/file | 1,000,000 |
+| Columns in the combined source structure | 40 |
+| Currently usable Company pay items | 50 |
+| Branch payroll input concepts including Status | 15 |
 
-These are inclusive limits using decimal bytes (1 MB = 1,000,000 bytes; 1 KB = 1,000 bytes). Cell text is measured in UTF-8 bytes after decoding. Selected-sheet cells include the rectangular extent, not just non-empty/mapped cells. CSV is one selected sheet. Actual content is validated; the filename extension alone is insufficient. [Design §4.1](FLUSSRA_C2_IMPORT_DESIGN.md#41-hard-limits-and-enforcement-d9) defines streaming/decompression enforcement, interpretation changes and actionable rejection without truncation or partial acceptance.
+Defaults are centrally declared and settings-backed, not scattered production constants, database cardinality CHECKs or frontend-only constraints. Backend enforcement is authoritative; authorized policy metadata supplies displayed values and messages. No customer policy editor or entitlement framework is introduced. Raising an allowance must not require schema reconstruction or new fixed input columns.
 
-Slice A remains synchronous: each request finishes its bounded processing before returning. Blocking parsing uses bounded in-process thread offload while that request remains pending; it must not block the asyncio event loop. No queues, background import workers/jobs, polling/status APIs or asynchronous-request architecture are added. A1 benchmarks representative files, including near the supported upper workload, and records time/resources plus ordinary-request responsiveness. A2 measures the added preview work. Unsuitable evidence requires an explicit design amendment before background processing; it does not authorize speculative infrastructure or silently reduced limits. C2 v1 limits are operating/security policy, not the shared engine's permanent architectural capacity.
+External headers ignore capitalization and surrounding whitespace. Each pair of files must share a normalized header; a third file cannot bridge a disjoint pair. For each label, use the maximum occurrence multiplicity in any one file, then sum those maxima. Thus `Driver | Code | Hours | Hours | Hours` is five columns; another identical daily file keeps the count at five. Partial overlaps use the combined occurrence count; completely disjoint structures are rejected. Changed duplicate count/arrangement requires renewed resolution.
 
-Preview responses contain summary counts and bounded, paginated rows/issues, with filters for errors, warnings and conflicts. Never return the entire workbook or all staged rows/issues in one response. A2 selects and records numeric default/max page sizes and response bounds from existing API conventions and measurements before its review gate. The user sees the selected sheet, selected/detected header and relevant date interpretation before relying on validation. Identifiers remain text where practical. Formula results use existing cached values only; Flussra does not evaluate or recalculate formulas, and missing required cached results remain validation errors.
+Hidden populated columns count and are identified. Headerless populated columns are ignored with a notice and excluded from the product column/canonical-data allowance, but remain covered by physical inspection safeguards. Canonical bytes include all headed data before mapping, including columns later set to Ignore; presentation metadata is excluded. Cached formula results and required type meaning are preserved without recalculation.
 
-## 4. Version 1 — excluded (O)
+Separate configurable operational policy bounds actual files, physical columns, rows, cells, multipart/archive/XML work, decompressed bytes, response sizes, preparation resources and concurrency. Company-wide name discovery is additionally bounded by `IMPORT_MAX_IDENTITY_LOOKUP_ROWS` (100,000 Driver rows materialized for processing, plus one overflow sentinel) and streamed in `IMPORT_IDENTITY_LOOKUP_BATCH_ROWS` batches (512); a code-only import skips that scan, and an over-limit name lookup fails without publishing a partial preview. These are work limits, not Company-size product caps. Retain applicable existing safeguards provisionally; final aggregate ceilings require revised realistic measurements. Never interpret a product allowance as permission for unbounded parsing.
 
-| ID | Excluded | Reason |
-|---|---|---|
-| O1 | People import, Driver Rate import, driver creation | Separate imports that follow (N2, N3) |
-| O2 | Pay Item creation, Bonus, Minimum/Maximum, final pay | R5, R6, R7 |
-| O3 | Status import | Designed for (F7); decided after real pilot files |
-| O4 | Imports spanning several periods | One import belongs to one period (§6) |
-| O5 | Direct integrations, file formats beyond S1 | After customer evidence |
-| O6 | Undo | The data it needs is stored from the start (F5) |
-| O7 | AI mapping | Deterministic mapping comes first |
-| O8 | A company-wide Import Hub | Import history lives inside each period (§6) |
+Retirement releases currently usable Company/Branch slots while preserving history and frozen snapshots. Enforce capacities through canonical creation/approval/activation/retirement authorities with existing locks and effective-date rules. Structural rules, mathematical validity, storage precision and contract versions remain explicit engineering contracts, not arbitrary growth knobs.
 
-## 5. Version 1 simplifications (L)
+## 4. User flow and repeat behavior
 
-Each is a smaller first step toward a capability the target design keeps. None blocks the later step, because the data it needs is stored from the start.
+1. Open the editable period; upload one source's files or use the period's dynamic template.
+2. Safely extract canonical data; enforce strict table rules, per-file bytes and combined-column compatibility/capacity; disclose ignored/hidden data.
+3. Reuse compatible Branch rules or prepare affected mappings. Resolve duplicate columns and explicit sums; shared metadata columns may be reused, quantity occurrences may not.
+4. Resolve permanent driver identity, the selected date authority and true driver/day duplicates. The interface can introduce identity first, but duplicate detection requires date context.
+5. Prepare categorical inclusion/exclusion and row aggregation where needed. New category values need review. Normalize one resulting quantity per Driver/day/pay item through canonical payroll rules.
+6. Present organized dates/explanations, missing-coverage warnings, current/incoming values and unresolved identity/conflict/exception decisions.
+7. In Slice B, resolve those decisions, confirm the impact, revalidate and apply through canonical payroll authority.
+8. Complete the receipt/history and activate replacement saved relationships only with successful completion. Failed/unfinished work never displaces working rules.
 
-| ID | Target capability | Version 1 | Later |
+Absent known columns retain their mappings. Changed external names beyond accepted normalization, internal display-name edits and relevant dependency changes require affected remapping only. The latest successfully completed relationship replaces the old relationship for that target; no source quantities are added to a contribution ledger.
+
+If a Sum requires a missing column or blank input, produce no result for that row and warn; preserve existing payroll. Do not turn missing into zero. Eligible row aggregation must not turn an incomplete target group into a partial replacement. Identical completed data is a no-op even after a later manual edit; explain the prior completion/later edit without restoring old values. Actual changed data remains subject to ordinary conflict review.
+
+Persist setup independently of original files. Recoverable corrections carry compatible draft mappings/filters and useful error state forward. Unsafe files are still rejected atomically, and finalization retention still applies.
+
+## 5. Complete Slice A: twelve sequential stages
+
+The stage identifiers **A01-A12** belong to this revised delivery plan. They do not rename, erase or mark the historical A1/A2 work complete under new requirements. Existing assets may satisfy portions of a stage only after focused verification against this contract. Complete and review each stage before its successor, except that local A12 development is authorized after A11's focused request-recovery checks; customer deployment still requires A11's authoritative operational-budget decision.
+
+| Stage | Owned delivery | Dependencies | Completion gate |
 |---|---|---|---|
-| L1 | Saved Source Profiles that map recurring files automatically | Each import stores its mapping; it is not reused automatically | Reuse the last mapping, then full profiles with source-format change detection |
-| L2 | Smart column suggestions | Exact header matching plus manual mapping | Known aliases and suggestions |
-| L3 | Saved external driver aliases (source system + external key + Driver; DWR-023) | A2 resolves stable identifiers and records per-import matches/proposals; Slice B owns user choices/confirmations for unmatched cases | Remember resolutions as aliases across imports; not A1–A3 scope |
-| L4 | Correcting values inside Flussra | Resolve conflicts, choose drivers and exclude rows in Flussra; wrong values are fixed in the file and re-uploaded | Inline cell editing in the review table |
-| L5 | Template recognition and drift detection | Exact template headers map automatically; a hidden period stamp is deferred | Hidden period stamp and reporting which fields changed since the template was generated |
+| A01 | Central product/resource policy and authorized effective-policy metadata | Preserved baseline | Validated configuration, one source for defaults, backend/UI contract and changed-value checks |
+| A02 | Canonical Company/Branch capacity governance and retirement semantics | A01 | Concurrent/effective-dated capacity checks preserve history and frozen periods; no new ordinal cap |
+| A03 | Forward schema/rule-version, lifecycle, ownership, retention and staleness foundation | A02 | SQL/Alembic parity, tenant/version guards, atomic rollback and finalization cleanup before new intake exposure |
+| A04 | Strict per-file table inspection and bounded canonical extraction | A03 | Size boundaries, formula/cache/type fidelity, hidden/headerless notices, no presentation-driven extent |
+| A05 | One-source batch/header compatibility and combined occurrence accounting | A04 | Implemented and focused-verified: header-only preflight, repeated daily structures, partial overlap, pairwise compatibility, duplicate multiplicity and incompatible/over-limit atomic rejection |
+| A06 | Pending per-target mappings, Direct/Sum and duplicate-header outcomes | A05 | Implemented and focused-verified: no quantity reuse; missing-input warnings; unchanged active rules; compatible selective reuse/remapping |
+| A07 | Permanent Driver identification and discrepancy discovery | A06 | Implemented and focused-verified: Company code authority, bounded current-name proposals/discrepancies, same-name distinct Drivers, cross-Company isolation, stale-context recheck and no master/payroll writes; forward lookup index 0099 |
+| A08 | Chosen date authority, supported inference and explainable date review | A07 | Implemented and focused-verified: column/filename/sheet authority, deterministic written-month and period-year inference, wrong-year refusal, bounded coverage review, persisted target date profiles |
+| A09 | Repeated-row aggregation and categorical filter preparation | A08 | Implemented and focused-verified: typed category inspection/paging, explicit choices, exact grouped quantities, incomplete-group withholding, contributor provenance and zero payroll/head writes |
+| A10 | Accurate compact preview, semantic repeat recognition and bounded reads | A09 | Implemented and focused-verified: target-scoped full-input receipts, repeat no-op preserving later manual values, source validation retained, version/revision/date paging, and receipt retention after purge; no payroll or head writes |
+| A11 | Integrated backend review, revised workload and deployment acceptance | A10 | All 12 revised workloads plus two supplemental single-day shapes measured; focused recovery, correctness, retention and concurrency checks completed; full-suite run passed at `faebf994`. Authoritative request/proxy, memory and concurrency budgets remain pending, so deployment acceptance remains open |
+| A12 | Connected source-setup and read-only preview UI | A11 focused recovery checks for local development; A11 deployment acceptance for customer exposure | Local UI implementation review is complete with focused and synthetic mounted-flow verification; authenticated end-to-end workflow verification remains outstanding. Customer deployment remains gated on A11's authoritative operational-budget decision. No final apply controls |
 
-## 6. Placement
+Each gate requires fresh focused evidence. Authorization, isolation, version rejection and no-payroll-write behavior remain cross-cutting from A03 onward. A11 does not postpone safety checks until after unsafe APIs exist. Slice A may configure draft mappings, dates, sums and filters; it does not confirm canonical identity overrides, accept payroll conflicts/exceptions, apply quantities or promote current successful rules. Those actions belong to Slice B.
 
-- One import belongs to exactly one period: one branch, one date range, one set of frozen Pay Items. Rows outside the period are flagged, never routed to another period. A file covering two periods is imported once in each.
-- Import history is shown inside the period. A company-wide Import Hub follows only when there is something to manage across periods (saved profiles, aliases, People and Rate imports), and then as *Data Imports / Import History*.
-- Onboarding is led by the Setup Center (Set up business → Set up payroll model → Run payroll). Import appears inside the step that needs it rather than as a destination of its own.
+The current request/proxy deadline and per-process memory/concurrency budget are not established. The measured workloads are development-host observations, not deployment limits. A11 deployment acceptance remains open until an authoritative deployment/operational admission budget is evaluated. Local A12 development may proceed after the focused recovery checks; this does not authorize customer exposure. A justified durable-execution design is a separate decision; no queues or polling are added speculatively.
 
-## 7. Version 1 flow (C)
+## 6. Slice B: user decisions and atomic application
 
-```
-C1  Open the period → Add payroll data
-C2  Upload own file   or   download this period's template
-C3  Choose sheet and header row
-C4  Map columns: Driver, Date, and the period's Pay Items
-C5  Match drivers: identifier → confirmed name → user choice
-C6  Validate: type, unit, date, eligibility, in-file duplicates
-C7  Review: valid, warnings, errors, decisions (conflicts, full-day-off Statuses, day-off work); decide or exclude
-C8  Impact preview → Import N changes
-C9  Revalidate at commit → commit everything at once
-C10 Receipt → links to the Daily Grid and the updated payroll preview
-```
+After A12 is accepted, implement user Driver choices/confirmations, category/row exclusions where required, keep-existing/use-imported conflict decisions, normal-day-off exception decisions and held full-day-off Status handling. Preserve the existing full-day-off review behavior: list affected Drivers once, none selected by default; accepted work removes only its conflicting Statuses through canonical Status authority and preserves notes. Deliberately excluded data does not apply; unresolved choices block completion.
 
-Payroll is unchanged until C9.
+Bind every decision to the current reviewed facts. Under canonical currency/period/Import lock order, reauthorize and revalidate editability, eligibility, current quantities/Statuses and rule revisions. Stale facts refuse the commit without writes. Use the existing Payroll-owned set-based quantity writer and canonical Status/evidence paths; do not add an Import-owned payroll writer.
 
-Persisted import lifecycle: `NeedsMapping → NeedsReview → Completed`, with `Cancelled` for an uncompleted import. A failed synchronous request rolls back rather than persisting a processing job or `Failed` state. Readiness is computed from validation and outstanding decisions, not a background status. A1–A3 never mark an import `Completed`.
+Apply only actual reviewed changes, retain unchanged provenance, and preserve omitted values. Persist receipt/change/evidence links and activate affected immutable saved-rule versions in the same transaction as successful completion. Failure rolls back both payroll and rule activation. Support idempotent completion and read-only history.
 
-Slice A covers C1–C4 and the discovery/validation/display portions of C5–C8. Driver choice/confirmation in C5, all decision/exclusion actions in C7, final confirmation in C8, and C9–C10 belong to Slice B. Mapping a column, selecting interpretation or cancelling the whole staged import does not decide or apply a payroll change.
+Detailed Status-file import remains a later separate contract; resolving held Status conflicts during ordinary work import does not implement it.
 
-## 8. Foundations required from the start (F)
+## 7. Requirement ownership and acceptance matrix
 
-| ID | Requirement | What it keeps open |
+Stable R/S/F references remain usable; revised meanings replace the prior product assumptions, whose text remains in Git history.
+
+| Requirement | Primary owner | Verification/consumer |
 |---|---|---|
-| F1 | One shared engine; each import type supplies its own contract (Period now, then People and Rates) | People and Rate imports without a second system |
-| F2 | Staging separate from payroll | Future integrations enter the same staging engine as files |
-| F3 | Source/target-specific provenance: File coordinates and PayrollWork value/evidence links until payroll finalization, then durable import/audit metadata (D7) | Other source/target kinds supply their own provenance and retention trigger |
-| F4 | File/PayrollWork imports permanently store accepted interpretation (sheet/header/date order and CSV encoding/delimiter), target column mapping including Driver-identifier column roles, and mapping/content identity in the owning specialized contracts. Per-identifier Driver-match rows remain detailed staging under D7 | S13 reports the mapping used; L1 can reuse persisted mappings without Driver/File fields in the generic core. Saved Driver aliases remain the separate later L3 capability |
-| F5 | Before and after values stored for every change | A later safe Undo that never reverts over newer manual edits |
-| F6 | File byte fingerprint on the File source; versioned semantic content/plan fingerprints on the owning target | S11 duplicate protection and L5 drift detection, separate from creation idempotency and resource revision |
-| F7 | Status data routed to the Status domain | Status import without touching Pay Items |
+| S1 strict CSV/XLSX daily-source intake | A04-A05 | A12 connected intake |
+| S2 dynamic period template | A04/A10 | Must obey the same effective product/resource policy |
+| S3 first-row table and two date authorities | A04/A08 | A12 date explanation/review |
+| S4 reusable per-target Direct/Sum and duplicate resolution | A06 | A09 transforms; Slice B activates rules |
+| S5 Driver matching and discrepancies | A07 | A10 eligibility; Slice B explicit acceptance |
+| S6 canonical type/unit/date/eligibility validation | A08-A10 | Slice B revalidates under locks |
+| S7 confirmed aggregation and current-payroll conflicts | A09-A10 | Slice B resolves/apply choices |
+| S8 actionable issues, omitted-data notices and coverage warnings | A04-A10 | A12 bounded display |
+| S9 whole-import preview/impact counts | A10 | A12 display; Slice B final confirmation |
+| S10 revision/semantic-context checks | A03/A10 | Slice B commit-time revalidation |
+| S11 identical completed-data no-op preserving later edits | A10 | Slice B idempotent completion/history |
+| S12 atomic canonical payroll application | Slice B | Financial, eligibility, rollback and evidence checks |
+| S13 receipt/history and accepted rule versions | Slice B | Retention preserves durable metadata |
+| S14 value provenance and explicit exclusions | A03/A09-A10 | Slice B applied-change links |
+| F1-F2 neutral envelope and reusable source/target processing; staging separate | A03-A10 | No parallel matcher or payroll authority |
+| F3-F6 provenance, durable mapping, before/after evidence and distinct byte/semantic identity | A03/A06/A10 | Slice B audit/receipt; finalization cleanup |
+| F7 separate Status domain | All stages | Dedicated Status import deferred |
+| Configurable allowances and current usable-concept slots | A01-A02 | Changed policy, concurrency and retirement checks |
+| Pending setup retention; successful-only mapping replacement | A03/A06 | Slice B atomic activation |
 
-## 9. What follows (N)
+The previous L1 deferral of automatic mapping reuse is superseded: compatible Branch reuse is required in this V1. Global source-system alias/catalog infrastructure and a company-wide Import hub remain deferred. Identity acceptance reuse must stay within explicit scoped rules; DWR-023 is not marked complete by this documentation.
 
-| ID | Next | Why in this order |
-|---|---|---|
-| N1 | L1–L5 upgrades | Faster recurring imports on the same engine |
-| N2 | People import in the Setup Center | Onboarding at scale. A spreadsheet never grants Flussra access; imported people start as *Not invited*. Worker type is not a permission. Flussra's own identity stays separate from the company's employee code. |
-| N3 | Driver Rate import, with a template generated from the company's Pay Items | Requires drivers and Pay Items to exist |
-| N4 | Status import | After real pilot files |
-| N5 | Undo, direct integrations, AI suggestions | When the pilot shows the need |
+## 8. Preservation, migration and release boundaries
 
-## 10. Sequencing
+Keep the neutral Import envelope, immutable source ownership, compact source/normalized records, Driver/day preview, set-based reads, revision/semantic identity separation, guarded publication, retention and canonical bulk writer. Adapt these assets; do not merge the preview branch or recreate per-quantity relational staging.
 
-1. Daily Grid UX, enough that a payroll user reads it at a glance. Import is verified in the Daily Grid, and the import review table shares its layout (drivers down, days and Pay Items across).
-2. Import version 1 (§3–§8), delivered through the gates below.
-3. The broader Flussra visual redesign, after the pilot shows what matters.
+Completed-import recognition runs during preview from versioned private target receipts retained in `ReviewSummary`; bounded same-Company/Branch/period history lookup refuses oversized or unsupported declared evidence rather than truncating it. A target matches only when its complete interpreted input multiset, frozen meaning and accepted source-rule meaning match; unrelated presentation/layout details and current edited payroll values are not input identity. Preview reports a bounded target notice and marks matched incoming candidates `AlreadyImported`/`NoOp`, while retaining current values and provenance. Invalid new source identity/date/category/quantity evidence still blocks matching. The receipt is not trusted while its Import is editable, and this stage adds no completion/apply writer or active-head mutation. Date review is revision/plan-bound and fully paged. These behaviors are implemented and focused-verified in A10; Slice B still owns successful completion receipts, applied-change evidence and atomic payroll application.
 
-Slice A remains one feature milestone, split into **three sequential, independently reviewable missions**. Complete and review each mission before starting the next; Slice B is downstream of all three. The [design §10](FLUSSRA_C2_IMPORT_DESIGN.md#10-build-order-and-mission-gates-d8-d13) is the detailed execution contract, including non-goals, dependencies, acceptance and verification.
+The paginated-read supported-contract-version gap was implemented and focused-verified in A03: metadata, rows, issues, and source-record pages use the shared version boundary, with editable preview rule-context freshness separated from terminal historical reads.
 
-| Mission | Owned delivery | Completion gate |
-|---|---|---|
-| **A1 — Safe upload and staging** | `0094`; safe synchronous CSV/XLSX ingress; actual-content validation and all hard limits; staging/inspection; sheet/header selection and interpretation metadata; access controls; required finalization cleanup; bounded benchmark | Files can be safely uploaded, inspected, interpreted and staged without changing payroll or canonical payroll facts; cleanup exists before upload exposure and measured evidence supports synchronous bounds |
-| **A2 — Mapping and accurate preview** | Column mapping; v1 Driver/external identifier resolution; validation; current-value comparison; mapped row/import fingerprints; refresh; template; bounded/paginated rows/issues and error/warning/conflict filters; displayable unresolved matches/conflicts | Preview accurately represents affected facts, including invalid rows, unresolved identities, warnings, conflicts and current values, without deciding or applying changes |
-| **A3 — Connected user flow** | Upload → Mapping → Preview UI; selected sheet/header/date interpretation; useful errors; bounded pagination/filtering; supported request recovery/retry; end-to-end preview workflow | An authorized user can reach a reliable preview from file selection without deciding or applying any payroll changes |
-| **Slice B — Decisions and commit** | User choices/confirmations; conflict/exception/exclusion actions; final impact confirmation; atomic apply/revalidation; provenance, SourceType, receipt and history | The existing complete v1 decision/commit contract works after A1, A2 and A3 have each passed review |
+Schema head `0099` is current. `0098` remains the forward A03 migration from preserved `0097`; `0099` adds only the ordered Company/Driver identity lookup index. Future changes move forward from the actual current head while preserving canonical Payroll facts/evidence and history. Never rewrite `0094`/`0097`/`0098`, reset/reseed as an implicit upgrade, or add speculative obsolete-contract adapters. Existing pre-production data mismatches must be reported and reconciled explicitly, not silently deleted.
 
-A1 owns the existing D7 finalization cleanup before any upload is exposed as an available product workflow. Detailed data from never-completed or cancelled imports must be purged too. A2/A3 reuse and verify that lifecycle; Slice B adds completed-import provenance verification without moving apply into Slice A. Retained metadata must not fabricate completion or applied changes.
-
-[DWR-023](FLUSSRA_DEFERRED_WORK_REGISTER_EN.md#dwr-023--external-driver-identifiers-and-aliases-are-deferred-to-c2-import) is a design input for A2's company-scoped stable-identifier → permanent Driver → effective Branch/date assignment resolution. Name-only cases remain proposals until Slice B confirmation. The retired dormant import tables are not the new matching authority. L3 still defers saved source-system aliases across imports; this mission split neither creates a generic alias framework nor marks that deferred implementation complete.
-
-## 11. Decisions (D)
-
-D1–D7 were decided on 2026-10-24. D8–D20 record the settled delivery, operational and foundation decisions of 2026-10-25.
-
-| ID | Decision |
-|---|---|
-| D1 | There is no automatic default for a conflict: the user decides each one, and may apply a decision to all similar conflicts. |
-| D2 | An imported value never replaces an existing value silently, whatever put that value there (a manual entry or an earlier import): the user chooses whether to overwrite it. |
-| D3 | An **error** is incoming data whose destination — driver, target, date, pay item or any other required destination — Flussra cannot determine with confidence. Errors block the import. A **warning** is data Flussra understands and can place, but that looks unusual. Where understood data cannot be accepted without a choice, Review asks for it; the user either decides or deliberately excludes the affected data and continues with the rest, and an unresolved choice blocks completion. |
-| D4 | Version 1 reads one row per driver per day. Other layouts (one column per day) come later as additional reader modes and must not be precluded by the design. |
-| D5 | Imported work on a day whose Status is a full day off is resolved inside Review, never by sending the user out of Import. Review lists the affected drivers once each, nothing selected by default, with select all. Selecting a driver removes the conflicting full-day-off Status where imported work exists and accepts that work; otherwise that work is not accepted and is deliberately excluded. |
-| D6 | Imported work on a normal day off asks whether to treat it as an exception for this period. Yes accepts it and Review notes that day-off exceptions were accepted; No excludes it and the rest continues; unanswered blocks completion. |
-| D7 | The original file and individual source-row/cell provenance serve Import and Review until the period is finalized; they are not permanent payroll data. After finalization Flussra keeps accepted payroll data and durable import/audit metadata, including accepted File interpretation and target column mapping/identity for S13/L1/F4. File bytes, inspection samples, row/cell/Driver-match detail and transient preview/current-plan state are purged. Selected sheet/header interpretation is durable metadata, distinct from per-data-row coordinates. |
-| D8 | Slice A is one milestone delivered as A1 → review → A2 → review → A3 → review; only then begins Slice B. Each mission has a separate implementable scope and acceptance gate in the design. |
-| D9 | Hard caps are 10 MB upload, 50 MB decompressed XLSX, 10 sheets, 20,000 selected-sheet rows, 50 selected-sheet columns, 1,000,000 selected-sheet cells and 8 KB text per cell; validate actual file content and reject violations without truncation or partial acceptance. |
-| D10 | Slice A is synchronous from the caller's perspective; bounded in-process thread offload protects the event loop while the same request waits. A1 produces representative/near-upper time/resource/responsiveness evidence; A2 measures preview work. Queues/background jobs require an explicit design amendment. |
-| D11 | Preview is bounded: whole-import summaries, paginated rows/issues and error/warning/conflict filters. A2 records and enforces numeric page/response bounds based on existing conventions and measurement. |
-| D12 | Show selected sheet, selected/detected header and relevant date interpretation before results are relied upon. Preserve identifier text where practical; use cached formula values without evaluation/recalculation, and report missing required caches as validation errors. |
-| D13 | Slice A may resolve exact stable identifiers automatically and discover/display unresolved matches/conflicts, but makes no user decisions, confirmations, user-directed resolutions or payroll changes. Those actions remain in Slice B. A1 owns D7 cleanup before upload exposure, including never-completed imports, without importing Slice B apply behavior. |
-| D14 | The shared Import envelope owns neutral identity/scope/kinds/lifecycle/revision/idempotency/version metadata. File sources own file/interpretation/provenance; PayrollWork targets own period/mapping/Driver matching/plan state. Source records/issues are neutral, and multiple identifier associations per PayrollWork source record preserve disagreement detection. No universal matcher or ETL platform is built. |
-| D15 | Import reads return revision. Interpretation/cancel and later mapping/refresh/decision/commit mutations require expected revision, update atomically and reject stale callers. Revision and PlanFingerprint protect different kinds of staleness. |
-| D16 | Upload creation requires a client Idempotency-Key. Same Company key and identical versioned creation identity returns the existing Import; changed identity conflicts; a new key deliberately creates another Import. File SHA is not the key and this is distinct from S11. |
-| D17 | Persist envelope, source and target contract versions, plus the PayrollWork canonicalization version before A2 hashes exist. Unsupported staged versions fail closed and require reset/re-upload, without compatibility adapters. |
-| D18 | Bound actual route-local request bytes and exactly one supported multipart file, including bounded overhead. Use short authorization/persistence transactions with no DB transaction or period lock during receive/hash/parse. Reauthorize and revision-check under period-before-import locks before accepted persistence. |
-| D19 | Import owns retention invariants; Payroll finalization invokes the PayrollWork cleanup hook in its existing transaction. Failure rolls back the complete finalization. Other targets choose their own retention trigger; payroll finalization is not generic Import lifecycle authority. |
-| D20 | XLSX safety also includes generous, measured and boundary-tested internal package/member and XML nesting ceilings, separate from the existing product limits and actual decompressed-byte cap. |
-
-## 12. Existing import tables
-
-The dormant `import.*` tables predate the current architecture. The reviewed implementation design has evaluated them: [design §3.1](FLUSSRA_C2_IMPORT_DESIGN.md#31-retirement-of-the-dormant-schemas-migration-0094) assigns their fail-closed retirement/replacement, and the dependent dormant integration objects, to A1 migration `0094`. The tables still exist until that implementation lands; their current presence is not a second matching authority or a reason to preserve an obsolete model.
+Acceptance requires focused stage checks, integrated ordinary-work scenarios, direct-SQL/Alembic equivalence when schema changes, retention/staleness races, lawful revised benchmark shapes and independent review. Revised workload measurements are recorded in [design §10](FLUSSRA_C2_IMPORT_DESIGN.md#10-twelve-stage-slice-a-and-complete-acceptance); the historical measurements in [design §11](FLUSSRA_C2_IMPORT_DESIGN.md#11-measured-backend-evidence-and-remaining-gate) remain evidence for the preserved baseline only. Neither set establishes deployment limits. The full-backend run at `faebf994` completed with 3,386 passed, zero failures/errors/skips; pytest reported 571.40 seconds and the wrapper elapsed 574.50 seconds (artifact `.artifacts/validation/manual-full-suite-20261028-184244`); it is a correctness run, not deployment acceptance. Do not routinely run the full suite; the next final confidence check is left for manual execution under AGENTS.md.

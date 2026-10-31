@@ -145,11 +145,11 @@ If an issue is officially moved to a different work unit:
 
 **P8b:** CLOSED / merged (PR #69 at `30d538a9686fcc561dde2ace5533560e4345abfe`, migration `0093`; physical authority cutover).
 
-**P8c:** CLOSED (no migration; merge pending): development reset, canonical demo seed and final refoundation closure from baseline `30d538a9686fcc561dde2ace5533560e4345abfe`.
+**P8c:** CLOSED / merged (PR #70; no migration): development reset, canonical demo seed and final refoundation closure from baseline `30d538a9686fcc561dde2ace5533560e4345abfe`.
 
-**Current baseline:** `main @ 30d538a9686fcc561dde2ace5533560e4345abfe` (PR #69), Alembic head `0093`.
+**P8c starting baseline (historical):** `main @ 30d538a9686fcc561dde2ace5533560e4345abfe` (PR #69), Alembic head `0093`. The C2 backend refoundation starts from merged A1, `main @ 337e3f7` (PR #74), head `0094`; its corrected forward schema is `0095`.
 
-**Next work unit:** the refoundation program is complete. C2 Import is the next program; it is unblocked and not started.
+**Current work:** the original refoundation program is complete. C2 Import has started; the batch/layout/compact-preview backend and canonical bulk-write gate precede A3 under the separate C2 plan/design. Public Slice B decisions/apply remain downstream.
 
 **Post-G0 accepted baseline:** `main` at the PR #45 merge, `f2937bfdcbe1266a00716905a8712f3fe29baff2`. P3b merge baseline: `main` at the PR #46 merge, `edcf871f59d0616e194a8e752d9b6ba23f42b8a2`. P3c merge baseline: `main` at the PR #47 merge, `3f389499bbb1a0a70935360f32230f8e0aae4a7c`.
 
@@ -860,9 +860,22 @@ Durable Driver Stage 1 identity design.
 The meaning of an external driver identity depends on the import contract. Keeping an undefined column or an unused alias table would preserve ambiguity.
 
 **Current State:**  
-Neither structure exists after Stage 1. Migration `0094` retires the dormant `import.ImportRows.MatchedDriverID` predecessor along with its unused import/integration tables, refusing populated predecessors. The replacement PayrollWork schema has company-scoped Driver matches and multiple identifier associations per source record; A1 stages files only. A2/Slice B still own matching and confirmation behavior. No saved alias or external-ID system is built.
+Neither dormant alias structure exists after Durable Driver Stage 1. Merged A1
+(`337e3f7`, PR #74, migration `0094`) establishes safe File ingress and retires
+the dormant predecessor. The [C2 refoundation design](FLUSSRA_C2_IMPORT_DESIGN.md)
+replaces disposable single-file/cell staging with Import batches, source units,
+layout-specific mappings and compact normalized records. It retains
+Company-scoped permanent DriverNumber/EmployeeKey resolution before target
+Branch/date eligibility. Known but ineligible Drivers remain known; unique
+roster-name matches are proposals only. Multiple files/layouts do not create
+new identity authorities. Per-import matches are staging under finalization
+retention. Public confirmations/choices remain Slice B.
 
-Update 2026-10-25: C2 A1 implementation establishes safe staging and the replacement persistence foundation. This entry remains unresolved; schema availability does not implement its matching/alias capability or constitute acceptance of A1.
+The unmerged A2 branch is correctness/performance evidence only. Its existence,
+or the corrected schema alone, does not deliver saved external aliases.
+Remembering source-system + external-key -> Driver across Imports remains the
+separate later capability. This entry stays NOT YET until that capability has
+its own implementation and verification.
 
 **Issue Resolved?:** NOT YET
 

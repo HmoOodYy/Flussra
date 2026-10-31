@@ -83,18 +83,18 @@ async def test_no_mounted_route_names_assignment_rates():
 
 
 async def test_ordinary_authoring_still_works_on_the_target_path(
-    session_client, auth_token, hq_branch_id, created_driver_id,
+    client, auth_token, hq_branch_id, created_driver_id,
 ):
     headers = _auth(auth_token)
-    definition = await session_client.post("/compensation/pay-definitions", headers=headers, json={
+    definition = await client.post("/compensation/pay-definitions", headers=headers, json={
         "definition_name": "Cutover item", "input_type": "Decimal", "calculation_method": "PerUnit"})
     assert definition.status_code == 201, definition.text
     body = definition.json()
-    configured = await session_client.patch(
+    configured = await client.patch(
         f"/compensation/branches/{hq_branch_id}/pay-definitions/{body['pay_definition_id']}",
         headers=headers, json={"is_active": True})
     assert configured.status_code == 200, configured.text
-    rows = await session_client.get(
+    rows = await client.get(
         f"/compensation/drivers/{created_driver_id}/pay-rates", headers=headers)
     ordinary = [r for r in rows.json() if r["kind"] == "PayDefinition"]
     assert body["pay_definition_id"] in {r["pay_definition_id"] for r in ordinary}

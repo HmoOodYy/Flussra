@@ -96,7 +96,7 @@ def _reset_with_failure(server, tmp_path, patch):
 
 
 def _assert_canonical(server):
-    assert _run(server["app_dsn"], "SELECT version_num FROM public.alembic_version") == [("0096",)]
+    assert _run(server["app_dsn"], "SELECT version_num FROM public.alembic_version") == [("0099",)]
     run_schema_guard(server["app_url"], is_dev=True)
     for table in PAYROLL_HISTORY_TABLES:
         assert _run(server["app_dsn"], f"SELECT count(*) FROM {table}") == [(0,)], table

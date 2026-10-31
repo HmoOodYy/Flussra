@@ -52,13 +52,14 @@ const DAY_VIEW_ROUTE = /path="\/payroll\/periods\/:periodId"\s+element=\{<Gate c
 test('the period route renders only the Day view page behind the current payroll gate', () => {
   const app = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
   assert.match(app, DAY_VIEW_ROUTE);
-  assert.equal(app.match(/payroll\/periods\/:periodId/g)?.length, 1);
+  // The import pages sit under the period route (/imports); only the period route itself counts.
+  assert.equal(app.match(/payroll\/periods\/:periodId"/g)?.length, 1);
 });
 
 test('no active frontend source uses the retired duplicate Day Grid page, the raw FinalLines surface or a generic money writer', () => {
   const retired = new RegExp([
     'PeriodDetailPage',
-    'payroll/periods/:periodId',
+    'payroll/periods/:periodId"',
     'FinalSummaryDialog',
     'canViewFinalLines',
     'getFinalLines',

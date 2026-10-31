@@ -18,7 +18,7 @@ from app.payroll_setup import payroll_policy
 from app.payroll_setup.chronology import DaysOffLimitError, Schedule, validate_normal_days_off_mask
 from app.payroll_setup.errors import PolicyError
 from app.payroll_setup.payroll_policy import create_draft, create_setup, edit_draft, publish_version
-from tests.schema_helpers import _alembic, _schema_database
+from tests.schema_helpers import _alembic, _disposable_database
 
 _MIGRATIONS_DIR = Path(__file__).parent.parent.parent / "migrations"
 _SQL_FILE = _MIGRATIONS_DIR / "sql" / "0069_payroll_setup_days_off_limit.sql"
@@ -442,8 +442,11 @@ def _mask_constraint_definition(cur) -> str:
     return cur.fetchone()[0]
 
 
-def test_alembic_upgrade_allows_three_days_and_downgrade_fails_closed_on_them(schema_databases):
-    with _schema_database(schema_databases, "days_off_limit") as (env, dsn):
+def test_alembic_upgrade_allows_three_days_and_downgrade_fails_closed_on_them(pg_instance):
+    # Later migrations cannot be downgraded, so the database is built up to 0095 directly.
+    with _disposable_database(pg_instance, "days_off_limit") as (env, dsn):
+        upgraded_to_0095 = _alembic(env, "upgrade", "0095")
+        assert upgraded_to_0095.returncode == 0, upgraded_to_0095.stderr
         with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
             assert "<= 3" in _mask_constraint_definition(cur)
 

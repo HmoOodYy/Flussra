@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { Suspense } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from '../store/authStore';
 import type { UserProfile } from '../store/authStore';
@@ -315,7 +316,9 @@ export function AppShell() {
 
         {/* ── Content ───────────────────────────────────────────── */}
         <main className={styles.content}>
-          <Outlet />
+          <Suspense fallback={<div role="status" aria-live="polite">Loading page…</div>}>
+            <Outlet />
+          </Suspense>
         </main>
 
       </div>

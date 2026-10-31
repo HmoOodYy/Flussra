@@ -18,6 +18,9 @@ single coherent state: a configuration change is wholly before or wholly after i
 
 Global lock order (every path acquires in this order and never against it):
 
+ -1. Company PayDefinition-capacity advisory lock (creation, approval and retirement).
+     It is acquired before request/RateDefinition/PayDefinition/Branch locks. No Branch
+     configuration writer acquires it after a Branch lock.
   0. Company currency row, FOR SHARE (monetary writers), then the Driver's
      core.DriverAssignments rows, FOR SHARE in ascending id (Driver-owned writers)
   1. Branch workflow lock (period creation, lifecycle, review; Driver-owned rate schedule
@@ -29,7 +32,7 @@ Global lock order (every path acquires in this order and never against it):
   5. per Company+Branch+PayDefinition config advisory lock, then config rows
   6. rate schedule / pay-rule rows
 
-Retirement takes only (3) then (4). Driver-owned schedule authoring takes (0), (1) (when it
+Retirement takes (-1), then (3) and (4). Driver-owned schedule authoring takes (0), (1) (when it
 has payroll effect), (3) and (6), in that order, with one decision instant read after the
 last lock (see app.compensation.driver_context). Config writers never take (1) or (3).
 No path takes (2) after (3) or (4), and no path takes (1) after (3), so the graph is
