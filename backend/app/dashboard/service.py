@@ -12,7 +12,8 @@ Permission model (Dashboard D1):
     approved_periods payroll.finalize  (full period list; others get count via periods_approved)
     review_queue     review.decide | payroll.entry | payroll.view
     rates_health     payrates.view | payrates.edit | payroll.approve_rate
-    setup_health     setup.manage | settings.manage
+    setup_health     payroll_setup.view | payroll_setup.manage | payroll_setup.publish |
+                     payroll_setup.assign
     transfers        drivers.view | drivers.edit
 
   - Branch scope: each section is filtered to branches where the user holds a
@@ -62,8 +63,10 @@ _RATES_PERMS = [
     "payroll.approve_rate",
 ]
 _SETUP_PERMS = [
-    "setup.manage",
-    "settings.manage",
+    "payroll_setup.view",
+    "payroll_setup.manage",
+    "payroll_setup.publish",
+    "payroll_setup.assign",
 ]
 _PEOPLE_PERMS = [
     "drivers.view",
@@ -248,22 +251,14 @@ async def get_dashboard_summary(
     # ── 10. Setup warnings (permission-gated) ──────────────────────────────────
     setup_warnings: list[SetupWarning] = []
     if has_payroll or has_setup or has_rates:
-        # Determine branch scope for warnings: broadest scope across the relevant sections.
-        if has_setup:
-            sw_all, sw_bids = setup_all, setup_bids
-        elif has_payroll:
-            sw_all, sw_bids = payroll_all, payroll_bids
-        else:
-            sw_all, sw_bids = rates_all, rates_bids
+        # Each warning is computed over the branches of the section whose permission
+        # entitles the caller to act on it.
         setup_warnings = await _compute_setup_warnings(
             db,
             company_id,
-            sw_all,
-            sw_bids,
-            branch_names,  # may be empty for non-payroll users — warnings use own name lookup
-            has_setup=has_setup,
-            has_payroll=has_payroll,
-            has_rates=has_rates,
+            setup_scope=(has_setup, setup_all, setup_bids),
+            payroll_scope=(has_payroll, payroll_all, payroll_bids),
+            rates_scope=(has_rates, rates_all, rates_bids),
         )
 
     # ── 11. Branch summaries (payroll users only) ──────────────────────────────
@@ -642,29 +637,31 @@ async def _query_pending_rates(
 async def _compute_setup_warnings(
     db: AsyncConnection,
     company_id: int,
-    can_see_all: bool,
-    branch_ids: list[int],
-    branch_names: dict[int, str],
     *,
-    has_setup: bool,
-    has_payroll: bool,
-    has_rates: bool,
+    setup_scope: tuple[bool, bool, list[int]],
+    payroll_scope: tuple[bool, bool, list[int]],
+    rates_scope: tuple[bool, bool, list[int]],
 ) -> list[SetupWarning]:
     """
     Compute setup warnings filtered by what the user can actually act on.
 
-    Warning gating:
-      BRANCH_NO_PAYROLL_SETTINGS      → setup.manage / settings.manage only
-      OPEN_PERIOD_NEEDS_MANAGER_REVIEW → payroll.entry / payroll.finalize (has_payroll)
-      DRIVERS_NO_APPROVED_RATE      → payrates.view/edit (has_rates) or setup.manage (has_setup)
+    Each scope is ``(has_section, section_can_see_all, permitted_branch_ids)``.
+
+    Warning gating (each warning is limited to the branches of its own section):
+      BRANCH_NO_PAYROLL_SETTINGS      -> any payroll_setup.* permission (setup scope)
+      OPEN_PERIOD_NEEDS_MANAGER_REVIEW -> payroll.entry / payroll.finalize (payroll scope)
+      DRIVERS_NO_APPROVED_RATE        -> payrates.view/edit (rates scope)
     """
     warnings: list[SetupWarning] = []
+    has_setup, setup_all, setup_bids = setup_scope
+    has_payroll, payroll_all, payroll_bids = payroll_scope
+    has_rates, rates_all, rates_bids = rates_scope
 
-    bf_b, bp_b = _make_branch_filter(can_see_all, branch_ids, "b.branchid")
-    bf_d, bp_d = _make_branch_filter(can_see_all, branch_ids, "asg.branchid")
-    bf_p, bp_p = _make_branch_filter(can_see_all, branch_ids, "p.branchid")
+    bf_b, bp_b = _make_branch_filter(setup_all, setup_bids, "b.branchid")
+    bf_d, bp_d = _make_branch_filter(rates_all, rates_bids, "asg.branchid")
+    bf_p, bp_p = _make_branch_filter(payroll_all, payroll_bids, "p.branchid")
 
-    # W1: canonical Payroll Setup readiness — only for setup admins.
+    # W1: canonical Payroll Setup readiness — only for Payroll Setup users.
     if has_setup:
         result = await db.execute(
             text(f"""
@@ -721,8 +718,8 @@ async def _compute_setup_warnings(
                 count=row["cnt"],
             ))
 
-    # W3: DRIVERS_NO_APPROVED_RATE — payrates users or setup admins
-    if has_rates or has_setup:
+    # W3: DRIVERS_NO_APPROVED_RATE — payrates users
+    if has_rates:
         result = await db.execute(
             text(f"""
                 SELECT asg.branchid, b.branchname, COUNT(asg.driverassignmentid) AS cnt

@@ -1,4 +1,4 @@
-"""0096: Canonical File payloads and durable Import rule lifecycle."""
+"""0097: Batch files, source layouts and compact PayrollWork previews."""
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -6,8 +6,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0096"
-down_revision: str | None = "0095"
+revision: str = "0097"
+down_revision: str | None = "0096"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -18,9 +18,9 @@ from utils import statements_from_file  # noqa: E402 - migration-local SQL loade
 
 
 def upgrade() -> None:
-    for statement in statements_from_file(_MIGRATIONS_DIR / "sql" / "0096_import_rule_lifecycle.sql"):
+    for statement in statements_from_file(_MIGRATIONS_DIR / "sql" / "0097_import_batch_sources.sql"):
         op.execute(sa.text(statement))
 
 
 def downgrade() -> None:
-    raise RuntimeError("Import rule lifecycle migration is irreversible. Reset/reseed preproduction only by explicit instruction.")
+    raise RuntimeError("Import batch cutover is irreversible. Reset/reseed the preproduction database.")

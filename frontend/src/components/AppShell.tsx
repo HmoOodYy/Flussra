@@ -12,7 +12,7 @@ import {
   canViewReview,
   canViewPeopleHub,
   canViewPayRates,
-  canViewSettings,
+  canManageRoles,
   canViewDailyPayItems,
   canManageSettingsAdmin,
   canViewPayrollSetups,
@@ -62,9 +62,9 @@ function buildNavGroups(user: UserProfile): NavGroup[] {
     settingsItems.push({ to: '/settings/payroll', label: 'Payroll Policies', icon: <CalendarIcon />, end: false });
   if (canManageSettingsAdmin(user))
     settingsItems.push({ to: '/settings/status-keys', label: 'Status Keys', icon: <KeyIcon />, end: false });
-  if (canViewSettings(user) || canViewDailyPayItems(user))
+  if (canViewDailyPayItems(user))
     settingsItems.push({ to: '/settings/pay-items', label: 'Pay Items', icon: <TagIcon />, end: false });
-  if (canViewSettings(user))
+  if (canManageRoles(user))
     settingsItems.push({ to: '/settings/roles', label: 'Roles & Permissions', icon: <ShieldIcon />, end: false });
   if (canAccessCompanyBranches(user))
     settingsItems.push({ to: '/settings/company-branches', label: 'Company & Branches', icon: <BuildingIcon />, end: false });

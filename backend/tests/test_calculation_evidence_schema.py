@@ -17,7 +17,7 @@ def evidence_database(schema_databases):
 
 def test_fresh_schema_has_the_current_immutable_evidence_shape(evidence_database):
     _, dsn = evidence_database
-    assert _version(dsn) == "0097"
+    assert _version(dsn) == "0099"
     assert {
         "payrollcalculationsnapshotcomponents",
         "payrollcalculationsnapshotminmaxevaluations",

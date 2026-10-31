@@ -1,4 +1,4 @@
-"""0095: Batch files, source layouts and compact PayrollWork previews."""
+"""0099: Ordered Company-scoped Driver identity lookup."""
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -6,8 +6,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0095"
-down_revision: str | None = "0094"
+revision: str = "0099"
+down_revision: str | None = "0098"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -18,9 +18,9 @@ from utils import statements_from_file  # noqa: E402 - migration-local SQL loade
 
 
 def upgrade() -> None:
-    for statement in statements_from_file(_MIGRATIONS_DIR / "sql" / "0095_import_batch_sources.sql"):
+    for statement in statements_from_file(_MIGRATIONS_DIR / "sql" / "0099_import_driver_identity_lookup.sql"):
         op.execute(sa.text(statement))
 
 
 def downgrade() -> None:
-    raise RuntimeError("Import batch cutover is irreversible. Reset/reseed the preproduction database.")
+    raise RuntimeError("Import Driver identity lookup migration is irreversible.")

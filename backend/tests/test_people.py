@@ -17,6 +17,7 @@ Design notes:
 """
 import httpx
 
+from tests.builders.access import create_actor_with_permissions
 from tests.builders.workforce import create_driver_employee_record
 
 # ---------------------------------------------------------------------------
@@ -368,15 +369,18 @@ class TestRevokeCompanyRoleAssignment:
     async def test_cannot_revoke_company_owner_directly(
         self, client: httpx.AsyncClient, auth_token: str
     ):
-        """The admin user has a COMPANY_OWNER assignment — revoke must be blocked."""
+        """The admin user has a COMPANY_OWNER assignment — another administrator cannot revoke it."""
         users_resp = await client.get("/admin/users", headers=_hdr(auth_token))
         admin = next(u for u in users_resp.json() if u["username"] == "admin")
         owner_assignment_id = admin["company_role_assignment_id"]
         assert owner_assignment_id is not None
+        administrator = await create_actor_with_permissions(
+            client, auth_token, "test_owner_revoke_admin", ["users.view", "users.edit"],
+        )
 
         resp = await client.delete(
             f"/admin/users/{admin['user_id']}/company-role-assignments/{owner_assignment_id}",
-            headers=_hdr(auth_token),
+            headers=_hdr(administrator["token"]),
         )
         assert resp.status_code == 422
         assert "transfer" in resp.json()["detail"].lower()
@@ -556,7 +560,7 @@ class TestOwnerTransfer:
             "password": "TestPass1234!",
             "company_code": "DEMO",
         })
-        # User may fail _ensure_admin if DRIVER role doesn't have setup.manage,
+        # User may fail the scope gate if the DRIVER role holds no admin permission,
         # which is correct — they should be blocked either at scope or permission level.
         # Either 403 is acceptable.
         if login_resp.status_code == 200:
@@ -684,6 +688,22 @@ class TestPermissionOverrides:
         assert "payroll.edit" in codes
         assert "payroll.view" in codes  # auto-added
 
+    async def test_set_overrides_employees_manage_and_ledger_audit_add_view_parents(
+        self, client: httpx.AsyncClient, auth_token: str
+    ):
+        user = await _create_test_user(
+            client, auth_token, username="test_pov_wf_ledger", display_name="POV Workforce Ledger"
+        )
+        resp = await client.put(
+            f"/admin/users/{user['user_id']}/permission-overrides",
+            json={"permission_codes": ["employees.manage", "ledger.audit.view"]},
+            headers=_hdr(auth_token),
+        )
+        assert resp.status_code == 200
+        assert set(resp.json()) == {
+            "employees.manage", "employees.view", "ledger.audit.view", "ledger.view",
+        }
+
     async def test_set_overrides_replaces_existing(
         self, client: httpx.AsyncClient, auth_token: str
     ):
@@ -746,10 +766,13 @@ class TestPermissionOverrides:
     ):
         users = await client.get("/admin/users", headers=_hdr(auth_token))
         admin = next(u for u in users.json() if u["username"] == "admin")
+        administrator = await create_actor_with_permissions(
+            client, auth_token, "test_owner_override_admin", ["users.view", "users.edit"],
+        )
         resp = await client.put(
             f"/admin/users/{admin['user_id']}/permission-overrides",
             json={"permission_codes": ["payroll.view"]},
-            headers=_hdr(auth_token),
+            headers=_hdr(administrator["token"]),
         )
         assert resp.status_code == 422
         assert "company owner" in resp.json()["detail"].lower()

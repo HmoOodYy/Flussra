@@ -225,7 +225,7 @@ async def get_branch(
         "company's current default Payroll Setup; it requires "
         "`payroll_setup.assign`.  "
         "If `is_default=true`, all other branches lose their default flag "
-        "atomically; this additionally requires company-wide `setup.manage` "
+        "atomically; this additionally requires company-wide `settings.manage` "
         "(the same authority as the set-default endpoint).\n\n"
         "Requires AllCompanyBranches scope and `branches.create`; driver-only "
         "roles are not permitted."

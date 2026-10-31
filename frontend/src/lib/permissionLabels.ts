@@ -8,7 +8,7 @@
  *   users.edit       → Edit Members
  *   branches.create  → Create Branches
  *   payroll.approve  → Approve Payroll
- *   settings.manage  → Manage Settings
+ *   settings.manage  → Manage Company Settings
  */
 
 const _MODULE_LABELS: Record<string, string> = {
@@ -23,7 +23,7 @@ const _MODULE_LABELS: Record<string, string> = {
   drivers:  'Drivers',
   dispatch: 'Dispatch',
   reports:  'Reports',
-  settings: 'Settings',
+  settings: 'Company Settings',
 };
 
 const _ACTION_LABELS: Record<string, string> = {

@@ -126,8 +126,8 @@ test('B. App.tsx: SettingsDefaultRedirect first check is canAccessCompanyBranche
 
 // ── C/D/E/F. Capabilities ────────────────────────────────────────────────────
 
-test('C. capabilities: company-wide setup.manage + branches.create -> canAdmin + canCreate', () => {
-  const caps = companyBranchesCapabilities(companyWideUser(['setup.manage', 'branches.create']));
+test('C. capabilities: company-wide settings.manage + branches.create -> canAdmin + canCreate', () => {
+  const caps = companyBranchesCapabilities(companyWideUser(['settings.manage', 'branches.create']));
   assert.equal(caps.canAdmin, true);
   assert.equal(caps.canCreate, true);
 });
@@ -159,12 +159,22 @@ test('C. page source: no canEdit identifier remains', () => {
   assert.doesNotMatch(featureSource, /canEdit/);
 });
 
-test('D. capabilities: company-wide setup.manage WITHOUT branches.create -> canCreate false, canAdmin true, canAccess true', () => {
-  const user = companyWideUser(['setup.manage']);
+test('D. capabilities: company-wide settings.manage WITHOUT branches.create -> canCreate false, canAdmin true, canAccess true', () => {
+  const user = companyWideUser(['settings.manage']);
   const caps = companyBranchesCapabilities(user);
   assert.equal(caps.canCreate, false);
   assert.equal(caps.canAdmin, true);
   assert.equal(canAccessCompanyBranches(user), true);
+});
+
+test('D. capabilities: company-wide settings.manage + branches.create -> full access with no limited-access notice', () => {
+  const user = companyWideUser(['settings.manage', 'branches.create']);
+  const caps = companyBranchesCapabilities(user);
+  assert.equal(caps.canAdmin, true);
+  assert.equal(caps.canCreate, true);
+  assert.equal(caps.canSetDefaultOnCreate, true);
+  assert.equal(canAccessCompanyBranches(user), true);
+  assert.equal(accessNotice(caps), null);
 });
 
 test('E. capabilities: company payroll_setup.view(+manage+publish) alone -> canCreate false, canOnboard false, canAccessCompanyBranches false', () => {
@@ -333,8 +343,8 @@ test('K. buildBranchCreatePayload: keys exactly equal the expected list (no setu
 
 // ── V. canSetDefaultOnCreate truth table ─────────────────────────────────────
 
-test('V. canSetDefaultOnCreate: create + setup.manage -> true', () => {
-  const caps = companyBranchesCapabilities(companyWideUser(['branches.create', 'setup.manage']));
+test('V. canSetDefaultOnCreate: create + settings.manage -> true', () => {
+  const caps = companyBranchesCapabilities(companyWideUser(['branches.create', 'settings.manage']));
   assert.equal(caps.canSetDefaultOnCreate, true);
 });
 
@@ -343,27 +353,27 @@ test('V. canSetDefaultOnCreate: create-only -> false', () => {
   assert.equal(caps.canSetDefaultOnCreate, false);
 });
 
-test('V. canSetDefaultOnCreate: setup.manage-only (admin, no create) -> false', () => {
-  const caps = companyBranchesCapabilities(companyWideUser(['setup.manage']));
+test('V. canSetDefaultOnCreate: settings.manage-only (admin, no create) -> false', () => {
+  const caps = companyBranchesCapabilities(companyWideUser(['settings.manage']));
   assert.equal(caps.canSetDefaultOnCreate, false);
 });
 
-test('V. canSetDefaultOnCreate: create + payroll_setup.assign (no setup.manage) -> false', () => {
+test('V. canSetDefaultOnCreate: create + payroll_setup.assign (no settings.manage) -> false', () => {
   const caps = companyBranchesCapabilities(companyWideUser(['branches.create', 'payroll_setup.assign']));
   assert.equal(caps.canSetDefaultOnCreate, false);
 });
 
-test('V. canSetDefaultOnCreate: create + payroll_setup.view/manage/publish (no setup.manage) -> false', () => {
+test('V. canSetDefaultOnCreate: create + payroll_setup.view/manage/publish (no settings.manage) -> false', () => {
   const caps = companyBranchesCapabilities(
     companyWideUser(['branches.create', 'payroll_setup.view', 'payroll_setup.manage', 'payroll_setup.publish']),
   );
   assert.equal(caps.canSetDefaultOnCreate, false);
 });
 
-test('V. canSetDefaultOnCreate: Driver with company branches.create + setup.manage -> false', () => {
+test('V. canSetDefaultOnCreate: Driver with company branches.create + settings.manage -> false', () => {
   const user = makeUser({
     branches: [makeBranch({ branch_id: 10, scope: 'SpecificBranch', role_code: 'DRIVER', role_name: 'Driver' })],
-    authority: makeAuthority({ company_permissions: ['branches.create', 'setup.manage'] }),
+    authority: makeAuthority({ company_permissions: ['branches.create', 'settings.manage'] }),
   });
   const caps = companyBranchesCapabilities(user);
   assert.equal(caps.canSetDefaultOnCreate, false);
@@ -525,9 +535,9 @@ test('P. setupNeededLink: branch payroll.view (no setup view) on branch 7 -> sch
   assert.deepEqual(setupNeededLink(user, 7), { kind: 'schedule', to: '/payroll/schedule?branchId=7' });
 });
 
-test('P. setupNeededLink: branches.create-only / setup.manage-only user -> none', () => {
+test('P. setupNeededLink: branches.create-only / settings.manage-only user -> none', () => {
   assert.deepEqual(setupNeededLink(companyWideUser(['branches.create']), 7), { kind: 'none' });
-  assert.deepEqual(setupNeededLink(companyWideUser(['setup.manage']), 7), { kind: 'none' });
+  assert.deepEqual(setupNeededLink(companyWideUser(['settings.manage']), 7), { kind: 'none' });
 });
 
 test('P. setupNeededLink: null user -> none', () => {
@@ -614,7 +624,7 @@ test('U. mixed Driver + company-admin with branches.create -> canCreate false', 
   ];
   const user = makeUser({
     branches,
-    authority: makeAuthority({ company_permissions: ['branches.create', 'payroll_setup.assign', 'setup.manage'] }),
+    authority: makeAuthority({ company_permissions: ['branches.create', 'payroll_setup.assign', 'settings.manage'] }),
   });
   const caps = companyBranchesCapabilities(user);
   assert.equal(caps.canCreate, false);

@@ -17,7 +17,7 @@ def head_database(schema_databases):
 
 def test_fresh_schema_has_ordinal_tier_evidence_shape(head_database):
     _, dsn = head_database
-    assert _version(dsn) == "0097"
+    assert _version(dsn) == "0099"
     assert "ordinaltiers" in _columns(dsn, "paydefinitionrequests")
     assert "rateshapesnapshot" in _columns(dsn, "payrollcalculationsnapshotusedratedefinitions")
     assert {"payrollcalculationsnapshotusedratedefinitionid", "payrollcalculationsnapshotid",

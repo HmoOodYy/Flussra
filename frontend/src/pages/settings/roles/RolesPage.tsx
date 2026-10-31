@@ -43,6 +43,9 @@ export function RolesPage() {
   const filteredCustomRoles  = roles.roleFilter !== 'default' ? customRoles.filter(r => matchSearch(r.role_name))  : [];
   const hasSearchResults = filteredDefaultRoles.length > 0 || filteredCustomRoles.length > 0;
   const selectedRole = roles.rolesSt.roles.find(r => r.company_role_id === roles.selectedId) ?? null;
+  // Someone else must change the permissions of a role you hold; the Company Owner's role is never editable anyway.
+  const holdsSelectedRole = !!user && !!selectedRole && selectedRole.role_code !== 'COMPANY_OWNER'
+    && user.branches.some(b => b.role_code === selectedRole.role_code);
 
   return (
     <div className={styles.page}>
@@ -89,8 +92,9 @@ export function RolesPage() {
           permsSt={permission.permsSt}
           dispatchPerms={permission.dispatchPerms}
           dispatchUsers={users.dispatchUsers}
-          readOnly={readOnly}
-          canEdit={canEdit}
+          readOnly={readOnly || holdsSelectedRole}
+          holdsRole={holdsSelectedRole}
+          canEdit={canEdit && !holdsSelectedRole}
           saveError={permission.saveError}
           setSaveError={permission.setSaveError}
           saveOk={permission.saveOk}

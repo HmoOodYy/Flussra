@@ -267,7 +267,7 @@ async def list_users(
     *,
     include_inactive: bool = False,
 ) -> list[UserAdmin]:
-    await security.ensure_any_permission(company_id, user_id, db, "users.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, user_id, db, "users.view")
 
     filter_clause = "" if include_inactive else "AND u.isactive = TRUE"
     result = await db.execute(
@@ -320,7 +320,7 @@ async def get_user_by_id(
     caller_id: int,
     db: AsyncConnection,
 ) -> UserAdmin:
-    await security.ensure_any_permission(company_id, caller_id, db, "users.view", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.view")
     return await get_user_by_id_internal(target_user_id, company_id, db)
 
 
@@ -343,7 +343,7 @@ async def list_employee_link_candidates(
     resolve one specific Employee (`employee_id`) wherever it sits in that order.
     """
     await security.ensure_any_permission(
-        company_id, user_id, db, "users.create", "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
+        company_id, user_id, db, "users.create", "users.edit", "roles.edit")
     result = await db.execute(
         text("""
             WITH candidate AS (

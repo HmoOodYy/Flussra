@@ -1,4 +1,4 @@
-"""0097: Ordered Company-scoped Driver identity lookup."""
+"""0098: Canonical File payloads and durable Import rule lifecycle."""
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -6,8 +6,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0097"
-down_revision: str | None = "0096"
+revision: str = "0098"
+down_revision: str | None = "0097"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -18,9 +18,9 @@ from utils import statements_from_file  # noqa: E402 - migration-local SQL loade
 
 
 def upgrade() -> None:
-    for statement in statements_from_file(_MIGRATIONS_DIR / "sql" / "0097_import_driver_identity_lookup.sql"):
+    for statement in statements_from_file(_MIGRATIONS_DIR / "sql" / "0098_import_rule_lifecycle.sql"):
         op.execute(sa.text(statement))
 
 
 def downgrade() -> None:
-    raise RuntimeError("Import Driver identity lookup migration is irreversible.")
+    raise RuntimeError("Import rule lifecycle migration is irreversible. Reset/reseed preproduction only by explicit instruction.")

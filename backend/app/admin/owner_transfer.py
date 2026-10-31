@@ -80,7 +80,7 @@ async def transfer_company_owner(
     if caller_user["isstaged"]:
         raise HTTPException(status_code=403, detail="A staged account cannot transfer company ownership.")
     if caller_user["canlogin"]:
-        await security.ensure_admin(company_id, caller_id, db)
+        await security.ensure_scope(company_id, caller_id, db)
     else:
         await _ensure_disabled_owner_transfer_authority(company_id, caller_id, db)
 

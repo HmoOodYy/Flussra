@@ -79,7 +79,6 @@ test('C: page and route line never reference company payroll_setup / settings-ad
     'canManageSettingsAdmin',
     'canViewSettings',
     'payroll_setup.',
-    'setup.manage',
     'settings.manage',
   ];
   for (const term of forbidden) {

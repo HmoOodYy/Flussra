@@ -91,6 +91,7 @@ export function AccessPage() {
             user={c.selected}
             allPerms={st.allPerms}
             amOwner={c.amOwner}
+            isSelf={authUser?.user_id === c.selected.user_id}
             can={c.can}
             canViewPayRates={authUser ? canViewPayRates(authUser) : false}
             onEdit={() => dispatch({ type: 'EDIT_OPEN', user: c.selected! })}

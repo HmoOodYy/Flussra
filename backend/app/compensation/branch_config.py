@@ -38,7 +38,7 @@ from app.compensation.schemas import (
 )
 from app.product_policy import DEFAULT_PRODUCT_POLICY, ProductPolicy
 
-_CONFIG_EDIT = ["payitems.edit", "setup.manage"]
+_CONFIG_EDIT = ["payitems.edit"]
 
 _CFG_COLUMNS = """
     bpic.configid, bpic.isactive, bpic.notes, bpic.effectivefrom, bpic.effectiveto,

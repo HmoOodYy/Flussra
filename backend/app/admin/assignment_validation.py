@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from app.admin.access_safety import ensure_employee_not_terminated
 from app.admin.schemas import (
     CompanyRoleAssignmentCreate,
 )
@@ -38,6 +39,7 @@ async def validate_company_role_assignment(
     data: CompanyRoleAssignmentCreate,
     db: AsyncConnection,
 ):
+    await ensure_employee_not_terminated(company_id, employee_id, db)
     result = await db.execute(
         text("""
             SELECT CompanyRoleID, RoleCode, RoleName, IsActive, IsArchived

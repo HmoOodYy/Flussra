@@ -229,3 +229,31 @@ async def create_user_with_role_token(
     )
     _require_status(login, 200, "Test user login")
     return login.json()["access_token"]
+
+
+async def create_actor_with_permissions(
+    client: httpx.AsyncClient,
+    owner_token: str,
+    username: str,
+    permission_codes: list[str],
+    *,
+    password: str = "TestPass123!",
+) -> dict:
+    """Provision a company-wide user whose own role holds exactly these permission codes."""
+    role_id = await create_company_role_with_permissions(
+        client, owner_token, f"{username} role", permission_codes,
+    )
+    user = await create_provisioned_test_user(
+        client, owner_token, username, role_id, password=password,
+    )
+    login = await client.post(
+        "/auth/login",
+        json={"username": username, "password": password, "company_code": "DEMO"},
+    )
+    _require_status(login, 200, "Test actor login")
+    return {
+        "user_id": user["user_id"],
+        "role_id": role_id,
+        "token": login.json()["access_token"],
+        "username": username,
+    }

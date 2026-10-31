@@ -1,10 +1,8 @@
-"""Admin access gates and permission fallbacks for company-scoped operations."""
+"""Admin access gates for company-scoped operations."""
 
 from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
-
-ADMIN_FALLBACKS: tuple[str, ...] = ("settings.manage", "setup.manage")
 
 
 async def ensure_scope(
@@ -55,10 +53,9 @@ async def ensure_any_permission(
     using sec.fn_UserHasPermission — which resolves CompanyRole grants and
     explicit overrides. Returns as soon as one passing code is found.
 
-    Callers pass granular codes first, then ``*ADMIN_FALLBACKS`` so
-    administrative CompanyRoles (setup.manage / settings.manage) remain valid:
+    Callers pass only the specific codes that authorize the action:
 
-        await ensure_any_permission(cid, uid, db, "users.view", *ADMIN_FALLBACKS)
+        await ensure_any_permission(cid, uid, db, "users.view", "roles.view")
     """
     await ensure_scope(company_id, user_id, db)
     for code in permission_codes:
@@ -75,17 +72,3 @@ async def ensure_any_permission(
             f"(required: one of {list(permission_codes)})."
         ),
     )
-
-
-async def ensure_admin(
-    company_id: int,
-    user_id: int,
-    db: AsyncConnection,
-) -> None:
-    """
-    Backward-compatible admin gate: scope + (settings.manage OR setup.manage).
-    Used for endpoints that don't yet have a more specific permission mapping,
-    and for ownership transfer (where the caller-is-owner check inside the
-    service is the real gate).
-    """
-    await ensure_any_permission(company_id, user_id, db, *ADMIN_FALLBACKS)

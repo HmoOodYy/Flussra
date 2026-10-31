@@ -5,18 +5,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-MAX_NORMAL_DAYS_OFF = 2
+MAX_NORMAL_DAYS_OFF = 3
 
 
 class DaysOffLimitError(ValueError):
-    """Normal days off exceed the two-day product limit."""
+    """Normal days off exceed the three-day product limit."""
 
 
 def validate_normal_days_off_mask(mask: int) -> None:
     if not 0 <= mask <= 127:
         raise ValueError("Invalid normal days-off mask")
     if mask.bit_count() > MAX_NORMAL_DAYS_OFF:
-        raise DaysOffLimitError("Normal days off may include at most two days")
+        raise DaysOffLimitError("Normal days off may include at most three days")
 
 
 @dataclass(frozen=True)

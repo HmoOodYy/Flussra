@@ -23,7 +23,7 @@ from tests.test_import_batch_preview_api import (
 )
 from tests.test_import_foundation_schema import envelope, identities
 
-SQL = Path(__file__).resolve().parents[2] / "migrations/sql/0095_import_batch_sources.sql"
+SQL = Path(__file__).resolve().parents[2] / "migrations/sql/0097_import_batch_sources.sql"
 
 
 @pytest.fixture(scope="module")

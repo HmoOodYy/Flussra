@@ -28,18 +28,6 @@ function _hasCompanyPermission(user: UserProfile, code: string): boolean {
   return hasAuthorityPermission(user.authority, code, null);
 }
 
-/**
- * Company-scoped admin fallback shared by People/Role helpers — mirrors the
- * backend's `_ensure_any_perm` admin fallback (settings.manage / setup.manage
- * granted at company scope), independent of active_permissions/scope_type.
- */
-function _hasCompanyAdminFallback(user: UserProfile): boolean {
-  return (
-    _hasCompanyPermission(user, 'settings.manage') ||
-    _hasCompanyPermission(user, 'setup.manage')
-  );
-}
-
 // ── Role / scope ──────────────────────────────────────────────────────────────
 
 /**
@@ -53,22 +41,22 @@ export function isDriverUser(user: UserProfile): boolean {
 
 // ── Page-level visibility guards ──────────────────────────────────────────────
 
+// Exactly the codes the backend accepts for payroll reads (GET /payroll/current,
+// /payroll/current-workflow, /payroll/periods, /review/items ...). payroll.edit is not checked
+// by any route, and payroll.period.create alone is refused by every read the page makes
+// (it only unlocks period creation, which needs payroll.view in practice).
 const PAYROLL_READ = [
   'payroll.view',
-  'payroll.edit',           // production seed code (migration 0015)
-  'payroll.entry',          // legacy/test-only code (conftest.py / ensure_dev_admin.py)
+  'payroll.entry',
   'payroll.finalize',
-  'payroll.period.create',  // dedicated create permission (migration 0030)
 ] as const;
 
 const PAYRATES_ACCESS = [
   'payrates.view',
   'payrates.edit',
-  'settings.manage',
-  'setup.manage',
 ] as const;
 
-/** Current Payroll page: any payroll read/write permission. */
+/** Current Payroll page: any permission the backend accepts for payroll reads. */
 export function canViewCurrentPayroll(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAnyAuthorityPermission(user, PAYROLL_READ);
 }
@@ -107,19 +95,19 @@ export function canViewReview(user: UserProfile): boolean {
   );
 }
 
-/** Pay Rates page: payrates.view/edit or admin fallback. */
+/** Pay Rates page: payrates.view or payrates.edit. */
 export function canViewPayRates(user: UserProfile): boolean {
   return !isDriverUser(user) && _hasAnyAuthorityPermission(user, PAYRATES_ACCESS);
 }
 
 /**
- * People & Access hub, Access area: company-scoped users.view, or company admin fallback.
+ * People & Access hub, Access area: company-scoped users.view.
  * Company-scoped, not driver-gated — a mixed Driver + valid company-admin
  * assignment must still reach this page, so isDriverUser() is deliberately
  * not consulted here. Independent of Workforce and Transfer authority.
  */
 export function canViewAccess(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'users.view') || _hasCompanyAdminFallback(user);
+  return _hasCompanyPermission(user, 'users.view');
 }
 
 /**
@@ -139,7 +127,7 @@ export function canViewPeopleHub(user: UserProfile): boolean {
 }
 
 /**
- * Settings pages: company setup/settings admin, or any company-scoped
+ * Settings pages: company settings manager, or any company-scoped
  * role/user admin permission.  Company-scoped via hasAuthorityPermission and
  * authority.company_permissions (prefix inspection), never the flat
  * active_permissions union or coarse scope_type.  A mixed Driver + valid
@@ -148,7 +136,7 @@ export function canViewPeopleHub(user: UserProfile): boolean {
  */
 export function canViewSettings(user: UserProfile): boolean {
   return (
-    _hasCompanyAdminFallback(user) ||
+    canManageSettingsAdmin(user) ||
     user.authority.company_permissions.some(
       (p) => p.startsWith('roles.') || p.startsWith('users.')
     )
@@ -203,61 +191,53 @@ export function canDecideReview(user: UserProfile, branchId: number): boolean {
 /**
  * Edit/approve pay rates, pay rules, and copy-rate actions for a specific
  * branch.  Branch-aware — mirrors the backend per-branch authority check
- * (payrates.edit / settings.manage / setup.manage), not the flat
- * active_permissions union.
+ * (payrates.edit), not the flat active_permissions union.
  */
 export function canEditPayRates(user: UserProfile, branchId: number): boolean {
   if (isDriverUser(user)) return false;
-  return ['payrates.edit', 'settings.manage', 'setup.manage'].some((code) =>
-    hasAuthorityPermission(user.authority, code, branchId)
-  );
+  return hasAuthorityPermission(user.authority, 'payrates.edit', branchId);
 }
 
-/** Create new people/users: company-scoped users.create, or company admin fallback. */
+/** Create new people/users: company-scoped users.create. */
 export function canCreatePeople(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'users.create') || _hasCompanyAdminFallback(user);
+  return _hasCompanyPermission(user, 'users.create');
 }
 
 /**
  * Edit an existing person's profile, reset their password, or edit their
- * extra permission overrides: company-scoped users.edit, or company admin
- * fallback.  Deliberately does NOT include users.deactivate — that permission
+ * extra permission overrides: company-scoped users.edit.  Deliberately does NOT include users.deactivate — that permission
  * authorizes the active-only toggle (see canTogglePeopleActive), not
  * profile/password/override edits.
  */
 export function canEditPeople(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'users.edit') || _hasCompanyAdminFallback(user);
+  return _hasCompanyPermission(user, 'users.edit');
 }
 
 /**
  * Activate/deactivate a person: company-scoped users.deactivate OR
- * users.edit, or company admin fallback — mirrors the backend's active-only
- * patch guard.
+ * users.edit — mirrors the backend's active-only patch guard.
  */
 export function canTogglePeopleActive(user: UserProfile): boolean {
   return (
     _hasCompanyPermission(user, 'users.deactivate') ||
-    _hasCompanyPermission(user, 'users.edit') ||
-    _hasCompanyAdminFallback(user)
+    _hasCompanyPermission(user, 'users.edit')
   );
 }
 
 /**
  * Assign/change a person's company role: company-scoped users.edit OR
- * roles.edit, or company admin fallback — mirrors the backend's
- * company-role-assignment guard.
+ * roles.edit — mirrors the backend's company-role-assignment guard.
  */
 export function canAssignPeopleRole(user: UserProfile): boolean {
   return (
     _hasCompanyPermission(user, 'users.edit') ||
-    _hasCompanyPermission(user, 'roles.edit') ||
-    _hasCompanyAdminFallback(user)
+    _hasCompanyPermission(user, 'roles.edit')
   );
 }
 
-/** View roles and their permission assignments: company-scoped roles.view, or company admin fallback. */
+/** View roles and their permission assignments: company-scoped roles.view. */
 export function canManageRoles(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'roles.view') || _hasCompanyAdminFallback(user);
+  return _hasCompanyPermission(user, 'roles.view');
 }
 
 /** Provisioning an existing staged account requires edit authority and visible role choices. */
@@ -265,46 +245,42 @@ export function canProvisionPeopleAccount(user: UserProfile): boolean {
   return canEditPeople(user) && canAssignPeopleRole(user) && canManageRoles(user);
 }
 
-/** Create a new company role: company-scoped roles.create, or company admin fallback. */
+/** Create a new company role: company-scoped roles.create. */
 export function canCreateRoles(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'roles.create') || _hasCompanyAdminFallback(user);
+  return _hasCompanyPermission(user, 'roles.create');
 }
 
-/** Edit a company role's permission assignments: company-scoped roles.edit, or company admin fallback. */
+/** Edit a company role's permission assignments: company-scoped roles.edit. */
 export function canEditRoles(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'roles.edit') || _hasCompanyAdminFallback(user);
+  return _hasCompanyPermission(user, 'roles.edit');
 }
 
-/** Delete a company role: company-scoped roles.delete, or company admin fallback. */
+/** Delete a company role: company-scoped roles.delete. */
 export function canDeleteRoles(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'roles.delete') || _hasCompanyAdminFallback(user);
+  return _hasCompanyPermission(user, 'roles.delete');
 }
 
 /**
- * Full settings admin (company, branches, payroll setup, pay items).
- * Canonical company-scoped setup.manage — mirrors the backend's
- * _ensure_company_admin, not flat or coarse frontend projections.
+ * Company settings (company profile, currency, branch settings, Company Statuses and
+ * Status rate columns): company-scoped settings.manage only — mirrors the backend's
+ * ensure_company_admin, not flat or coarse frontend projections. It grants nothing
+ * about people, roles, pay items or pay rates.
  */
 export function canManageSettingsAdmin(user: UserProfile): boolean {
-  return _hasCompanyPermission(user, 'setup.manage');
+  return _hasCompanyPermission(user, 'settings.manage');
 }
 
 /**
- * True when the user should be able to reach the Pay Items page.
- *
- * Two paths:
- *   1. Full settings admin — canonical company-scoped setup.manage
- *      (canManageSettingsAdmin).
- *   2. Any user with payitems.edit somewhere — needed to browse and request
- *      items — or setup.manage for at least one Branch, which the backend accepts
- *      for that Branch's applicability configuration.  This broad discovery check
- *      uses canonical authority, but actual
- *      branch/company PayDefinition browsing and actions are governed by the scoped
- *      helpers below (canManagePayDefinitionsForBranch, canGovernPayDefinitionsCompanyWide).
+ * True when the user should be able to reach the Pay Items page: payitems.view or
+ * payitems.edit somewhere across their assignments — viewing is needed to browse items,
+ * editing to request or govern them.  This broad discovery check uses canonical
+ * authority, but actual branch/company PayDefinition browsing and actions are governed
+ * by the scoped helpers below (canManagePayDefinitionsForBranch,
+ * canGovernPayDefinitionsCompanyWide).
  */
 export function canViewDailyPayItems(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
-  return canManageSettingsAdmin(user) || hasPayItemsEdit(user) || hasBranchSetupManage(user);
+  return hasPayItemsView(user) || hasPayItemsEdit(user);
 }
 
 // ── Payroll Setup policy helpers ────────────────────────────────────────────────
@@ -372,7 +348,7 @@ export function canCreateBranches(user: UserProfile): boolean {
 }
 
 /**
- * Company & Branches page access: settings admin (setup.manage) or branch
+ * Company & Branches page access: company settings manager (settings.manage) or branch
  * creator. Entering the page does not grant edit actions; those keep
  * canManageSettingsAdmin.
  */
@@ -400,12 +376,10 @@ export function canManageAnyEmployees(user: UserProfile): boolean {
 const TRANSFER_READ = [
   'drivers.view',
   'drivers.edit',
-  'settings.manage',
-  'setup.manage',
 ] as const;
 
 /**
- * Transfer Requests tab: any drivers.view/edit or admin permission.
+ * Transfer Requests tab: drivers.view or drivers.edit.
  * Mirrors backend _get_accessible_branches_for_transfers gate.
  */
 export function canViewTransfers(user: UserProfile): boolean {
@@ -415,8 +389,8 @@ export function canViewTransfers(user: UserProfile): boolean {
 /**
  * Transfer write actions (approve, decide, complete, cancel, create) for a
  * specific branch.  Branch-aware — mirrors the backend's per-branch
- * drivers.edit authority check exactly.  No settings.manage/setup.manage
- * fallback: transfer backend mutation guards require drivers.edit.
+ * drivers.edit authority check exactly: transfer backend mutation guards
+ * require drivers.edit.
  */
 export function canEditTransfers(user: UserProfile, branchId: number): boolean {
   if (isDriverUser(user)) return false;
@@ -446,12 +420,12 @@ export function hasPayItemsEdit(user: UserProfile | null | undefined): boolean {
 }
 
 /**
- * True when the user holds setup.manage in any assignment (company-wide or for one
- * Branch). Discovery only: it never proves company scope or any specific Branch.
+ * True when the user holds `payitems.view` somewhere across their assignments.
+ * Discovery only, with the same caveat as hasPayItemsEdit.
  */
-export function hasBranchSetupManage(user: UserProfile | null | undefined): boolean {
+export function hasPayItemsView(user: UserProfile | null | undefined): boolean {
   if (!user) return false;
-  return _hasAnyAuthorityPermission(user, ['setup.manage']);
+  return _hasAnyAuthorityPermission(user, ['payitems.view']);
 }
 
 /**
@@ -489,25 +463,23 @@ export function canCreatePayDefinitionDirectly(
 }
 
 /**
- * Edit a PayDefinition's applicability in one Branch: payitems.edit OR setup.manage
- * for that concrete Branch (a company-wide grant applies everywhere, a SpecificBranch
- * grant only to its own Branch). Mirrors backend branch_config permission.
+ * Edit a PayDefinition's applicability in one Branch: payitems.edit for that concrete
+ * Branch (a company-wide grant applies everywhere, a SpecificBranch grant only to its
+ * own Branch). Mirrors backend branch_config permission.
  */
 export function canConfigureBranchPayDefinitions(
   user: UserProfile | null | undefined,
   branchId: number,
 ): boolean {
-  if (!user) return false;
-  return (
-    canManagePayDefinitionsForBranch(user, branchId) ||
-    hasAuthorityPermission(user.authority, 'setup.manage', branchId)
-  );
+  return canManagePayDefinitionsForBranch(user, branchId);
 }
 
-/** Apply a PayDefinition's applicability across several Branches at once. */
+/**
+ * Apply a PayDefinition's applicability across several Branches at once.
+ * Mirrors the backend bulk branch-config permission: company-wide payitems.edit.
+ */
 export function canConfigureAllBranchPayDefinitions(
   user: UserProfile | null | undefined,
 ): boolean {
-  if (!user) return false;
-  return canGovernPayDefinitionsCompanyWide(user) || canManageSettingsAdmin(user);
+  return canGovernPayDefinitionsCompanyWide(user);
 }

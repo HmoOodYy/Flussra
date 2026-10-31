@@ -69,8 +69,7 @@ const CATALOG: CatalogPermission[] = [
   { permission_code: 'payroll.finalize', permission_name: 'Finalize Payroll', module_code: 'payroll' },
   // payroll-config / settings+payitems+payrates modules
   { permission_code: 'settings.view', permission_name: 'View Settings', module_code: 'settings' },
-  { permission_code: 'settings.manage', permission_name: 'Manage Settings', module_code: 'settings' },
-  { permission_code: 'setup.manage', permission_name: 'Manage Setup', module_code: 'settings' },
+  { permission_code: 'settings.manage', permission_name: 'Manage Company Settings', module_code: 'settings' },
   { permission_code: 'payitems.view', permission_name: 'View Pay Items', module_code: 'payitems' },
   { permission_code: 'payitems.edit', permission_name: 'Edit Pay Items', module_code: 'payitems' },
   { permission_code: 'payrates.view', permission_name: 'View Pay Rates', module_code: 'payrates' },
@@ -86,7 +85,12 @@ const CATALOG: CatalogPermission[] = [
   { permission_code: 'drivers.edit', permission_name: 'Edit Drivers', module_code: 'drivers' },
   // reporting / reports module
   { permission_code: 'reports.view', permission_name: 'View Reports', module_code: 'reports' },
-  // hidden in Roles UI, visible per-user in People UI
+  // enforced by workforce and finalized-payroll routes
+  { permission_code: 'employees.view', permission_name: 'View Employees', module_code: 'employees' },
+  { permission_code: 'employees.manage', permission_name: 'Manage Employees', module_code: 'employees' },
+  { permission_code: 'ledger.view', permission_name: 'View Finalized Payroll Library', module_code: 'ledger' },
+  { permission_code: 'ledger.audit.view', permission_name: 'View Finalized Payroll Audit', module_code: 'ledger' },
+  // checked by no backend route: hidden in both editors
   { permission_code: 'dispatch.view', permission_name: 'View Dispatch', module_code: 'dispatch' },
   { permission_code: 'dispatch.edit', permission_name: 'Edit Dispatch', module_code: 'dispatch' },
   // fake code that belongs to neither page's grouping
@@ -107,9 +111,9 @@ test('Roles groupPermissionsByDomain: payroll-setup group has correct id/label/n
   assert.deepEqual(perms.map(p => p.permission_code), PAYROLL_SETUP_CODES);
 });
 
-// ── B. Roles: group placement and setup.manage stays in payroll-config ──────
+// ── B. Roles: group placement; settings.manage has its own company-settings group ──────
 
-test('Roles groupPermissionsByDomain: payroll-setup immediately follows payroll-config; setup.manage stays put', () => {
+test('Roles groupPermissionsByDomain: payroll-setup immediately follows payroll-config; settings.manage sits in company-settings', () => {
   const grouped = groupPermissionsByDomain(CATALOG);
   const ids = grouped.map(([g]) => g.id);
   const configIdx = ids.indexOf('payroll-config');
@@ -118,10 +122,19 @@ test('Roles groupPermissionsByDomain: payroll-setup immediately follows payroll-
   assert.equal(setupIdx, configIdx + 1);
 
   const [, configPerms] = grouped.find(([g]) => g.id === 'payroll-config')!;
-  assert.ok(configPerms.some(p => p.permission_code === 'setup.manage'));
+  assert.ok(!configPerms.some(p => p.permission_code === 'settings.manage'));
+  assert.deepEqual(configPerms.map(p => p.permission_code), ['payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit']);
+
+  const [companySettings, companySettingsPerms] = grouped.find(([g]) => g.id === 'company-settings')!;
+  assert.equal(companySettings.label, 'Company Settings');
+  assert.equal(companySettings.note, 'Company profile, currency, branches and statuses. Does not include managing members, roles, pay items or pay rates.');
+  assert.deepEqual(companySettingsPerms.map(p => p.permission_code), ['settings.manage']);
 
   const [, setupPerms] = grouped.find(([g]) => g.id === 'payroll-setup')!;
-  assert.ok(!setupPerms.some(p => p.permission_code === 'setup.manage'));
+  assert.ok(!setupPerms.some(p => p.permission_code === 'settings.manage'));
+  for (const [, perms] of grouped) {
+    assert.ok(!perms.some(p => p.permission_code === 'setup.manage'));
+  }
 
   for (const [g, perms] of grouped) {
     if (g.id === 'payroll-setup') continue;
@@ -247,28 +260,32 @@ test('Roles groupPermissionsByDomain: dispatch.view/dispatch.edit and future.unk
 const PRE_U2_ROLES_GROUPS: Record<string, { label: string; codes: string[] }> = {
   'org-admin': {
     label: 'Organization Administration',
-    codes: ['company.view', 'company.edit', 'branches.view', 'branches.create', 'branches.edit', 'users.view', 'users.create', 'users.edit', 'users.deactivate', 'roles.view', 'roles.create', 'roles.edit', 'roles.delete'],
+    codes: ['branches.create', 'users.view', 'users.create', 'users.edit', 'users.deactivate', 'roles.view', 'roles.create', 'roles.edit', 'roles.delete'],
+  },
+  'company-settings': {
+    label: 'Company Settings',
+    codes: ['settings.manage'],
   },
   'payroll-ops': {
     label: 'Payroll Operations',
-    codes: ['payroll.view', 'payroll.period.create', 'payroll.entry', 'payroll.approve', 'review.decide', 'payroll.finalize'],
+    codes: ['payroll.view', 'payroll.period.create', 'payroll.entry', 'review.decide', 'payroll.finalize'],
   },
   'payroll-config': {
     label: 'Payroll Configuration',
-    codes: ['settings.view', 'settings.manage', 'setup.manage', 'payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
+    codes: ['payitems.view', 'payitems.edit', 'payrates.view', 'payrates.edit'],
   },
   'workforce': {
     label: 'Workforce',
-    codes: ['drivers.view', 'drivers.create', 'drivers.edit'],
+    codes: ['drivers.view', 'drivers.edit', 'employees.view', 'employees.manage'],
   },
   'reporting': {
     label: 'Reporting',
-    codes: ['reports.view'],
+    codes: ['reports.view', 'ledger.view', 'ledger.audit.view'],
   },
 };
 
 test('Roles BUSINESS_GROUP_DEFS: pre-existing groups unchanged, full id order correct', () => {
-  assert.deepEqual(BUSINESS_GROUP_DEFS.map(g => g.id), ['org-admin', 'payroll-ops', 'payroll-config', 'payroll-setup', 'workforce', 'reporting']);
+  assert.deepEqual(BUSINESS_GROUP_DEFS.map(g => g.id), ['org-admin', 'company-settings', 'payroll-ops', 'payroll-config', 'payroll-setup', 'workforce', 'reporting']);
   for (const [id, expected] of Object.entries(PRE_U2_ROLES_GROUPS)) {
     const g = BUSINESS_GROUP_DEFS.find(x => x.id === id);
     assert.ok(g, `group ${id} must still exist`);
@@ -277,8 +294,8 @@ test('Roles BUSINESS_GROUP_DEFS: pre-existing groups unchanged, full id order co
   }
 });
 
-test('People MODULE_ORDER: payroll_setup inserted immediately after payroll, rest unchanged', () => {
-  assert.deepEqual(MODULE_ORDER, ['company', 'roles', 'users', 'payroll', 'payroll_setup', 'payitems', 'payrates', 'drivers', 'dispatch', 'reports', 'settings']);
+test('People MODULE_ORDER: payroll_setup follows payroll; review, employees and ledger are offered; dispatch is not', () => {
+  assert.deepEqual(MODULE_ORDER, ['company', 'roles', 'users', 'payroll', 'payroll_setup', 'review', 'payitems', 'payrates', 'drivers', 'employees', 'reports', 'ledger', 'settings']);
 });
 
 const PRE_U2_ROLES_PERM_DEPS: Record<string, string> = {
@@ -326,18 +343,23 @@ const PRE_U2_PEOPLE_PERM_DEPS: Record<string, string> = {
   'settings.manage':  'settings.view',
 };
 
+const WORKFORCE_AND_LEDGER_DEPS: Record<string, string> = {
+  'employees.manage':  'employees.view',
+  'ledger.audit.view': 'ledger.view',
+};
+
 const NEW_PAYROLL_SETUP_DEPS: Record<string, string> = {
   'payroll_setup.manage':  'payroll_setup.view',
   'payroll_setup.publish': 'payroll_setup.view',
   'payroll_setup.assign':  'payroll_setup.view',
 };
 
-test('Roles PERM_DEPS: pre-existing entries unchanged, only the three new payroll_setup deps added', () => {
-  assert.deepEqual(ROLES_PERM_DEPS, { ...PRE_U2_ROLES_PERM_DEPS, ...NEW_PAYROLL_SETUP_DEPS });
+test('Roles PERM_DEPS: pre-existing entries unchanged, workforce, ledger and payroll_setup deps added', () => {
+  assert.deepEqual(ROLES_PERM_DEPS, { ...PRE_U2_ROLES_PERM_DEPS, ...WORKFORCE_AND_LEDGER_DEPS, ...NEW_PAYROLL_SETUP_DEPS });
 });
 
-test('People PERM_DEPS: pre-existing entries unchanged, only the three new payroll_setup deps added', () => {
-  assert.deepEqual(PEOPLE_PERM_DEPS, { ...PRE_U2_PEOPLE_PERM_DEPS, ...NEW_PAYROLL_SETUP_DEPS });
+test('People PERM_DEPS: pre-existing entries unchanged, workforce, ledger and payroll_setup deps added', () => {
+  assert.deepEqual(PEOPLE_PERM_DEPS, { ...PRE_U2_PEOPLE_PERM_DEPS, ...WORKFORCE_AND_LEDGER_DEPS, ...NEW_PAYROLL_SETUP_DEPS });
 });
 
 test('Roles getRiskTier: new payroll_setup tiers and existing examples unchanged', () => {

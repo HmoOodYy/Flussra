@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.access.branch_access import check_branch_access
 from app.access.permissions import check_permission
+from app.admin import employee_access
 from app.admin import security as access_security
 from app.workforce import audit as workforce_audit
 from app.workforce.effective import (
@@ -48,7 +49,7 @@ async def _may_view_access_accounts(
     """
     try:
         await access_security.ensure_any_permission(
-            company_id, user_id, db, "users.view", *access_security.ADMIN_FALLBACKS)
+            company_id, user_id, db, "users.view")
     except HTTPException as exc:
         if exc.status_code == 403:
             return False
@@ -620,10 +621,19 @@ async def update_employee(
         params[field] = value
         new_values[field] = value
     if assignments:
+        terminating = new_values.get("employment_status") == "Terminated"
+        linked_account = (
+            await employee_access.prepare_employee_termination(company_id, user_id, employee_id, db)
+            if terminating else None
+        )
         await db.execute(
             text(f"UPDATE core.Employees SET {', '.join(assignments)}, UpdatedAtUtc = NOW() WHERE EmployeeID = :employee_id AND CompanyID = :company_id"),
             params,
         )
+        if terminating:
+            await employee_access.end_terminated_employee_access(
+                company_id, user_id, employee_id, linked_account, db,
+            )
         await workforce_audit.write_workforce_audit(
             db, company_id=company_id, branch_id=target_branch, actor_user_id=user_id,
             action_code="EMPLOYEE_UPDATED", entity_name="Employees", entity_id=employee_id,
@@ -709,6 +719,9 @@ async def terminate_driver_employee(
         raise HTTPException(status_code=409, detail="Employee is already terminated.")
     if employee_row["hiredate"] is not None and data.termination_date < employee_row["hiredate"]:
         raise HTTPException(status_code=422, detail="Termination date cannot precede the Employee hire date.")
+    linked_account = await employee_access.prepare_employee_termination(
+        company_id, user_id, employee_id, db,
+    )
 
     driver = await _get_driver_row(company_id, employee_id, db)
     if driver is None:
@@ -818,6 +831,9 @@ async def terminate_driver_employee(
         WHERE CompanyID = :company_id AND EmployeeID = :employee_id
     """), {"company_id": company_id, "employee_id": employee_id,
            "termination_date": data.termination_date})
+    await employee_access.end_terminated_employee_access(
+        company_id, user_id, employee_id, linked_account, db,
+    )
 
     reason = f"Cancelled because Employee {employee_id} was terminated on {data.termination_date}."
     assignments_by_id = {a["driverassignmentid"]: a for a in assignments}

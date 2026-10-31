@@ -286,10 +286,10 @@ test('canCreateBranches: DRIVER denies despite company-wide branches.create', ()
   assert.equal(canCreateBranches(user), false);
 });
 
-test('canAccessCompanyBranches: true for company-wide setup.manage only', () => {
+test('canAccessCompanyBranches: true for company-wide settings.manage only', () => {
   const user = makeUser({
     branches: [makeBranch({ branch_id: null, scope: 'AllCompanyBranches' })],
-    authority: makeAuthority({ company_permissions: ['setup.manage'] }),
+    authority: makeAuthority({ company_permissions: ['settings.manage'] }),
   });
   assert.equal(canManageSettingsAdmin(user), true);
   assert.equal(canCreateBranches(user), false);
@@ -306,10 +306,10 @@ test('canAccessCompanyBranches: true for company-wide branches.create only', () 
   assert.equal(canAccessCompanyBranches(user), true);
 });
 
-test('canAccessCompanyBranches: false for branch-scoped setup.manage + branches.create', () => {
+test('canAccessCompanyBranches: false for branch-scoped settings.manage + branches.create', () => {
   const user = makeUser({
     authority: makeAuthority({
-      branch_permissions: [{ branch_id: 10, permissions: ['setup.manage', 'branches.create'] }],
+      branch_permissions: [{ branch_id: 10, permissions: ['settings.manage', 'branches.create'] }],
     }),
   });
   assert.equal(canAccessCompanyBranches(user), false);

@@ -5,7 +5,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.admin import assignment_validation, audit, security
+from app.admin import access_safety, assignment_validation, audit, security
 from app.admin.schemas import CompanyRoleAssignmentCreate, CompanyRoleAssignmentDetail
 
 # CompanyRole assignments (CompanyRoleID).
@@ -78,7 +78,8 @@ async def assign_company_role(
     - Revokes any existing active company-role assignment for the user.
     - Inserts a new userbranchroles row with CompanyRoleID set.
     """
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit")
+    access_safety.forbid_self_access_change(caller_id, target_user_id)
 
     # Confirm target user exists
     chk_user = await db.execute(
@@ -122,6 +123,7 @@ async def assign_company_role(
     cr_row = await assignment_validation.validate_company_role_assignment(
         company_id, user_row["employeeid"], data, db
     )
+    await access_safety.ensure_can_assign_role(company_id, caller_id, data.company_role_id, db)
     if cr_row["rolecode"] == "DRIVER":
         active_overrides = await db.execute(
             text("""
@@ -207,7 +209,8 @@ async def revoke_company_role_assignment(
     Revoke a company-role assignment (soft delete).
     Company Owner assignments cannot be revoked here — use transfer endpoint.
     """
-    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit", *security.ADMIN_FALLBACKS)
+    await security.ensure_any_permission(company_id, caller_id, db, "users.edit", "roles.edit")
+    access_safety.forbid_self_access_change(caller_id, target_user_id)
 
     user_result = await db.execute(
         text("SELECT CanLogin FROM sec.Users WHERE UserID = :uid AND CompanyID = :cid FOR UPDATE"),

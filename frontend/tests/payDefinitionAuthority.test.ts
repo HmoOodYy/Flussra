@@ -141,16 +141,16 @@ test('canGovernPayDefinitionsCompanyWide: AllCompanyBranches branch metadata + f
 
 // ── Branch applicability configuration ─────────────────────────────────────
 
-test('canConfigureBranchPayDefinitions: payitems.edit on the branch or company setup.manage authorizes; flat permissions do not', () => {
+test('canConfigureBranchPayDefinitions: payitems.edit on the branch authorizes; setup.manage and flat permissions do not', () => {
   assert.equal(canConfigureBranchPayDefinitions(null, 10), false);
   assert.equal(canConfigureBranchPayDefinitions(branchOnlyPayItemsEditUser(10), 10), true);
   assert.equal(canConfigureBranchPayDefinitions(branchOnlyPayItemsEditUser(10), 20), false);
   assert.equal(canConfigureBranchPayDefinitions(companyPayItemsEditUser(), 999), true);
-  const setupAdmin = makeUser({
+  const retiredCode = makeUser({
     authority: makeAuthority({ company_permissions: ['setup.manage'] }),
   });
-  assert.equal(canConfigureBranchPayDefinitions(setupAdmin, 10), true);
-  const flatOnly = makeUser({ active_permissions: ['payitems.edit', 'setup.manage'] });
+  assert.equal(canConfigureBranchPayDefinitions(retiredCode, 10), false);
+  const flatOnly = makeUser({ active_permissions: ['payitems.edit'] });
   assert.equal(canConfigureBranchPayDefinitions(flatOnly, 10), false);
 });
 
@@ -160,49 +160,40 @@ test('canConfigureAllBranchPayDefinitions: needs company-wide authority, not a s
   assert.equal(canConfigureAllBranchPayDefinitions(companyPayItemsEditUser()), true);
 });
 
-// ── Branch-scoped setup.manage (backend: payitems.edit OR setup.manage for the Branch) ──
+// ── Codes that are not Pay Item authority ──────────────────────────────────
 
-function branchOnlySetupManageUser(branchId: number): UserProfile {
+function userWithCompanyCodes(...codes: string[]): UserProfile {
   return makeUser({
-    active_permissions: [],
-    branches: [makeBranch({ branch_id: branchId })],
-    authority: makeAuthority({
-      branch_permissions: [{ branch_id: branchId, permissions: ['setup.manage'] }],
-    }),
+    branches: [makeBranch({ scope: 'AllCompanyBranches', branch_id: null })],
+    authority: makeAuthority({ company_permissions: codes }),
   });
 }
 
-test('branch setup.manage: configures its own Branch only', () => {
-  const user = branchOnlySetupManageUser(10);
-  assert.equal(canConfigureBranchPayDefinitions(user, 10), true);
-  assert.equal(canConfigureBranchPayDefinitions(user, 20), false);
+test('settings.manage and the retired setup.manage grant no Pay Item authority', () => {
+  for (const code of ['settings.manage', 'setup.manage']) {
+    const user = userWithCompanyCodes(code);
+    assert.equal(canViewDailyPayItems(user), false, code);
+    assert.equal(canConfigureBranchPayDefinitions(user, 10), false, code);
+    assert.equal(canConfigureAllBranchPayDefinitions(user), false, code);
+    assert.equal(canCreatePayDefinitionDirectly(user), false, code);
+    assert.equal(canGovernPayDefinitionsCompanyWide(user), false, code);
+  }
 });
 
-test('branch setup.manage: the Pay Items page is discoverable', () => {
-  assert.equal(canViewDailyPayItems(branchOnlySetupManageUser(10)), true);
+test('payitems.view alone makes the Pay Items page discoverable without any edit authority', () => {
+  const user = userWithCompanyCodes('payitems.view');
+  assert.equal(canViewDailyPayItems(user), true);
+  assert.equal(canConfigureAllBranchPayDefinitions(user), false);
+  assert.equal(canCreatePayDefinitionDirectly(user), false);
   assert.equal(canViewDailyPayItems(makeUser()), false);
 });
 
-test('branch setup.manage: grants no company-wide PayDefinition operation', () => {
-  const user = branchOnlySetupManageUser(10);
-  assert.equal(canCreatePayDefinitionDirectly(user), false);
-  assert.equal(canGovernPayDefinitionsCompanyWide(user), false);
-  assert.equal(canConfigureAllBranchPayDefinitions(user), false);
-  assert.equal(canManagePayDefinitionsForBranch(user, 10), false);
-});
-
-test('company setup.manage: configures every Branch and the all-branch operation', () => {
-  const user = makeUser({
-    branches: [makeBranch({ scope: 'AllCompanyBranches', branch_id: null })],
-    authority: makeAuthority({ company_permissions: ['setup.manage'] }),
-  });
-  assert.equal(canConfigureBranchPayDefinitions(user, 10), true);
-  assert.equal(canConfigureBranchPayDefinitions(user, 999), true);
-  assert.equal(canConfigureAllBranchPayDefinitions(user), true);
+test('a branch-only payitems.edit grant makes the Pay Items page discoverable', () => {
+  assert.equal(canViewDailyPayItems(branchOnlyPayItemsEditUser(10)), true);
 });
 
 test('setup.manage in flat active_permissions alone is never authority', () => {
-  const user = makeUser({ active_permissions: ['setup.manage'] });
+  const user = makeUser({ active_permissions: ['setup.manage', 'settings.manage'] });
   assert.equal(canConfigureBranchPayDefinitions(user, 10), false);
   assert.equal(canViewDailyPayItems(user), false);
 });

@@ -747,6 +747,30 @@ class TestPermissionDependencyNormalization:
         assert "payroll.view" in codes
 
     @pytest.mark.asyncio
+    async def test_employees_manage_auto_adds_employees_view(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep employees.manage")
+        codes = await self._set_perms(client, auth_token, rid, ["employees.manage"])
+        assert codes == {"employees.manage", "employees.view"}
+
+    @pytest.mark.asyncio
+    async def test_employees_view_alone_needs_no_parent(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep employees.view alone")
+        codes = await self._set_perms(client, auth_token, rid, ["employees.view"])
+        assert codes == {"employees.view"}
+
+    @pytest.mark.asyncio
+    async def test_ledger_audit_view_auto_adds_ledger_view(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep ledger.audit.view")
+        codes = await self._set_perms(client, auth_token, rid, ["ledger.audit.view"])
+        assert codes == {"ledger.audit.view", "ledger.view"}
+
+    @pytest.mark.asyncio
+    async def test_ledger_view_alone_does_not_grant_audit_history(self, client, auth_token):
+        rid = await self._make_role(client, auth_token, "Dep ledger.view alone")
+        codes = await self._set_perms(client, auth_token, rid, ["ledger.view"])
+        assert codes == {"ledger.view"}
+
+    @pytest.mark.asyncio
     async def test_payroll_view_alone_needs_no_parent(self, client, auth_token):
         """payroll.view has no parent — saving it alone must not inject anything extra."""
         rid = await self._make_role(client, auth_token, "Dep payroll.view alone")
@@ -879,18 +903,42 @@ class TestPermissionsListFiltering:
         )
 
     @pytest.mark.asyncio
-    async def test_ui_only_false_includes_legacy(self, client, auth_token):
-        """ui_only=false should expose legacy codes beyond the default set."""
+    async def test_default_list_includes_enforced_employee_and_ledger_codes(self, client, auth_token):
+        """Workforce and finalized-payroll permissions are enforced by routes, so the
+        role editor and the per-user picker must be able to grant them."""
+        resp = await client.get("/admin/permissions", headers=auth_headers(auth_token))
+        assert resp.status_code == 200
+        by_code = {p["permission_code"]: p["module_code"] for p in resp.json()}
+        assert by_code.get("employees.view") == "employees"
+        assert by_code.get("employees.manage") == "employees"
+        assert by_code.get("ledger.view") == "ledger"
+        assert by_code.get("ledger.audit.view") == "ledger"
+
+    @pytest.mark.asyncio
+    async def test_default_list_only_offers_assignable_modules(self, client, auth_token):
+        ui = (await client.get("/admin/permissions", headers=auth_headers(auth_token))).json()
+        full = (await client.get(
+            "/admin/permissions?ui_only=false", headers=auth_headers(auth_token),
+        )).json()
+        assert {p["permission_code"] for p in ui} <= {p["permission_code"] for p in full}
+        assert {p["module_code"] for p in ui} <= {
+            "company", "roles", "users", "payroll", "payitems", "payrates", "drivers", "dispatch",
+            "reports", "settings", "payroll_setup", "review", "employees", "ledger",
+        }
+
+    @pytest.mark.asyncio
+    async def test_ui_only_false_lists_the_whole_catalogue_without_setup_manage(self, client, auth_token):
+        """ui_only=false lists every catalogued code; the retired setup.manage is not one."""
+        default = await client.get("/admin/permissions", headers=auth_headers(auth_token))
         resp = await client.get(
             "/admin/permissions?ui_only=false",
             headers=auth_headers(auth_token),
         )
         assert resp.status_code == 200
         codes = {p["permission_code"] for p in resp.json()}
-        # At least one truly-legacy code (not in default list) should appear
-        assert any(c in codes for c in ("setup.manage",)), (
-            "Expected at least one legacy code with ui_only=false"
-        )
+        assert {p["permission_code"] for p in default.json()} <= codes
+        assert "settings.manage" in codes
+        assert "setup.manage" not in codes
 
 
 # =============================================================================
@@ -952,12 +1000,12 @@ class TestActivPermissionsInMe:
         assert len(perms) > 0
 
     @pytest.mark.asyncio
-    async def test_admin_has_setup_manage_permission(self, client, auth_token):
+    async def test_admin_has_settings_manage_permission(self, client, auth_token):
         """The seeded admin has a company role with all permissions seeded."""
         resp = await client.get("/auth/me", headers=auth_headers(auth_token))
         perms = resp.json()["active_permissions"]
-        # Should have at least the legacy code and the new settings code
-        assert "setup.manage" in perms or "settings.manage" in perms
+        assert "settings.manage" in perms
+        assert "setup.manage" not in perms
 
     @pytest.mark.asyncio
     async def test_login_response_includes_active_permissions(self, client):
@@ -1004,7 +1052,7 @@ class TestPermissionFunctionNewPath:
 
     @pytest.mark.asyncio
     async def test_branch_user_blocked_from_admin_endpoints(self, client, branch_user_token):
-        """branch_user has no setup.manage permission -- should get 403."""
+        """branch_user has no users.view permission -- should get 403."""
         resp = await client.get("/admin/users", headers=auth_headers(branch_user_token))
         assert resp.status_code == 403
 

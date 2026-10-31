@@ -1302,11 +1302,11 @@ async def test_applied_change_rejects_nullable_or_incomplete_source_evidence(
     assert assignment_id > 0
 
 
-async def test_forward_upgrade_preserves_populated_0095_import_and_payroll_evidence(pg_instance):
+async def test_forward_upgrade_preserves_populated_0097_import_and_payroll_evidence(pg_instance):
     from scripts.import_benchmark_support import application, seed_period
 
-    with _disposable_database(pg_instance, "import_rule_lifecycle_0095") as (env, dsn):
-        upgraded = _alembic(env, "upgrade", "0095")
+    with _disposable_database(pg_instance, "import_rule_lifecycle_0097") as (env, dsn):
+        upgraded = _alembic(env, "upgrade", "0097")
         assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
         async with application(dsn) as (client, engine, _app):
             fixture = await seed_period(client, engine, dsn, drivers=2, definitions=1, days=7)
@@ -1380,7 +1380,7 @@ async def test_forward_upgrade_preserves_populated_0095_import_and_payroll_evide
                     WHERE PayrollPeriodID=:pid AND CompanyID=:cid
                 """), {"pid": period["payroll_period_id"], "cid": tenant.company_id})
 
-        result = _alembic(env, "upgrade", "0096")
+        result = _alembic(env, "upgrade", "0098")
         assert result.returncode == 0, result.stdout + result.stderr
         import psycopg2
         with psycopg2.connect(**dsn) as conn, conn.cursor() as cur:
@@ -1405,7 +1405,7 @@ async def test_forward_upgrade_preserves_populated_0095_import_and_payroll_evide
                 cur.execute(f"SELECT count(*) FROM import.{table} WHERE {import_column}=%s", (import_id,))
                 assert cur.fetchone()[0] == 0, table
             cur.execute("SELECT version_num FROM public.alembic_version")
-            assert cur.fetchone()[0] == "0096"
+            assert cur.fetchone()[0] == "0098"
 
 
 async def test_period_day_snapshot_mismatch_preserves_existing_preview_and_pending_rules(

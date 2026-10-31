@@ -2,10 +2,10 @@
  * Draft editor modal (create + edit) for the company-owned Payroll Policies
  * page (Phase 6 Unit A). Extracted from PayrollSetupsPage.tsx.
  *
- * The 2-normal-days-off cap enforced here (disabling the other day toggles,
+ * The 3-normal-days-off cap enforced here (disabling the other day toggles,
  * and validateDraftForm's matching check) is UI guidance only — the backend
  * (INVALID_NORMAL_DAYS_OFF) remains the only real enforcement point. A
- * prefilled source with more than 2 days off (should not exist) is shown
+ * prefilled source with more than 3 days off (should not exist) is shown
  * as-is, with the note, and is never silently changed.
  */
 import { useMemo, useState } from 'react';
@@ -26,7 +26,7 @@ import {
 } from '../../../lib/payrollSetupApi';
 import { readApiError } from '../../../lib/payrollSetupErrors';
 import type { ApiErrorInfo } from '../../../lib/payrollSetupErrors';
-import { WEEKDAYS, canAddDayOff, frequencyLabel, friendlyScheduleSummary, toggleDay } from '../../../lib/payrollSetupReadiness';
+import { MAX_NORMAL_DAYS_OFF, WEEKDAYS, canAddDayOff, frequencyLabel, friendlyScheduleSummary, toggleDay } from '../../../lib/payrollSetupReadiness';
 import { formatIsoLong, isValidIsoDate } from '../../../lib/isoDate';
 import { buildAutoPreviewKey, useAutoPreview } from '../../../lib/useAutoPreview';
 import { useBoundaryChoices } from '../../../lib/useBoundaryChoices';
@@ -54,6 +54,7 @@ import {
   type InlinePreviewInputs,
   type PreviewInputs,
 } from './publishPreview';
+import { PayRuleImpactNotice } from './PayRuleImpactNotice';
 import type { VersionResponse } from '../../../types/payrollSetup';
 import { startingPointLabel } from './policyDetailView';
 
@@ -488,7 +489,7 @@ export function DraftEditorModal({
                             }
                             disabled={disabled}
                             aria-disabled={disabled}
-                            title={disabled && !active && !mutating ? 'You can choose up to two normal days off.' : undefined}
+                            title={disabled && !active && !mutating ? 'You can choose up to three normal days off.' : undefined}
                           >
                             {day.short}
                           </button>
@@ -496,9 +497,9 @@ export function DraftEditorModal({
                       })}
                     </div>
                     <p className={styles.fieldHint}>
-                      {daysSelectedCount >= 2
-                        ? 'You can choose up to two normal days off.'
-                        : 'Choose up to two normal days off.'}
+                      {daysSelectedCount >= MAX_NORMAL_DAYS_OFF
+                        ? 'You can choose up to three normal days off.'
+                        : 'Choose up to three normal days off.'}
                     </p>
                   </div>
                 )}
@@ -589,6 +590,7 @@ export function DraftEditorModal({
                         }}
                       />
                     )}
+                    <PayRuleImpactNotice rules={storedPreview.response.affected_pay_rules} />
                   </div>
                 )}
               </div>
