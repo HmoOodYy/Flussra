@@ -122,7 +122,7 @@ async def test_header_page_exposes_server_normalized_label_for_unique_and_duplic
     period, _grid = await open_period_with_grid(p3c_client, p3c_engine, tenant)
     response = await _upload(p3c_client, tenant, period, [
         ("unicode-a.csv", "Straße,Hours,Hours\n001,1,2\n".encode()),
-        ("unicode-b.csv", "STRASSE,Hours,Bonus\n001,3,4\n".encode()),
+        ("unicode-b.csv", b"STRASSE,Hours,Bonus\n001,3,4\n"),
     ])
     assert response.status_code == 200, response.text
     body = response.json()

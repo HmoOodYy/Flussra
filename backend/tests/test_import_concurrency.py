@@ -545,7 +545,8 @@ async def test_mapping_mutation_retains_bounded_admission_after_body_parsing(
                              "inputs": [{"header": target["code"]}],
                              "expected_head_revision": 0, "replace_existing": False}]}
 
-    monkeypatch.setattr(p3c_app.state, "import_admission", anyio.CapacityLimiter(1))
+    # Patch the State's mapping: undoing setattr on a State deletes the limiter instead of restoring it.
+    monkeypatch.setitem(p3c_app.state._state, "import_admission", anyio.CapacityLimiter(1))
     entered, release = threading.Event(), threading.Event()
 
     # Pause the service write while its request owns the single admission slot.
